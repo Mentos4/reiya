@@ -1,0 +1,24 @@
+[app]
+title = Reiya Account Manager
+package.name = reiyaaccountmanager
+package.domain = org.reiya
+source.dir = .
+source.include_exts = py,png,jpg,kv,atlas,json
+version = 1.0
+
+requirements = python3,kivy==2.3.0,requests,certifi,charset-normalizer,idna,urllib3
+
+orientation = portrait
+fullscreen = 0
+
+android.minapi = 21
+android.api = 33
+android.ndk = 25b
+android.accept_sdk_license = True
+android.arch = armeabi-v7a
+
+android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,QUERY_ALL_PACKAGES,PACKAGE_USAGE_STATS,FOREGROUND_SERVICE
+
+[buildozer]
+log_level = 2
+warn_on_root = 1
