@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}-v2
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-v3
           restore-keys: buildozer-
 
       - name: Install system dependencies
@@ -34,13 +34,40 @@ jobs:
             autoconf libtool pkg-config cmake \
             libltdl-dev zlib1g-dev
 
-      - name: Install Buildozer and dependencies
+      - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install \
-            buildozer==1.5.0 \
-            python-for-android==2024.1.21 \
-            cython==0.29.33
+          pip install buildozer cython==0.29.33
+
+      - name: Pin p4a python3 recipe to 3.11.9
+        run: |
+          python3 - <<'PYEOF'
+          import os, re, inspect
+          import pythonforandroid.recipes.python3 as r
+          path = inspect.getfile(r)
+          print(f"Patching recipe at: {path}")
+          with open(path) as f:
+              content = f.read()
+          # Show current version
+          for line in content.splitlines():
+              if 'version' in line.lower() and ('3.' in line or 'url' in line.lower()):
+                  print("BEFORE:", line.strip())
+          # Pin to 3.11.9
+          content = re.sub(
+              r"version\s*=\s*['\"][3-9]\.\d+\.\d+['\"]",
+              "version = '3.11.9'",
+              content
+          )
+          # Remove sha512sum (checksum is version-specific; skip verification)
+          content = re.sub(r"\n\s*sha512sum\s*=\s*'[^']*'", "", content)
+          with open(path, 'w') as f:
+              f.write(content)
+          # Verify
+          for line in content.splitlines():
+              if 'version' in line.lower() and ('3.' in line or 'url' in line.lower()):
+                  print("AFTER: ", line.strip())
+          print("Recipe patched successfully.")
+          PYEOF
 
       - name: Accept Android licenses
         run: |
