@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}-v4
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-v5
 
       - name: Install system dependencies
         run: |
@@ -36,35 +36,50 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer python-for-android==2024.1.21 cython==0.29.33
+          pip install buildozer python-for-android==2024.1.21 "cython==3.0.11"
 
       - name: Pin p4a python3 recipe to 3.11.9
         run: |
           python3 - <<'PYEOF'
-          import os, re, inspect
+          import re, inspect, sys
           import pythonforandroid.recipes.python3 as r
           path = inspect.getfile(r)
           print(f"Patching recipe at: {path}")
           with open(path) as f:
-              content = f.read()
-          # Show current version
-          for line in content.splitlines():
-              if 'version' in line.lower() and ('3.' in line or 'url' in line.lower()):
-                  print("BEFORE:", line.strip())
-          # Pin to 3.11.9
-          content = re.sub(
-              r"version\s*=\s*['\"][3-9]\.\d+\.\d+['\"]",
-              "version = '3.11.9'",
-              content
+              original = f.read()
+
+          print("=== BEFORE ===")
+          for line in original.splitlines():
+              s = line.strip()
+              if any(k in s for k in ('version', 'sha', 'md5', 'url')):
+                  print(" ", s)
+
+          # Replace version — handles single AND double quotes
+          patched = re.sub(
+              r"""(version\s*=\s*)(['"])[3-9]\.\d+[^'"]*(['"])""",
+              r"\g<1>\g<2>3.11.9\g<3>",
+              original,
           )
-          # Remove sha512sum (checksum is version-specific; skip verification)
-          content = re.sub(r"\n\s*sha512sum\s*=\s*'[^']*'", "", content)
+
+          # Remove ALL checksum lines (sha512sum, sha256sum, md5sum) regardless of quote style
+          patched = re.sub(
+              r'\n[ \t]*(sha\d+sum|md5sum)\s*=\s*[\'"][^\'"]*[\'"]',
+              '',
+              patched,
+          )
+
+          if patched == original:
+              print("ERROR: recipe regex did not match — no changes made!", file=sys.stderr)
+              sys.exit(1)
+
           with open(path, 'w') as f:
-              f.write(content)
-          # Verify
-          for line in content.splitlines():
-              if 'version' in line.lower() and ('3.' in line or 'url' in line.lower()):
-                  print("AFTER: ", line.strip())
+              f.write(patched)
+
+          print("=== AFTER ===")
+          for line in patched.splitlines():
+              s = line.strip()
+              if any(k in s for k in ('version', 'sha', 'md5', 'url')):
+                  print(" ", s)
           print("Recipe patched successfully.")
           PYEOF
 
