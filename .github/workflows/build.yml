@@ -37,7 +37,7 @@ jobs:
       - name: Install Buildozer and Cython
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install buildozer cython==0.29.33
+          pip install buildozer python-for-android==2024.1.21 cython==0.29.33
 
       - name: Pin p4a python3 recipe to 3.11.9
         run: |
