@@ -23,7 +23,6 @@ jobs:
         with:
           path: ~/.buildozer
           key: buildozer-${{ hashFiles('buildozer.spec') }}-v4
-          restore-keys: buildozer-
 
       - name: Install system dependencies
         run: |
