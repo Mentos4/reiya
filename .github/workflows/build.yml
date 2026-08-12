@@ -45,7 +45,7 @@ jobs:
 
       - name: Install Buildozer and Cython
         run: |
-          pip install --upgrade pip setuptools wheel
+          pip install "pip<24.0" setuptools wheel
           pip install buildozer python-for-android==2024.1.21 "cython==3.0.11"
 
       - name: Accept Android licenses
