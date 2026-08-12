@@ -8,7 +8,7 @@ def init_python_for_android():
         # Upgrade pip to a compatible version
         subprocess.check_call([
             venv_python, '-m', 'pip', 'install', 
-            '--upgrade', 'pip==24.0.1'
+            '--upgrade', 'pip<24.1'
         ])
         print("✓ Pip upgraded successfully")
     except Exception as e:

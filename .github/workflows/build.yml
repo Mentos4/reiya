@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
-          key: buildozer-${{ hashFiles('buildozer.spec') }}-v8
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-v9
 
       - name: Install system dependencies
         run: |
@@ -45,7 +45,7 @@ jobs:
 
       - name: Install Buildozer and Cython
         run: |
-          pip install "pip==24.0.1" setuptools wheel
+          pip install "pip<24.1" setuptools wheel
           pip install buildozer python-for-android "cython==3.0.11"
 
       - name: Accept Android licenses
