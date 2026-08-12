@@ -19,6 +19,8 @@ android.archs = arm64-v8a, armeabi-v7a
 
 android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,QUERY_ALL_PACKAGES,PACKAGE_USAGE_STATS,FOREGROUND_SERVICE
 
+p4a.hook = buildozer_hook.py
+
 [buildozer]
 log_level = 2
 warn_on_root = 1
