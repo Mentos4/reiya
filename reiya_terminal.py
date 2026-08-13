@@ -3,6 +3,7 @@
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
+- Smart Package Sorting (Roblox & Executor packages placed at the top of the list)
 - Game launching (Roblox intents & link parsing)
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -153,8 +154,14 @@ def get_installed_packages():
     return sorted(list(packages))
 
 def get_roblox_packages():
-    """Detect all installed packages dynamically."""
-    return get_installed_packages()
+    """Detect all installed packages dynamically, prioritizing Roblox/Executors at the top."""
+    all_pkgs = get_installed_packages()
+    keywords = ['roblox', 'noka', 'blox', 'delta', 'arceus', 'executor']
+
+    roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
+    other_pkgs = [p for p in all_pkgs if p not in roblox_pkgs]
+
+    return roblox_pkgs + other_pkgs
 
 def is_app_running(package):
     """Check if process is currently running using pidof and ps -A."""
@@ -738,14 +745,25 @@ def interactive_menu():
             show_status()
             input("\nPress Enter to return to menu...")
         elif choice == '2':
-            pkgs = get_roblox_packages()
-            print(f"\n--- [ ALL DETECTED INSTALLED PACKAGES ({len(pkgs)}) ] ---")
-            if not pkgs:
-                print("  [!] No packages automatically detected via sandbox permissions.")
-            else:
-                for idx, p in enumerate(pkgs, 1):
+            all_pkgs = get_roblox_packages()
+            keywords = ['roblox', 'noka', 'blox', 'delta', 'arceus', 'executor']
+
+            roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
+            other_pkgs = [p for p in all_pkgs if p not in roblox_pkgs]
+
+            print(f"\n--- [ DETECTED PACKAGES ({len(all_pkgs)}) ] ---")
+            if roblox_pkgs:
+                print("\n=== [ RECOMMENDED: ROBLOX & EXECUTORS ] ===")
+                for idx, p in enumerate(roblox_pkgs, 1):
                     sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
-                    print(f"  {idx}. {p} [{sel}]")
+                    print(f"  {idx}. {p:<35} [{sel}]")
+
+            if other_pkgs:
+                start_idx = len(roblox_pkgs) + 1
+                print("\n=== [ OTHER INSTALLED APPS ] ===")
+                for idx, p in enumerate(other_pkgs, start_idx):
+                    sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
+                    print(f"  {idx}. {p:<35} [{sel}]")
 
             print("\nSelection Options:")
             print("  - Enter numbers (e.g. 1,2) to toggle packages from list")
@@ -769,8 +787,8 @@ def interactive_menu():
                         sel_set.add(item)
                     elif item.isdigit():
                         i = int(item) - 1
-                        if 0 <= i < len(pkgs):
-                            target = pkgs[i]
+                        if 0 <= i < len(all_pkgs):
+                            target = all_pkgs[i]
                             if target in sel_set:
                                 sel_set.remove(target)
                             else:
