@@ -3,7 +3,7 @@
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
-- Roblox & Executor ONLY Filtering (detects all original Roblox apps & clones: com.roblox.client, free.nokaA, Delta, etc.)
+- FULL AUTOMATIC ROBLOX & CLONE SELECTION (Auto-detects and auto-selects ALL Roblox apps & clones: com.roblox.client, free.nokaA, Delta, etc.)
 - Direct Game Launching via Place ID or Private Server Link
 - Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
 - Package-targeted Intent launching (bypasses "Open With" dialogs completely)
@@ -87,7 +87,6 @@ def save_config():
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2, default=str)
-    print(f"[+] Configuration saved to {CONFIG_FILE}")
 
 # ==============================================================================
 # 1. APP LAUNCHER, WINDOW TILING & PACKAGE MANAGEMENT
@@ -167,6 +166,15 @@ def get_roblox_packages():
 
     roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
     return sorted(list(set(roblox_pkgs)))
+
+def auto_select_roblox_packages():
+    """Auto-detect and AUTO-SELECT all installed Roblox packages and clones automatically."""
+    detected = get_roblox_packages()
+    if detected:
+        config['selected_packages'] = detected
+        save_config()
+        return detected
+    return config.get('selected_packages', [])
 
 def is_app_running(package):
     """Check if process is currently running using pidof and ps -A."""
@@ -301,8 +309,7 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     if packages is None:
         packages = config.get('selected_packages', [])
     if not packages:
-        print("[!] No packages specified to sort.")
-        return
+        packages = auto_select_roblox_packages()
 
     if not game_id:
         game_id = config.get('game_id', '')
@@ -567,7 +574,10 @@ class TerminalRejoinLoop:
 
         packages = cfg.get('selected_packages', [])
         if not packages:
-            self.log("No packages selected! Use option 2 to select packages.")
+            packages = auto_select_roblox_packages()
+
+        if not packages:
+            self.log("No Roblox packages detected! Please install Roblox or a Roblox Clone app.")
             return False
 
         self.running = True
@@ -734,8 +744,8 @@ def show_status():
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
     print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
 
-    roblox_pkgs = get_roblox_packages()
-    print(f"\nRoblox & Executor Packages ({len(roblox_pkgs)}):")
+    roblox_pkgs = auto_select_roblox_packages()
+    print(f"\nAuto-Detected Roblox & Executor Packages ({len(roblox_pkgs)}):")
     for pkg in roblox_pkgs:
         running = is_app_running(pkg)
         status_str = "RUNNING" if running else "STOPPED"
@@ -746,10 +756,12 @@ def show_status():
 
 def interactive_menu():
     load_config()
+    auto_select_roblox_packages()
+
     while True:
         print_banner()
         print("1. View System & Package Status")
-        print("2. Scan & Select Roblox Packages")
+        print("2. Scan & Manage Roblox Packages (AUTO-SELECTED)")
         print("3. Configure Game Setup (Place ID / Private Server Link)")
         print("4. Configure Webhook Settings")
         print("5. Configure Timing & Auto-rejoin Options")
@@ -767,22 +779,22 @@ def interactive_menu():
             show_status()
             input("\nPress Enter to return to menu...")
         elif choice == '2':
-            roblox_pkgs = get_roblox_packages()
+            roblox_pkgs = auto_select_roblox_packages()
 
-            print(f"\n--- [ DETECTED ROBLOX & EXECUTOR PACKAGES ({len(roblox_pkgs)}) ] ---")
+            print(f"\n--- [ AUTO-DETECTED ROBLOX PACKAGES ({len(roblox_pkgs)}) ] ---")
             if not roblox_pkgs:
                 print("  [!] No standard Roblox/Executor packages auto-detected.")
                 print("  -> Use option 'M' below or type your package name directly!")
             else:
                 for idx, p in enumerate(roblox_pkgs, 1):
-                    sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
+                    sel = "AUTO-SELECTED" if p in config.get('selected_packages', []) else "---"
                     print(f"  {idx}. {p:<35} [{sel}]")
 
             print("\nSelection Options:")
             print("  - Enter numbers (e.g. 1,2) to toggle packages from list")
             print("  - Type package name directly (e.g. com.noka.client or com.roblox.client)")
             print("  - Type 'M' to prompt for custom package name")
-            print("  - Press Enter to keep current selection")
+            print("  - Press Enter to keep auto-selected packages")
             indices = input("\nChoice: ").strip()
 
             if indices.upper() == 'M':
@@ -934,6 +946,8 @@ def interactive_menu():
 
         elif choice == '11':
             pkgs = config.get('selected_packages', [])
+            if not pkgs:
+                pkgs = auto_select_roblox_packages()
             gid = config.get('game_id', '')
             if not pkgs or not gid:
                 print("[!] Please configure selected packages and game ID first.")
@@ -971,6 +985,7 @@ def main():
     args = parser.parse_args()
 
     load_config()
+    auto_select_roblox_packages()
 
     if args.scan:
         show_status()
