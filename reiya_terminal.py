@@ -225,11 +225,43 @@ def is_app_running(package):
 
 def is_app_in_game(package):
     """
-    Simplified reliable check: if the process is alive, the app is 'in-game' (or loading).
-    Complex window/activity inspection fails when Termux is focused in split-screen
-    because mCurrentFocus always shows Termux, not Roblox.
-    Home Screen keep-alive is handled separately by a periodic game intent re-send.
+    Check if the package is in-game vs on the Roblox Home Screen.
+    Uses 'dumpsys activity top' which shows the ACTUAL top visible activity
+    regardless of which window (Termux vs Roblox) currently has focus.
     """
+    HOME_SIGNALS = [
+        'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
+        'launchactivity', 'homeactivity', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'activitymain', 'robloxmain', 'lobbyactivity',
+    ]
+
+    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
+        try:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            content = res.stdout
+            if not content.strip():
+                continue
+
+            found = False
+            for line in content.split('\n'):
+                if package not in line:
+                    continue
+                found = True
+                line_lower = line.lower()
+                # Home Screen activity found→ not in game
+                if any(sig in line_lower for sig in HOME_SIGNALS):
+                    return False
+                # Package visible in top with a non-home activity → in game
+                if any(kw in line for kw in ['ACTIVITY', 'TASK', 'Hist', 'proc=', 'ActivityRecord']):
+                    return True
+
+            if found:
+                # Package appears in top output but no clear activity line matched → assume in-game
+                return True
+        except Exception:
+            pass
+
+    # Could not determine → fall back to simple process check
     return is_app_running(package)
 
 
@@ -710,10 +742,10 @@ class TerminalRejoinLoop:
         auto_clear      = cfg.get('clear_cache', False)
         auto_sort       = cfg.get('auto_sort', True)
         window_mode     = cfg.get('window_mode', 'left_stack')
-        # After launching, wait this long before checking status again (game load time)
-        LAUNCH_GRACE    = 50
-        # Every N seconds while running, re-send game intent as Home Screen keep-alive
-        KEEPALIVE_SECS  = 300  # 5 minutes
+        # Short grace period — game opens directly without Home Screen, so 12s is enough
+        LAUNCH_GRACE    = 12
+        # Re-send game intent every 2 minutes as Home Screen keep-alive
+        KEEPALIVE_SECS  = 120
 
         w, h = get_screen_size()
         total_apps = len(packages)
@@ -765,15 +797,20 @@ class TerminalRejoinLoop:
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
                 else:
-                    # ★ PROCESS ALIVE → INGAME
-                    self.set_status(pkg, 'Ingame')
-
-                    # Keep-alive: re-send game intent every 5 minutes
-                    # Handles case where user drifts back to Roblox Home Screen
-                    if now - last_keepalive.get(pkg, 0) >= KEEPALIVE_SECS:
+                    # ★ PROCESS ALIVE → check if actually in-game or on Home Screen
+                    in_game = is_app_in_game(pkg)
+                    if in_game:
+                        self.set_status(pkg, 'Ingame')
+                        last_keepalive[pkg] = now  # reset keepalive timer while in-game
+                    else:
+                        # HOME SCREEN detected → send game intent
+                        self.set_status(pkg, 'Home Page')
+                        time.sleep(0.3)
+                        self.set_status(pkg, 'Rejoining')
                         bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        self.last_launch[pkg] = now  # reset grace period
                         last_keepalive[pkg] = now
+                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
             time.sleep(check_interval)
 
