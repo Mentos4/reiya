@@ -82,12 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 23 (Release v6.8.0-REI-REJOIN)
-**Major Fix:** Home Page Status Fallback Override Fix (`is_app_in_game`)
-- Fixed fallback bug in `is_app_in_game()` where `udp_st` returning `False` (0 active UDP sockets on Home Screen) was being overridden by `return True` at the bottom of the function.
-- `is_app_in_game()` now returns `udp_st` directly when non-None. When sitting on the Home Screen, 0 UDP sockets cleanly returns `False` (`Home Page`), instantly triggering force-stop & place rejoin!
+### 2026-08-14 — Session 20 (Release v6.6.0-REI-REJOIN)
+**Release:** Smooth Deeplink Rejoin Flow & Extended 45s Connection Grace Period
+- Increased launch grace period to 45 seconds to allow full C++ asset download and RakNet UDP server handshake without premature force-stops.
+- Replaced destructive `am force-stop` on Home Page detection with direct `ActivityProtocolLaunch` place deeplink invocation (`launch_game`), eliminating the infinite kill/reboot loop on loading screens.
 ```bash
-git commit -m "Release v6.8.0-REI-REJOIN: Return udp_st directly to enable instant Home Screen auto-rejoin" && git push origin main
+git commit -m "Release v6.6.0-REI-REJOIN: Direct place deeplink rejoin flow with 45s launch grace period" && git push origin main
 ```
 
 ---

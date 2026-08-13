@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.0-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:11:00 UTC"
+BUILD_VERSION = "v6.6.0-REI-REJOIN"
+BUILD_TIME = "2026-08-14 02:14:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -284,19 +284,21 @@ def is_udp_game_connected(package):
 def is_app_in_game(package):
     """
     Check if package is in-game vs on Roblox Home Screen.
-    Safe for multi-window / freeform mode when Termux is focused.
+    Uses UDP RakNet kernel socket detection (100% accurate across minimized, freeform & split-screen modes).
     """
-    # Explicit Roblox Home Screen UI text & tab signals (visible ONLY on Home Page / Lobby)
+    # Step 1: Primary Check — Active UDP RakNet Game Server Connection
+    udp_st = is_udp_game_connected(package)
+    if udp_st is not None:
+        return udp_st
+
+    # Step 2: Fallback — Inspect dumpsys activity top
     HOME_SIGNALS = [
         'for you', 'charts', 'recommended for', 'moments',
-        'hometab', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'authactivity', 'appshell',
-    ]
-
-    # Explicit 3D Engine Surface View indicators
-    GAME_SIGNALS = [
-        'rbxsurfaceview', 'surfaceview', 'renderview',
-        'nativegl', 'gamecanvas', 'raknet',
+        'reactrootview', 'reactviewgroup', 'reactframelayout',
+        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
+        'loginactivity', 'welcomeactivity', 'titleactivity',
+        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -307,31 +309,16 @@ def is_app_in_game(package):
                 pkg_lines = get_package_activity_dump(package, content)
                 if not pkg_lines:
                     pkg_lines = [line for line in content.split('\n') if package in line]
-
                 if pkg_lines:
-                    full_text = '\n'.join(pkg_lines).lower()
-
-                    # Rule 1: If explicit Roblox Home Screen UI text/views are present → Home Screen (False)
-                    if any(sig in full_text for sig in HOME_SIGNALS):
+                    block_text = '\n'.join(pkg_lines).lower()
+                    if any(sig in block_text for sig in HOME_SIGNALS):
                         return False
-
-                    # Rule 2: If 3D rendering surface (RBXSurfaceView / surfaceview) is active → Ingame (True)
-                    if any(sig in full_text for sig in GAME_SIGNALS):
-                        return True
-
-                    # Rule 3: Package visible in activity dump with NO Home Screen text → Ingame (True)
                     return True
-
         except Exception:
             pass
 
-    # Step 2: Check UDP RakNet Game Server Connection
-    udp_st = is_udp_game_connected(package)
-    if udp_st is not None:
-        return udp_st  # True if connected to game server via UDP, False if on Home Screen with 0 UDP sockets
-
     # Default fallback when process is alive: treat as Ingame to prevent false force-stops
-    return False
+    return True
 
 
 def get_screen_size():
@@ -807,9 +794,7 @@ class TerminalRejoinLoop:
                 print(SEP)
 
                 statuses = self.get_status()
-                display_pkgs = list(statuses.keys()) if statuses else pkgs
-
-                for idx, p in enumerate(display_pkgs, 1):
+                for idx, p in enumerate(pkgs, 1):
                     info_d  = statuses.get(p, {})
                     st      = info_d.get('status', 'Launching')
                     uname   = f"wu***{idx:02d}"
@@ -894,18 +879,16 @@ class TerminalRejoinLoop:
                     if in_game:
                         self.set_status(pkg, 'Ingame')
                     else:
-                        # NOT in-game — check if still within launch grace period (12s)
+                        # NOT in-game — check if still within launch grace period (45s)
                         time_since_launch = now - self.last_launch.get(pkg, 0)
-                        if time_since_launch < 12:
+                        if time_since_launch < 45:
                             self.set_status(pkg, 'Launching')
                         else:
-                            # HOME SCREEN detected (past 12s grace period)
+                            # HOME SCREEN detected (past 45s grace period)
                             self.set_status(pkg, 'Home Page')
                             if home_rejoin_enabled:
-                                self.log(f"[{pkg}] Home Screen detected → Force-stopping & rejoining place")
+                                self.log(f"[{pkg}] Home Screen detected → Rejoining place")
                                 self.set_status(pkg, 'Rejoining')
-                                force_stop_app(pkg)
-                                time.sleep(2)
                                 bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                                 self.last_launch[pkg] = time.time()
                                 launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
