@@ -2,7 +2,7 @@
 """
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
-- VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, manual entry)
+- VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - Game launching (Roblox intents & link parsing)
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -741,7 +741,7 @@ def interactive_menu():
             pkgs = get_roblox_packages()
             print(f"\n--- [ ALL DETECTED INSTALLED PACKAGES ({len(pkgs)}) ] ---")
             if not pkgs:
-                print("  [!] No packages automatically detected.")
+                print("  [!] No packages automatically detected via sandbox permissions.")
             else:
                 for idx, p in enumerate(pkgs, 1):
                     sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
@@ -749,12 +749,13 @@ def interactive_menu():
 
             print("\nSelection Options:")
             print("  - Enter numbers (e.g. 1,2) to toggle packages from list")
-            print("  - Type 'M' to manually enter custom package name (e.g. com.noka.client)")
+            print("  - Type package name directly (e.g. com.noka.client or com.roblox.client)")
+            print("  - Type 'M' to prompt for custom package name")
             print("  - Press Enter to keep current selection")
             indices = input("\nChoice: ").strip()
 
             if indices.upper() == 'M':
-                custom_pkg = input("Enter exact Package Name (e.g. com.noka.client or com.roblox.client): ").strip()
+                custom_pkg = input("\nEnter exact Package Name (e.g. com.noka.client or com.roblox.client): ").strip()
                 if custom_pkg:
                     sel_set = set(config.get('selected_packages', []))
                     sel_set.add(custom_pkg)
@@ -762,17 +763,18 @@ def interactive_menu():
                     save_config()
             elif indices:
                 sel_set = set(config.get('selected_packages', []))
-                for num in indices.split(','):
-                    try:
-                        i = int(num.strip()) - 1
+                for item in indices.split(','):
+                    item = item.strip()
+                    if '.' in item: # Direct package name like com.noka.client
+                        sel_set.add(item)
+                    elif item.isdigit():
+                        i = int(item) - 1
                         if 0 <= i < len(pkgs):
                             target = pkgs[i]
                             if target in sel_set:
                                 sel_set.remove(target)
                             else:
                                 sel_set.add(target)
-                    except ValueError:
-                        pass
                 config['selected_packages'] = list(sel_set)
                 save_config()
 
