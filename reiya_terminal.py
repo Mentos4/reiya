@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.3.0-REI-REJOIN"
-BUILD_TIME = "2026-08-13 22:46:00 UTC"
+BUILD_VERSION = "v6.3.1-REI-REJOIN"
+BUILD_TIME = "2026-08-13 23:54:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
