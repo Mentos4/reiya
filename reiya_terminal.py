@@ -8,6 +8,7 @@ Single standalone CLI script combining all core functions of Rei Roblox Account 
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REI REJOIN ASCII Dashboard UI (2-line REI REJOIN block logo + clean settings & live stats table)
+- Home Page Reset & Callback Rejoin (Force stops stuck Home Screen and retries launch intent until in-game)
 - Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
 - Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
@@ -34,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.1.0-REI-REJOIN-CLEAN"
-BUILD_TIME = "2026-08-13 22:44:00 UTC"
+BUILD_VERSION = "v6.2.0-HOMEPAGE-CALLBACK-REJOIN"
+BUILD_TIME = "2026-08-13 22:45:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -641,7 +642,7 @@ class TerminalRejoinLoop:
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
-                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RED}"
+                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
                 c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
 
                 cpu = get_cpu_usage()
@@ -707,7 +708,7 @@ class TerminalRejoinLoop:
             pass
 
     def _loop(self, packages, cfg):
-        check_interval = float(cfg.get('check_interval', 8))
+        check_interval = float(cfg.get('check_interval', 6))
         delay_open_tab = float(cfg.get('launch_wait', 15))
         sequential     = cfg.get('sequential_join', False)
         auto_clear     = cfg.get('clear_cache', False)
@@ -750,15 +751,23 @@ class TerminalRejoinLoop:
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     time.sleep(2)
                 elif not in_game:
-                    # APP IS RUNNING BUT NOT IN GAME (HOME PAGE / ERROR CODE 524 / DISCONNECTED) -> REJOIN!
+                    # APP IS STUCK ON HOME SCREEN / DISCONNECT / ERROR 524
                     self.set_status(pkg, 'Home Page')
-                    time.sleep(1)
+                    time.sleep(0.5)
                     self.set_status(pkg, 'Rejoining')
+
+                    # Kill stuck Home Screen so launch intent fresh-starts into place
+                    force_stop_app(pkg)
+                    time.sleep(1)
 
                     bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                     self.last_launch[pkg] = time.time()
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                    time.sleep(2)
+
+                    # Callback retry check: If still not in game after launch, retry launch_game
+                    time.sleep(4)
+                    if not is_app_in_game(pkg):
+                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                 else:
                     # APP IS RUNNING AND ACTIVELY IN GAME -> INGAME!
                     self.set_status(pkg, 'Ingame')
@@ -1041,7 +1050,7 @@ def interactive_menu():
         elif choice == '0':
             if rejoin_engine.running:
                 rejoin_engine.stop()
-            print("Exiting Rei CLI. Goodbye!")
+            print("Exiting Reiya CLI. Goodbye!")
             sys.exit(0)
 
 # ==============================================================================
