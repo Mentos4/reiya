@@ -82,12 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 14
-**Fix:** Hard Termux Protection & Un-Piped Window System Parsing
-- Hard-blocked any string containing `termux` from entering `force_stop_app()` or state routines to prevent Termux terminal session crashes.
-- Removed early shell-level piping (`grep free.nokaA`) from `dumpsys window windows` command in Python, allowing full output parsing to correctly pair window activity presence with 3D engine `SurfaceView` layer existence.
+### 2026-08-14 — Session 15
+**Fix:** Window # Boundary Block Isolation & Safety Circuit Breakers
+- Integrated `target_block` container isolation (`Window #` boundary splitter) in `is_app_in_game()` to analyze `block_text` exclusively belonging to your clone package.
+- Applied `len(clean_pkg) < 5` and `termux` safety circuit breakers across `is_app_running()`, `is_app_in_game()`, and `force_stop_app()` to prevent root commands (`su -c 'am force-stop'`) from receiving empty string parameters.
 ```bash
-git commit -m "Fix Termux safety & un-piped dumpsys SurfaceView layer scanning" && git push origin main
+git commit -m "Fix target_block Window # boundary isolation & add len(clean_pkg) < 5 circuit breakers" && git push origin main
 ```
 
 ---

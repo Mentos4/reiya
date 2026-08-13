@@ -204,9 +204,11 @@ def get_roblox_packages():
 
 def is_app_running(package):
     """Check if the app process is alive. Only returns True if a real numeric PID is found."""
-    # pidof returns space-separated PIDs when running, or empty/error when not.
-    # We validate the output is ONLY digits+spaces (a real PID), not error text.
-    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
+    clean_pkg = str(package).strip()
+    if not clean_pkg or len(clean_pkg) < 5 or "termux" in clean_pkg.lower():
+        return False
+
+    for cmd in [f"su -c 'pidof {clean_pkg}'", f"pidof {clean_pkg}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
             out = res.stdout.strip()
@@ -215,12 +217,11 @@ def is_app_running(package):
                 return True
         except Exception:
             pass
-    # Fallback: grep ps output for an exact line containing the package name
-    for cmd in [f"su -c 'ps -A | grep -F {package}'", f"ps -A | grep -F {package}"]:
+
+    for cmd in [f"su -c 'ps -A | grep -F {clean_pkg}'", f"ps -A | grep -F {clean_pkg}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            # Only count as running if the package appears in a non-grep process line
-            lines = [l for l in res.stdout.strip().split('\n') if package in l and 'grep' not in l]
+            lines = [l for l in res.stdout.strip().split('\n') if clean_pkg in l and 'grep' not in l]
             if lines:
                 return True
         except Exception:
@@ -280,7 +281,6 @@ def is_udp_game_connected(package):
     Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
     """
     try:
-        # Get PID of target clone package
         res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
         out = res.stdout.strip()
         if not out:
@@ -292,7 +292,6 @@ def is_udp_game_connected(package):
             return False
 
         for pid in pids:
-            # Check for active UDP socket in ss or netstat
             r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
             if r_ss.stdout.strip():
                 return True
@@ -301,7 +300,6 @@ def is_udp_game_connected(package):
             if r_ns.stdout.strip():
                 return True
 
-            # Check open socket descriptors in /proc/<pid>/fd
             r_fd = subprocess.run(f"su -c 'ls -l /proc/{pid}/fd 2>/dev/null | grep socket'", shell=True, capture_output=True, text=True, timeout=2)
             socket_count = len([l for l in r_fd.stdout.strip().split('\n') if l.strip()]) if r_fd.stdout.strip() else 0
             if socket_count >= 3:
@@ -313,51 +311,61 @@ def is_udp_game_connected(package):
 
 def is_app_in_game(package):
     """
-    Advanced layout inspector for Roblox clients & clones (Noka, Delta, etc.)
-    Safely captures SurfaceView layers without breaking when Termux is focused.
+    Advanced structural layout inspector for Roblox clients & clones (Noka, Delta, etc.).
+    Safely captures SurfaceView and sub-layer metrics inside target application display boundaries.
+    Hard-protected against empty package strings and Termux.
     """
-    # Safety Check: Never allow Termux to be checked as a game package
-    if not package or "termux" in str(package).lower():
+    clean_pkg = str(package).strip()
+    # Explicit circuit breaker boundary to shield Termux from unexpected empty variable cleanups
+    if not clean_pkg or len(clean_pkg) < 5 or "termux" in clean_pkg.lower():
         return False
 
     try:
-        # Pull complete system window manager details WITHOUT piping grep early
+        # Request full system window stack mapping parameters from Android display surface
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=5)
         output = res.stdout
-        if not output.strip() or package not in output:
+
+        if clean_pkg not in output:
             return False
 
+        # --- ISOLATE WORKSPACE TARGET BLOCK ---
         lines = output.split('\n')
-        has_target_window = False
-        has_3d_surface = False
+        target_block = []
+        capture = False
 
         for line in lines:
-            # Check if this line belongs to our specific executor app window or activity
-            if package in line and ("Window #" in line or "Activity" in line or "TASK" in line):
-                has_target_window = True
+            if "Window #" in line:
+                if clean_pkg in line:
+                    capture = True
+                else:
+                    capture = False
+            if capture:
+                target_block.append(line)
 
-            # Check if a 3D rendering context engine layer (SurfaceView / RenderView) is open on screen
-            if "SurfaceView" in line or "RenderView" in line:
-                has_3d_surface = True
+        block_text = "\n".join(target_block)
 
-        # State Separation:
-        if has_target_window:
-            # If target app is open on screen but 3D map engine surface layer is missing -> sit on 2D Homepage
-            if not has_3d_surface:
-                return False  # Home Page -> triggers auto-rejoin
+        if not block_text or clean_pkg not in block_text:
+            return False
+
+        # --- STRUCTURAL SCANNING ENGINES ---
+        if any(act in block_text for act in ["ActivityNativeMain", "MainActivity", "RobloxActivity", "ActivityMain"]):
+            # When inside 3D worlds, the layout engine spawns an active accelerated SurfaceView rendering layer.
+            # When dropped onto the Homepage, that hardware rendering surface gets systematically destroyed (mSubLayer=0).
+            if "SurfaceView" in block_text or ("mSubLayer" in block_text and "mSubLayer=0" not in block_text):
+                return True   # INGAME
             else:
-                return True   # In-Game
+                return False  # HOMEPAGE -> triggers auto-rejoin
 
     except Exception:
         pass
 
     # Fallback to UDP Socket Game Connection State
-    udp_st = is_udp_game_connected(package)
+    udp_st = is_udp_game_connected(clean_pkg)
     if udp_st is not None:
         return udp_st
 
     # Fallback to Roblox log status
-    log_st = check_roblox_log_status(package)
+    log_st = check_roblox_log_status(clean_pkg)
     if log_st is not None:
         return log_st
 
