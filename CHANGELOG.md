@@ -82,12 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 9
-**Fix:** Core Rejoin Engine fixes for Home Screen vs In-Game detection & relaunch
-- Implemented `get_package_activity_dump()` in `is_app_in_game()` to capture the target package's full task block from `dumpsys activity top` (including all View Hierarchy lines) instead of matching only line 1
-- Added `force_stop_app()` + 2s sleep before launching game when Home Screen is detected so Roblox cleanly restarts into place ID
+### 2026-08-14 — Session 10
+**Fix:** Multi-layered, highly accurate Roblox Home Screen vs In-Game detection
+- Added strict Roblox Home Screen UI text signals (`for you`, `charts`, `recommended for`, `moments`, `appshell`) to `HOME_SIGNALS`
+- Added `check_roblox_log_status()` to read latest Roblox log file tail (`/sdcard/Android/data/<pkg>/files/logs/*.log`) for explicit disconnect/join entries
+- Removed generic Android window classes (`surfaceview`, `textureview`) from `GAME_SIGNALS` which were present on Home Screen
 ```bash
-git commit -m "Fix Rejoin Engine: full activity section parsing in is_app_in_game & force-stop before Home Screen relaunch" && git push origin main
+git commit -m "Fix Roblox Home Screen detection: multi-layered UI text signals, log tail inspection & strict 3D engine signals" && git push origin main
 ```
 
 ---

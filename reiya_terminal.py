@@ -246,25 +246,54 @@ def get_package_activity_dump(package, content):
 
     return pkg_lines
 
+def check_roblox_log_status(package):
+    """
+    Inspect the latest Roblox log file tail to determine game connection state.
+    Returns True if log indicates active game connection, False if on Home Screen, or None if unavailable.
+    """
+    log_dirs = [
+        f"/sdcard/Android/data/{package}/files/logs",
+        f"/data/data/{package}/files/logs"
+    ]
+    for d in log_dirs:
+        try:
+            cmd = f"su -c 'ls -t {d}/*.log 2>/dev/null | head -n 1'"
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
+            latest_log = r.stdout.strip()
+            if latest_log:
+                cmd_tail = f"su -c 'tail -n 25 \"{latest_log}\"'"
+                r_tail = subprocess.run(cmd_tail, shell=True, capture_output=True, text=True, timeout=2)
+                text = r_tail.stdout.lower()
+                if not text:
+                    continue
+                if any(k in text for k in ['leaving game', 'disconnect', 'appshell', 'maintab', 'game left', 'return to home']):
+                    return False
+                if any(k in text for k in ['connecting to game', 'loading place', 'game joined', 'placeid']):
+                    return True
+        except Exception:
+            pass
+    return None
+
 def is_app_in_game(package):
     """
     Check if the package is in-game vs on the Roblox Home Screen.
-    Uses 'dumpsys activity top' which shows the ACTUAL top visible activity
-    regardless of which window (Termux vs Roblox) currently has focus.
+    Combines dumpsys activity top inspection, log status, and strict UI signals.
     """
     HOME_SIGNALS = [
         'reactrootview', 'reactviewgroup', 'reactframelayout',
         'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
         'loginactivity', 'welcomeactivity', 'titleactivity',
         'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell',
+        'for you', 'charts', 'recommended for', 'moments',
     ]
 
     GAME_SIGNALS = [
-        'renderview', 'glsurfaceview', 'surfaceview', 'textureview',
-        'nativegl', 'gameactivity', 'robloxactivity', 'gamecanvas',
+        'renderview', 'nativegl', 'gameactivity', 'robloxactivity',
+        'gamecanvas', 'raknet', 'robloxplace', 'placeview',
     ]
 
+    # Step 1: Inspect dumpsys activity top task block
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
@@ -274,32 +303,28 @@ def is_app_in_game(package):
 
             pkg_lines = get_package_activity_dump(package, content)
             if not pkg_lines:
-                # If section parsing returned empty, fallback to simple matching
                 pkg_lines = [line for line in content.split('\n') if package in line]
-                if not pkg_lines:
-                    continue
 
-            block_text = '\n'.join(pkg_lines).lower()
+            if pkg_lines:
+                block_text = '\n'.join(pkg_lines).lower()
 
-            # First, check for Home-screen & React Native UI signals anywhere in package block
-            if any(sig in block_text for sig in HOME_SIGNALS):
-                return False
+                # First, check for Home-screen & React Native UI signals
+                if any(sig in block_text for sig in HOME_SIGNALS):
+                    return False
 
-            # Second, check for confirmed in-game 3D rendering surface signals
-            if any(sig in block_text for sig in GAME_SIGNALS):
-                return True
-
-            # If React Native UI components exist anywhere in package dump, it's Home Screen
-            if any(sig in block_text for sig in ['reactrootview', 'reactviewgroup', 'reactframelayout']):
-                return False
-
-            # Package visible in top stack with no home signals → in-game
-            return True
+                # Second, check for confirmed in-game 3D rendering signals
+                if any(sig in block_text for sig in GAME_SIGNALS):
+                    return True
 
         except Exception:
             pass
 
-    # Could not determine from activity stack.
+    # Step 2: Fallback to reading latest Roblox log file tail
+    log_st = check_roblox_log_status(package)
+    if log_st is not None:
+        return log_st
+
+    # Step 3: Default fallback (return False to allow safe rejoin)
     return False
 
 
