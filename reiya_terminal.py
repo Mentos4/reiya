@@ -215,135 +215,43 @@ def is_app_running(package):
             pass
     return False
 
-def get_package_activity_dump(package, content):
-    """
-    Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block.
-    """
-    lines = content.split('\n')
-    pkg_lines = []
-    capturing = False
-
-    for line in lines:
-        if ('TASK ' in line or 'ACTIVITY ' in line) and package in line:
-            capturing = True
-            pkg_lines.append(line)
-        elif capturing:
-            if ('TASK ' in line or 'ACTIVITY ' in line) and package not in line:
-                break
-            pkg_lines.append(line)
-
-    return pkg_lines
-
-def is_udp_game_connected(package):
-    """
-    Check if the package process has an active UDP socket (Roblox RakNet Game Server connection).
-    Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
-    """
-    try:
-        res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
-        out = res.stdout.strip()
-        if not out:
-            res = subprocess.run(f"pidof {package}", shell=True, capture_output=True, text=True, timeout=2)
-            out = res.stdout.strip()
-
-        pids = [p for p in out.split() if p.isdigit()]
-        if not pids:
-            return False
-
-        for pid in pids:
-            r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
-            if r_ss.stdout.strip() and 'ESTAB' in r_ss.stdout:
-                return True
-
-            r_ns = subprocess.run(f"su -c 'netstat -unp 2>/dev/null | grep {pid}'", shell=True, capture_output=True, text=True, timeout=2)
-            if r_ns.stdout.strip() and 'ESTABLISHED' in r_ns.stdout:
-                return True
-
-        return False
-    except Exception:
-        return None
-
 def is_app_in_game(package):
     """
     Hardware-level accurate detection of whether Roblox package is in-game vs on Home Screen.
-    Checks WindowManager surface & visibility state (mHasSurface, isOnScreen, isVisible, mDrawState).
+    Checks WindowManager surface & Activity lifecycle state flags.
     """
-    # Step 1: Check WindowManager window state (mHasSurface, isVisible, isOnScreen, mDrawState)
+    # 1. Primary Hardware Check: WindowManager surface & visibility state
     for cmd in [f"su -c 'dumpsys window windows | grep -A 20 -i \"{package}\"'", f"dumpsys window windows | grep -A 20 -i \"{package}\""]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
             win_text = res.stdout.lower()
 
             if win_text:
-                # Rule 1: Explicit Home Screen / Paused / Inactive window surface flags
                 if 'mhassurface=false' in win_text or 'isvisible=false' in win_text or 'isonscreen=false' in win_text or 'mdrawstate=no_surface' in win_text:
                     return False
-
-                # Rule 2: Explicit Active 3D In-Game Window Surface flags
                 if 'mhassurface=true' in win_text and ('isonscreen=true' in win_text or 'isvisible=true' in win_text or 'has_drawn' in win_text or 'ready_to_show' in win_text):
                     return True
-
         except Exception:
             pass
 
-    # Step 2: Inspect dumpsys activity top task block
-    HOME_SIGNALS = [
-        'for you', 'charts', 'recommended for', 'moments',
-        'reactrootview', 'reactviewgroup', 'reactframelayout',
-        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
-        'loginactivity', 'welcomeactivity', 'titleactivity',
-        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell',
-    ]
-
-    GAME_SIGNALS = [
-        'renderview', 'nativegl', 'gamecanvas', 'raknet',
-        'robloxplace', 'placeview', 'engineview', 'surfaceview -',
-    ]
-
+    # 2. Secondary Check: Activity lifecycle state (mStopped=true / mResumed=false)
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-            content = res.stdout
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
+            content = res.stdout.lower()
             if not content.strip():
                 continue
 
-            pkg_lines = get_package_activity_dump(package, content)
-            if not pkg_lines:
-                pkg_lines = [line for line in content.split('\n') if package in line]
-
+            pkg_lines = [line for line in content.split('\n') if package.lower() in line]
             if pkg_lines:
-                full_block = '\n'.join(pkg_lines).lower()
-
-                # If Activity state is STOPPED (mStopped=true), Roblox is on Home Screen / Lobby!
-                if 'mstopped=true' in full_block or 'mresumed=false' in full_block:
+                block_text = '\n'.join(pkg_lines)
+                if 'mstopped=true' in block_text or 'mresumed=false' in block_text:
                     return False
-
-                # Strip Activity header line for view hierarchy checks
-                view_hierarchy = pkg_lines[1:] if len(pkg_lines) > 1 else pkg_lines
-                block_text = '\n'.join(view_hierarchy).lower()
-
-                # Check for Home-screen UI text & React Native UI signals
-                if any(sig in block_text for sig in HOME_SIGNALS):
-                    return False
-
-                # Check for confirmed in-game 3D rendering surfaces
-                if any(sig in block_text for sig in GAME_SIGNALS):
+                if 'mresumed=true' in block_text and 'mstopped=false' in block_text:
                     return True
-
-                # Check for Activity RESUMED state without stopped
-                if 'mresumed=true' in full_block and 'mstopped=false' in full_block:
-                    return True
-
         except Exception:
             pass
 
-    # Step 3: Check UDP Socket Game Connection State
-    udp_st = is_udp_game_connected(package)
-    if udp_st is not None and udp_st is True:
-        return True
-
-    # Step 4: Default fallback (return False to trigger safe Home Page rejoin)
     return False
 
 
