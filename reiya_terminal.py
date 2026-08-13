@@ -752,20 +752,17 @@ class TerminalRejoinLoop:
                     time.sleep(2)
                 elif not in_game:
                     # APP IS STUCK ON HOME SCREEN / DISCONNECT / ERROR 524
+                    # Only send the game launch intent — NEVER force-stop (that crashes Termux)
                     self.set_status(pkg, 'Home Page')
                     time.sleep(0.5)
                     self.set_status(pkg, 'Rejoining')
-
-                    # Kill stuck Home Screen so launch intent fresh-starts into place
-                    force_stop_app(pkg)
-                    time.sleep(1)
 
                     bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                     self.last_launch[pkg] = time.time()
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
-                    # Callback retry check: If still not in game after launch, retry launch_game
-                    time.sleep(4)
+                    # Callback retry: wait and fire again if still not in-game
+                    time.sleep(5)
                     if not is_app_in_game(pkg):
                         launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                 else:
