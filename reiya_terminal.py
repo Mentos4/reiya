@@ -7,10 +7,9 @@ Single standalone CLI script combining all core functions of Rei Roblox Account 
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
-- Clean REI REJOIN CORE Live Dashboard with accurate 4-toggle settings header
+- Exact Match REJOIN ASCII Dashboard UI (Compact 55-col layout preventing line wrapping)
 - Instant App Exit & Crash Re-launch (Relaunches Roblox apps instantly when closed without 15s delay)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
-- Initial Launch Grace Period (Prevents false home-screen triggers while Roblox is loading game assets)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -33,8 +32,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v4.5.0-INSTANT-EXIT-RELAUNCH"
-BUILD_TIME = "2026-08-13 22:29:00 UTC"
+BUILD_VERSION = "v5.0.0-EXACT-REJOIN-UI"
+BUILD_TIME = "2026-08-13 22:33:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -603,7 +602,7 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI customized for Rei Rejoin Core."""
+        """Render live-updating ANSI dashboard UI matching exact reference image."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -616,9 +615,9 @@ class TerminalRejoinLoop:
         if not pkgs:
             pkgs = get_roblox_packages()
 
-        gname = cfg.get('game_name') or (f"Place: {cfg.get('game_id')}" if cfg.get('game_id') else 'Run a Restaurant')
-        if len(gname) > 24:
-            gname = gname[:21] + "..."
+        gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else '[TAP HEROES] Pet Sim')
+        if len(gname) > 22:
+            gname = gname[:19] + "..."
 
         print("\n[+] Entering Live Dashboard Mode...")
         set_landscape_orientation()
@@ -630,25 +629,35 @@ class TerminalRejoinLoop:
                 print("\033[H\033[J", end="")
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
+                b_status = f"{RED}Disable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
-                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
-                c_status = f"{GREEN}Enable{RESET}" if cfg.get('clear_cache', False) else f"{RED}Disable{RESET}"
+                c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Clean REI REJOIN CORE Header
-                print(f"{BOLD}{CYAN}========================================================================={RESET}")
-                print(f"{BOLD}                         REI REJOIN CORE DASHBOARD                       {RESET}")
-                print(f"{CYAN}                         >>> Roblox Account Manager <<<                  {RESET}")
-                print(f"{BOLD}{CYAN}========================================================================={RESET}")
-                print(f"  WEBHOOK: {w_status}            |  AUTO SORT TAB: {s_status}")
-                print(f"  HOME REJOIN: {h_status}        |  CLEAR CACHE: {c_status}")
-                print(f"-------------------------------------------------------------------------")
-                print(f"  Cpu usage: {cpu:<5} %          | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB")
-                print(f"-------------------------------------------------------------------------")
-                print(f"{BOLD}{'No':<3} | {'Username':<12} | {'Package':<12} | {'Status':<11} | {'Game'}{RESET}")
-                print(f"----+--------------+--------------+-------------+------------------------")
+                # Exact ASCII Logo matching reference image (cyan/blue REJOIN font)
+                print(f"{BOLD}{CYAN}")
+                print(r"  ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
+                print(r"  ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
+                print(r"  ██████╔╝█████╗  ██║██║   ██║██║██║")
+                print(r"  ██╔══██╗██╔══╝  ██║██║   ██║██║██║")
+                print(r"  ██║  ██║███████╗██║╚██████╔╝██║██║")
+                print(r"  ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝╚═╝")
+                print(f"{RESET}")
+                print(f"       {BOLD}{BLUE}> > > Free Version < < <{RESET}")
+                print(f"Discord: {BLUE}discord.gg/5G3cStpbcx{RESET}")
+                print(f"Made by {CYAN}_g_huy{RESET}")
+                print(f"CHECK EXECUTOR METHOD: {GREEN}AUTO{RESET}")
+                print(f"WEBHOOK: {w_status}")
+                print(f"AUTO BLOCK: {b_status}")
+                print(f"AUTO SORT TAB: {s_status}")
+                print(f"AUTO CHANGE ACCOUNT: {c_status}")
+                print(f"----------------------------------------------------------")
+                print(f" Cpu usage: {cpu:<5} %     | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB |")
+                print(f"----------------------------------------------------------")
+                print(f"{BOLD}{'No':<3} | {'Username':<11} | {'Package':<11} | {'Status':<10} | {'Game'}{RESET}")
+                print(f"----+-------------+-------------+------------+------------")
 
                 statuses = self.get_status()
 
@@ -656,7 +665,7 @@ class TerminalRejoinLoop:
                     info = statuses.get(p, {})
                     st = info.get('status', 'Ingame')
 
-                    short_uname = f"wu****{idx:02d}"
+                    short_uname = f"ps******{idx:02d}"
 
                     if st == 'Ingame':
                         st_colored = f"{GREEN}Ingame{RESET}"
@@ -671,10 +680,10 @@ class TerminalRejoinLoop:
                     else:
                         st_colored = f"{st}"
 
-                    print(f"{idx:<3} | {short_uname:<12} | {p:<12} | {st_colored:<20} | 🪵 {gname}")
+                    print(f"{idx:<3} | {short_uname:<11} | {p:<11} | {st_colored:<19} | 👆 {gname}")
 
-                print(f"-------------------------------------------------------------------------")
-                print(f"{BOLD}Press [Enter] to return to Main Menu (loop runs in background)...{RESET}")
+                print(f"----------------------------------------------------------")
+                print(f"{BOLD}Press [Enter] to return to Main Menu...{RESET}")
 
                 # Non-blocking input check for Linux/Termux
                 if os.name == 'posix':
