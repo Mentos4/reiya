@@ -742,8 +742,8 @@ class TerminalRejoinLoop:
         auto_clear      = cfg.get('clear_cache', False)
         auto_sort       = cfg.get('auto_sort', True)
         window_mode     = cfg.get('window_mode', 'left_stack')
-        # Short grace period — game opens directly without Home Screen, so 12s is enough
-        LAUNCH_GRACE    = 12
+        # Short grace period — game opens directly, 5s is enough to avoid false Rejoining flash
+        LAUNCH_GRACE    = 5
         # Re-send game intent every 2 minutes as Home Screen keep-alive
         KEEPALIVE_SECS  = 120
 
@@ -801,14 +801,20 @@ class TerminalRejoinLoop:
                     in_game = is_app_in_game(pkg)
                     if in_game:
                         self.set_status(pkg, 'Ingame')
-                        last_keepalive[pkg] = now  # reset keepalive timer while in-game
+                        last_keepalive[pkg] = now
                     else:
-                        # HOME SCREEN detected → send game intent
+                        # HOME SCREEN detected → hard restart: force-stop then launch direct into game
                         self.set_status(pkg, 'Home Page')
                         time.sleep(0.3)
                         self.set_status(pkg, 'Rejoining')
+                        # Force stop stuck Home Screen (only kills the clone package, not Termux)
+                        subprocess.run(
+                            f"su -c 'am force-stop {pkg}'",
+                            shell=True, capture_output=True, timeout=4
+                        )
+                        time.sleep(1)
                         bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        self.last_launch[pkg] = now  # reset grace period
+                        self.last_launch[pkg] = now
                         last_keepalive[pkg] = now
                         launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
