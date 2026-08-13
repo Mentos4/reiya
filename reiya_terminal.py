@@ -232,11 +232,23 @@ def is_app_in_game(package):
     Check if the package is in-game vs on the Roblox Home Screen.
     Uses 'dumpsys activity top' which shows the ACTUAL top visible activity
     regardless of which window (Termux vs Roblox) currently has focus.
+
+    Strategy:
+      - Scan every line in the activity dump that references the package.
+      - If ANY such line contains a home-screen signal keyword → return False (Home Page).
+      - If lines are found but none are home signals → return True (In-Game).
+      - If package not found in dump at all → return False (safe: triggers rejoin).
     """
     HOME_SIGNALS = [
         'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
         'launchactivity', 'homeactivity', 'loginactivity', 'welcomeactivity',
         'titleactivity', 'activitymain', 'robloxmain', 'lobbyactivity',
+        'loadingactivity', 'bootstrapactivity',
+    ]
+
+    # Also treat 'GameActivity' / 'RobloxActivity' as confirmed in-game
+    GAME_SIGNALS = [
+        'gameactivity', 'robloxactivity', 'renderview',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -246,22 +258,26 @@ def is_app_in_game(package):
             if not content.strip():
                 continue
 
-            found = False
-            for line in content.split('\n'):
-                if package not in line:
-                    continue
-                found = True
-                line_lower = line.lower()
-                # Home Screen activity found→ not in game
-                if any(sig in line_lower for sig in HOME_SIGNALS):
+            pkg_lines = [line for line in content.split('\n') if package in line]
+            if not pkg_lines:
+                # Package not visible in top at all — treat as home/not-in-game
+                continue
+
+            for line in pkg_lines:
+                ll = line.lower()
+                # Priority: if any line shows a home-screen signal → definitely NOT in-game
+                if any(sig in ll for sig in HOME_SIGNALS):
                     return False
-                # Package visible in top with a non-home activity → in game
-                if any(kw in line for kw in ['ACTIVITY', 'TASK', 'Hist', 'proc=', 'ActivityRecord']):
+
+            # Check for confirmed in-game signals
+            for line in pkg_lines:
+                ll = line.lower()
+                if any(sig in ll for sig in GAME_SIGNALS):
                     return True
 
-            if found:
-                # Package appears in top output but no clear activity line matched → assume in-game
-                return True
+            # Package found in top output with no home signals → assume in-game
+            return True
+
         except Exception:
             pass
 
@@ -775,22 +791,18 @@ class TerminalRejoinLoop:
             pass
 
     def _loop(self, packages, cfg):
-        check_interval  = float(cfg.get('check_interval', 8))
-        delay_open_tab  = float(cfg.get('launch_wait', 15))
-        sequential      = cfg.get('sequential_join', False)
-        auto_clear      = cfg.get('clear_cache', False)
-        auto_sort       = cfg.get('auto_sort', True)
-        window_mode     = cfg.get('window_mode', 'left_stack')
-        # Short grace period — game opens directly, 5s is enough to avoid false Rejoining flash
-        LAUNCH_GRACE    = 5
-        # Re-send game intent every 2 minutes as Home Screen keep-alive
-        KEEPALIVE_SECS  = 120
+        check_interval      = float(cfg.get('check_interval', 8))
+        delay_open_tab      = float(cfg.get('launch_wait', 15))
+        sequential          = cfg.get('sequential_join', False)
+        auto_clear          = cfg.get('clear_cache', False)
+        auto_sort           = cfg.get('auto_sort', True)
+        window_mode         = cfg.get('window_mode', 'left_stack')
+        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
+        # Grace period after launch — avoids false "Home Page" detection during app startup
+        LAUNCH_GRACE        = 20
 
         w, h = get_screen_size()
         total_apps = len(packages)
-
-        # Track last keep-alive per package
-        last_keepalive = {pkg: 0 for pkg in packages}
 
         # Initial launch of all packages
         for i, pkg in enumerate(packages):
@@ -798,12 +810,12 @@ class TerminalRejoinLoop:
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
             self.last_launch[pkg] = time.time()
-            last_keepalive[pkg] = time.time()
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
                 time.sleep(delay_open_tab)
 
-        time.sleep(4)
+        # Give apps extra time to fully start before monitoring begins
+        time.sleep(8)
 
         while self.running:
             for i, pkg in enumerate(packages):
@@ -826,13 +838,13 @@ class TerminalRejoinLoop:
 
                 if not running:
                     # ★ PROCESS DEAD → REJOIN
+                    self.log(f"[{pkg}] Process dead → Rejoining")
                     self.set_status(pkg, 'Rejoining')
                     if auto_clear:
                         clear_app_cache(pkg)
                         time.sleep(1)
                     bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                     self.last_launch[pkg] = now
-                    last_keepalive[pkg] = now
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
                 else:
@@ -840,22 +852,23 @@ class TerminalRejoinLoop:
                     in_game = is_app_in_game(pkg)
                     if in_game:
                         self.set_status(pkg, 'Ingame')
-                        last_keepalive[pkg] = now
                     else:
-                        # HOME SCREEN detected → hard restart: force-stop then launch direct into game
+                        # HOME SCREEN detected
                         self.set_status(pkg, 'Home Page')
-                        time.sleep(0.3)
-                        self.set_status(pkg, 'Rejoining')
-                        # Force stop stuck Home Screen (only kills the clone package, not Termux)
-                        subprocess.run(
-                            f"su -c 'am force-stop {pkg}'",
-                            shell=True, capture_output=True, timeout=4
-                        )
-                        time.sleep(1)
-                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        self.last_launch[pkg] = now
-                        last_keepalive[pkg] = now
-                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        if home_rejoin_enabled:
+                            self.log(f"[{pkg}] Home Screen detected → Force-stopping and rejoining")
+                            # Force stop the stuck Home Screen then relaunch directly into game
+                            subprocess.run(
+                                f"su -c 'am force-stop {pkg}'",
+                                shell=True, capture_output=True, timeout=4
+                            )
+                            time.sleep(2)
+                            self.set_status(pkg, 'Rejoining')
+                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                            self.last_launch[pkg] = now
+                            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        else:
+                            self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
 
             time.sleep(check_interval)
 
