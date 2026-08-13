@@ -6,6 +6,7 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - Smart Package Sorting (Roblox & Executor packages placed at the top of the list)
 - Direct Game Launching via Place ID or Private Server Link
 - Package-targeted Intent launching (bypasses "Open With" dialogs completely)
+- Roblox Home Screen / Disconnect Detection & Auto Re-entry
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -63,6 +64,7 @@ DEFAULT_CONFIG = {
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (vertical stack on left) or 'grid' (2x2 grid)
+    'home_rejoin_enabled': True,
 }
 
 # Global config state
@@ -182,6 +184,19 @@ def is_app_running(package):
         return package in result.stdout
     except Exception:
         return False
+
+def is_app_on_home_screen(package):
+    """Check if app is currently stuck on Roblox Home Screen or Disconnected screen via dumpsys window."""
+    try:
+        res = subprocess.run(['dumpsys', 'window', 'windows'], capture_output=True, text=True, timeout=3)
+        for line in res.stdout.split('\n'):
+            if 'mCurrentFocus' in line or 'mFocusedApp' in line:
+                if package in line:
+                    if any(home_kw in line.lower() for home_kw in ['home', 'landing', 'protocollaunch', 'mainactivity']):
+                        return True
+    except Exception:
+        pass
+    return False
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -599,6 +614,7 @@ class TerminalRejoinLoop:
         auto_clear     = cfg.get('clear_cache', False)
         auto_sort      = cfg.get('auto_sort', True)
         window_mode    = cfg.get('window_mode', 'left_stack')
+        home_check     = cfg.get('home_rejoin_enabled', True)
 
         retries   = {p: 0 for p in packages}
         last_seen = {p: time.time() for p in packages}
@@ -637,9 +653,18 @@ class TerminalRejoinLoop:
                 running = is_app_running(pkg)
 
                 if running:
-                    self.set_status(pkg, 'Ingame')
-                    last_seen[pkg] = time.time()
-                    retries[pkg] = 0
+                    # Check if stuck on Roblox Home Screen or Disconnect screen
+                    is_home = is_app_on_home_screen(pkg) if home_check else False
+                    if is_home:
+                        self.log(f"{pkg}: Detected Roblox Home Screen / Disconnect! Re-joining game place...")
+                        self.set_status(pkg, 'Rejoining Game')
+                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        last_seen[pkg] = time.time()
+                    else:
+                        self.set_status(pkg, 'Ingame')
+                        last_seen[pkg] = time.time()
+                        retries[pkg] = 0
                 else:
                     self.set_status(pkg, 'Waiting')
                     offline_secs = time.time() - last_seen[pkg]
@@ -862,8 +887,11 @@ def interactive_menu():
             clr = input(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
+            hm = input(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
+            if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
+
             save_config()
-            print("\n[+] Timing settings updated.")
+            print("\n[+] Timing & Home Screen settings updated.")
             input("\nPress Enter to return to menu...")
 
         elif choice == '6':
