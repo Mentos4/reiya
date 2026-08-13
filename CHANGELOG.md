@@ -82,12 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 21 (Release v6.6.1-REI-REJOIN)
-**Fix:** Unblocked `Launching` status & restored instant `Ingame` detection (`is_app_in_game`)
-- Removed permanent `retry_layout_stub` ViewStub from `LOADING_HOME_VIEW_IDS`. `retry_layout_stub` is a permanent layout XML stub in Roblox's activity layout, which was falsely causing `is_app_in_game()` to return `False` and get stuck on `Launching`.
-- `is_app_in_game()` now matches 3D surface view (`RBXSurfaceView` / `surfaceview`) cleanly to display `Ingame` (green).
+### 2026-08-14 — Session 22 (Release v6.7.0-REI-REJOIN)
+**Major Fix:** Active Process Rejoin & Launching Status Override Fix
+- Reduced initial launch grace period to 12s so Home Page and Process Dead rejoins trigger promptly.
+- Enforced `force_stop_app()` + 2s sleep on Home Page detection before firing `launch_game()`. Android requires a process force-stop when Roblox is already sitting open on the Home Screen so the new place ID deeplink intent (`ActivityProtocolLaunch`) re-initializes a fresh place connection.
+- Fixed dashboard table package key lookup to display real-time live status updates without falling back to `Launching`.
 ```bash
-git commit -m "Release v6.6.1-REI-REJOIN: Remove retry_layout_stub to unblock Launching status & show Ingame" && git push origin main
+git commit -m "Release v6.7.0-REI-REJOIN: Force-stop on Home Page rejoin & 12s launch grace for instant rejoin" && git push origin main
 ```
 
 ---

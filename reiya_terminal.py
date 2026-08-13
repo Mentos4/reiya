@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.6.1-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:04:00 UTC"
+BUILD_VERSION = "v6.7.0-REI-REJOIN"
+BUILD_TIME = "2026-08-14 02:07:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -807,7 +807,9 @@ class TerminalRejoinLoop:
                 print(SEP)
 
                 statuses = self.get_status()
-                for idx, p in enumerate(pkgs, 1):
+                display_pkgs = list(statuses.keys()) if statuses else pkgs
+
+                for idx, p in enumerate(display_pkgs, 1):
                     info_d  = statuses.get(p, {})
                     st      = info_d.get('status', 'Launching')
                     uname   = f"wu***{idx:02d}"
@@ -892,16 +894,18 @@ class TerminalRejoinLoop:
                     if in_game:
                         self.set_status(pkg, 'Ingame')
                     else:
-                        # NOT in-game — check if still within launch grace period (45s)
+                        # NOT in-game — check if still within launch grace period (12s)
                         time_since_launch = now - self.last_launch.get(pkg, 0)
-                        if time_since_launch < 45:
+                        if time_since_launch < 12:
                             self.set_status(pkg, 'Launching')
                         else:
-                            # HOME SCREEN detected (past 45s grace period)
+                            # HOME SCREEN detected (past 12s grace period)
                             self.set_status(pkg, 'Home Page')
                             if home_rejoin_enabled:
-                                self.log(f"[{pkg}] Home Screen detected → Rejoining place")
+                                self.log(f"[{pkg}] Home Screen detected → Force-stopping & rejoining place")
                                 self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                time.sleep(2)
                                 bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                                 self.last_launch[pkg] = time.time()
                                 launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
