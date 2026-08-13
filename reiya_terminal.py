@@ -217,53 +217,50 @@ def is_app_running(package):
 
 def is_app_in_game(package):
     """
-    Check if the package is actively in a Roblox GAME PLACE (not Home Screen/Lobby).
-    Uses dumpsys activity activities to read the top activity name for the package.
-    - Home Screen activities (NativeMain, Splash, Login, etc.) -> return False -> trigger rejoin
-    - In-game activities (RobloxActivity, NativeActivity, etc.) -> return True -> Ingame status
-    - Unknown activities -> return True (app is running and doing something, don't interrupt)
+    Detect if the app is in-game vs on the Roblox Home Screen.
+    Strategy: read mCurrentFocus / mFocusedApp from dumpsys window windows.
+    These are single reliable lines showing exactly what activity is on screen right now.
+    - Home Screen activity keywords -> False (trigger rejoin)
+    - In-game / unknown activity -> True (leave it alone)
     """
-    # Activities that indicate user is on Roblox Home Screen / Lobby / not in a game
-    HOME_ACTIVITIES = [
-        'activitynativemain', 'nativemain', 'splashactivity', 'activitysplash',
-        'mainactivity', 'startupactivity', 'launchactivity', 'homeactivity',
-        'loginactivity', 'activitylogin', 'welcomeactivity', 'titleactivity',
-        'activitystartup', 'activitymain', 'robloxmainactivity', 'lobbyactivity',
-    ]
-    # Activities that confirm user is inside a game place
-    INGAME_ACTIVITIES = [
-        'robloxactivity', 'nativeactivity', 'gameactivity', 'placeactivity',
-        'activityprotocollaunch', 'nativepage', 'luaactivity', 'placeid',
+    # Activity name fragments that mean the user is on Roblox HOME SCREEN (not in a game)
+    HOME_SIGNALS = [
+        'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
+        'launchactivity', 'homeactivity', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'activitymain', 'robloxmain', 'lobbyactivity',
     ]
 
     try:
         res = subprocess.run(
-            "su -c 'dumpsys activity activities'",
-            shell=True, capture_output=True, text=True, timeout=5
+            "su -c 'dumpsys window windows'",
+            shell=True, capture_output=True, text=True, timeout=4
         )
         content = res.stdout
 
-        # Scan for the topmost activity record that belongs to our package
+        # Find mCurrentFocus and mFocusedApp lines — the most reliable signal
         for line in content.split('\n'):
-            if package in line and ('Hist #' in line or 'ActivityRecord' in line):
-                # Extract the activity class name: package/com.x.ActivityName
-                match = re.search(rf'{re.escape(package)}/([^\s}}]+)', line)
-                if match:
-                    activity = match.group(1).lower()
-                    # Home Screen activity -> NOT in game, trigger rejoin
-                    if any(ha in activity for ha in HOME_ACTIVITIES):
-                        return False
-                    # In-game activity -> confirmed in game
-                    if any(ga in activity for ga in INGAME_ACTIVITIES):
-                        return True
-                    # Unknown activity - app is running something, treat as in-game
-                    # to avoid interrupting game loading screens
-                    return True
+            if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package in line:
+                line_lower = line.lower()
+                # If the focused activity is a Home Screen activity -> NOT in game
+                if any(sig in line_lower for sig in HOME_SIGNALS):
+                    return False
+                # Package is focused but not a known home screen -> treat as in-game
+                return True
+
+        # Package not in focus lines at all - could be loading or background
+        # Check if the package has ANY window entry (it's visible somewhere)
+        for line in content.split('\n'):
+            if package in line and 'Window{' in line:
+                line_lower = line.lower()
+                if any(sig in line_lower for sig in HOME_SIGNALS):
+                    return False
+                return True
+
     except Exception:
         pass
 
+    # Cannot determine - assume not in game to trigger a safe rejoin attempt
     return False
-
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -321,14 +318,16 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         url = f'roblox://placeId={game_id}'
         web_url = f'https://www.roblox.com/games/{game_id}'
 
-    # Target ActivityProtocolLaunch inside clone package directly
+    # Target ActivityProtocolLaunch inside clone package directly.
+    # -f 0x14000000 = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK
+    # This forces navigation into the game even when Roblox is already open on Home Screen.
     intents = [
-        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d '{url}'",
-        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
+        f"su -c 'am start -f 0x14000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x14000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start -f 0x14000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x14000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"am start -f 0x14000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d '{url}'",
+        f"am start -f 0x14000000 -p {package} -a android.intent.action.VIEW -d '{url}'"
     ]
 
     for cmd in intents:
