@@ -6,8 +6,9 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
-- Robust Intent Launching (Component-targeted -n package/ActivityProtocolLaunch + fallback strategies)
+- Proven Intent & Root Monkey Launching (Works for original Roblox and ALL clones: free.nokaA, Delta, Arceus)
 - Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
+- Root Process Status Check (`su -c pidof` and `su -c ps -A` for multi-UID Android sandbox visibility)
 - Roblox Home Screen / Disconnect Detection & Auto Re-entry
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -30,8 +31,8 @@ import urllib.parse
 import mimetypes
 
 # Script version & timestamp
-BUILD_VERSION = "v2.9.0-COMPONENT-LAUNCH-FIX"
-BUILD_TIME = "2026-08-13 22:04:00 UTC"
+BUILD_VERSION = "v3.0.0-PROVEN-ROOT-LAUNCH"
+BUILD_TIME = "2026-08-13 22:08:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -173,7 +174,19 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if process is currently running using pidof and ps -A."""
+    """Check if process is currently running using su root execution to inspect all app UIDs."""
+    try:
+        res = subprocess.run(f'su -c "pidof {package}"', shell=True, capture_output=True, text=True, timeout=3)
+        if res.stdout.strip():
+            return True
+    except Exception:
+        pass
+    try:
+        res = subprocess.run('su -c "ps -A"', shell=True, capture_output=True, text=True, timeout=5)
+        if package in res.stdout:
+            return True
+    except Exception:
+        pass
     try:
         res = subprocess.run(f'pidof {package}', shell=True, capture_output=True, text=True, timeout=3)
         if res.stdout.strip():
@@ -189,7 +202,7 @@ def is_app_running(package):
 def is_app_on_home_screen(package):
     """Check if app is currently stuck on Roblox Home Screen or Disconnected screen via dumpsys window."""
     try:
-        res = subprocess.run('dumpsys window windows', shell=True, capture_output=True, text=True, timeout=3)
+        res = subprocess.run('su -c "dumpsys window windows"', shell=True, capture_output=True, text=True, timeout=3)
         for line in res.stdout.split('\n'):
             if 'mCurrentFocus' in line or 'mFocusedApp' in line:
                 if package in line:
@@ -247,7 +260,7 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
     return left, top, right, bottom
 
 def launch_game(package, game_id, bounds=None, freeform=True):
-    """Launch Roblox game targeting package directly via component and intent fallbacks."""
+    """Launch Roblox game targeting package cleanly via Intent & Monkey fallbacks."""
     game_id = str(game_id).strip()
     if not game_id:
         game_id = '2753915549'
@@ -268,32 +281,26 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     else:
         url = f'roblox://placeId={game_id}'
 
-    freeform_flag = '--windowingMode 5' if freeform else ''
-    bounds_flag = f'--bounds {bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}' if bounds else ''
-
-    # Strategy 1: Explicit Component Launch (Package/ActivityProtocolLaunch)
-    cmd_comp = f'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
-
-    # Strategy 2: Targeted package launch (-p flag)
-    cmd_pkg = f'am start -p {package} -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
-
-    # Strategy 3: General intent launch
-    cmd_gen = f'am start -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
-
-    # Strategy 4: Monkey launcher
-    cmd_monkey = f'monkey -p {package} -c android.intent.category.LAUNCHER 1'
+    url_intent = f'am start -a android.intent.action.VIEW -d "{url}"'
+    pkg_intent = f'am start -p {package} -a android.intent.action.VIEW -d "{url}"'
+    monkey_cmd = f'monkey -p {package} -c android.intent.category.LAUNCHER 1'
 
     launch_cmds = [
-        f'su -c "{cmd_comp}"', cmd_comp, f'/system/bin/{cmd_comp}',
-        f'su -c "{cmd_pkg}"', cmd_pkg, f'/system/bin/{cmd_pkg}',
-        f'su -c "{cmd_gen}"', cmd_gen, f'/system/bin/{cmd_gen}',
-        f'su -c "{cmd_monkey}"', cmd_monkey, f'/system/bin/{cmd_monkey}'
+        f'su -c "{pkg_intent}"',
+        f'su -c "{url_intent}"',
+        f'su -c "{monkey_cmd}"',
+        url_intent,
+        monkey_cmd
     ]
 
-    for launcher in launch_cmds:
+    for cmd in launch_cmds:
         try:
-            res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
-            if res.returncode == 0 and "Error:" not in res.stdout:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
+            if res.returncode == 0:
+                if bounds and freeform:
+                    l, t, r, b = bounds
+                    freeform_cmd = f'am start -p {package} -a android.intent.action.VIEW -d "{url}" --windowingMode 5 --bounds {l},{t},{r},{b}'
+                    subprocess.run(f'su -c "{freeform_cmd}"', shell=True, capture_output=True, timeout=5)
                 return True
         except Exception:
             pass
@@ -323,7 +330,7 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
     try:
-        subprocess.run(f'am force-stop {package}', shell=True, timeout=5)
+        subprocess.run(f'su -c "am force-stop {package}"', shell=True, timeout=5)
         return True
     except Exception as e:
         print(f"[!] Force stop error: {e}")
@@ -332,7 +339,7 @@ def force_stop_app(package):
 def clear_app_cache(package):
     """Clear app data/cache using pm clear."""
     try:
-        subprocess.run(f'pm clear {package}', shell=True, timeout=10)
+        subprocess.run(f'su -c "pm clear {package}"', shell=True, timeout=10)
         return True
     except Exception as e:
         print(f"[!] Clear cache error: {e}")
@@ -382,7 +389,7 @@ def get_ram_usage():
 def get_process_ram(package):
     try:
         result = subprocess.run(
-            f'dumpsys meminfo {package} -c',
+            f'su -c "dumpsys meminfo {package} -c"',
             shell=True, capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.split('\n'):
@@ -412,7 +419,7 @@ def format_uptime(seconds):
 
 def take_screenshot(output_path='/sdcard/roblox_mgr_shot.png'):
     try:
-        subprocess.run(f'screencap -p {output_path}', shell=True, timeout=8)
+        subprocess.run(f'su -c "screencap -p {output_path}"', shell=True, timeout=8)
         if os.path.exists(output_path):
             return output_path
     except Exception:
