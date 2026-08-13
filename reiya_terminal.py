@@ -204,11 +204,9 @@ def get_roblox_packages():
 
 def is_app_running(package):
     """Check if the app process is alive. Only returns True if a real numeric PID is found."""
-    clean_pkg = str(package).strip()
-    if not clean_pkg or len(clean_pkg) < 5 or "termux" in clean_pkg.lower():
-        return False
-
-    for cmd in [f"su -c 'pidof {clean_pkg}'", f"pidof {clean_pkg}"]:
+    # pidof returns space-separated PIDs when running, or empty/error when not.
+    # We validate the output is ONLY digits+spaces (a real PID), not error text.
+    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
             out = res.stdout.strip()
@@ -217,11 +215,12 @@ def is_app_running(package):
                 return True
         except Exception:
             pass
-
-    for cmd in [f"su -c 'ps -A | grep -F {clean_pkg}'", f"ps -A | grep -F {clean_pkg}"]:
+    # Fallback: grep ps output for an exact line containing the package name
+    for cmd in [f"su -c 'ps -A | grep -F {package}'", f"ps -A | grep -F {package}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            lines = [l for l in res.stdout.strip().split('\n') if clean_pkg in l and 'grep' not in l]
+            # Only count as running if the package appears in a non-grep process line
+            lines = [l for l in res.stdout.strip().split('\n') if package in l and 'grep' not in l]
             if lines:
                 return True
         except Exception:
@@ -281,6 +280,7 @@ def is_udp_game_connected(package):
     Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
     """
     try:
+        # Get PID of target clone package
         res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
         out = res.stdout.strip()
         if not out:
@@ -292,6 +292,7 @@ def is_udp_game_connected(package):
             return False
 
         for pid in pids:
+            # Check for active UDP socket in ss or netstat
             r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
             if r_ss.stdout.strip():
                 return True
@@ -300,6 +301,7 @@ def is_udp_game_connected(package):
             if r_ns.stdout.strip():
                 return True
 
+            # Check open socket descriptors in /proc/<pid>/fd
             r_fd = subprocess.run(f"su -c 'ls -l /proc/{pid}/fd 2>/dev/null | grep socket'", shell=True, capture_output=True, text=True, timeout=2)
             socket_count = len([l for l in r_fd.stdout.strip().split('\n') if l.strip()]) if r_fd.stdout.strip() else 0
             if socket_count >= 3:
@@ -311,176 +313,73 @@ def is_udp_game_connected(package):
 
 def is_app_in_game(package):
     """
-    Advanced structural layout inspector for Roblox clients & clones (Noka, Delta, etc.).
-    Safely captures SurfaceView and sub-layer metrics inside target application display boundaries.
-    Hard-protected against empty package strings and Termux.
+    Check if the package is in-game vs on the Roblox Home Screen.
+    Uses Activity state flags ('mStopped=true', 'mResumed=true'), view hierarchy inspection, and UDP checks.
     """
-    clean_pkg = str(package).strip()
-    # Explicit circuit breaker boundary to shield Termux from unexpected empty variable cleanups
-    if not clean_pkg or len(clean_pkg) < 5 or "termux" in clean_pkg.lower():
-        return False
-
-    try:
-        # Request full system window stack mapping parameters from Android display surface
-        res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=5)
-        output = res.stdout
-
-        if clean_pkg not in output:
-            return False
-
-        # --- ISOLATE WORKSPACE TARGET BLOCK ---
-        lines = output.split('\n')
-        target_block = []
-        capture = False
-
-        for line in lines:
-            if "Window #" in line:
-                if clean_pkg in line:
-                    capture = True
-                else:
-                    capture = False
-            if capture:
-                target_block.append(line)
-
-        block_text = "\n".join(target_block)
-
-        if not block_text or clean_pkg not in block_text:
-            return False
-
-        # --- STRUCTURAL SCANNING ENGINES ---
-        if any(act in block_text for act in ["ActivityNativeMain", "MainActivity", "RobloxActivity", "ActivityMain"]):
-            # When inside 3D worlds, the layout engine spawns an active accelerated SurfaceView rendering layer.
-            # When dropped onto the Homepage, that hardware rendering surface gets systematically destroyed (mSubLayer=0).
-            if "SurfaceView" in block_text or ("mSubLayer" in block_text and "mSubLayer=0" not in block_text):
-                return True   # INGAME
-            else:
-                return False  # HOMEPAGE -> triggers auto-rejoin
-
-    except Exception:
-        pass
-
-    # Fallback to UDP Socket Game Connection State
-    udp_st = is_udp_game_connected(clean_pkg)
-    if udp_st is not None:
-        return udp_st
-
-    # Fallback to Roblox log status
-    log_st = check_roblox_log_status(clean_pkg)
-    if log_st is not None:
-        return log_st
-
-    return False
-
-
-def get_screen_size():
-    """Get screen resolution width and height via wm size."""
-    try:
-        res = subprocess.run('wm size', shell=True, capture_output=True, text=True, timeout=3)
-        match = re.search(r'(\d+)x(\d+)', res.stdout)
-        if match:
-            w, h = int(match.group(1)), int(match.group(2))
-            return (max(w, h), min(w, h))  # Always return landscape orientation (w > h)
-    except Exception:
-        pass
-    return 1280, 720
-
-def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
-    """
-    Calculate (left, top, right, bottom) bounds for window tiling.
-    Places Roblox windows on the RIGHT 50% of the landscape screen so Termux stays on Left 50%.
-    """
-    if not screen_w or not screen_h:
-        screen_w, screen_h = get_screen_size()
-
-    total_apps = max(1, total_apps)
-
-    half_w = int(screen_w * 0.5)
-    cell_h = int(screen_h / total_apps)
-    left = half_w
-    top = index * cell_h
-    right = screen_w
-    bottom = (index + 1) * cell_h
-    return left, top, right, bottom
-
-def launch_game(package, game_id, bounds=None, freeform=True):
-    """Launch Roblox game directly into place ID for targeted clone package."""
-    game_id = str(game_id).strip()
-    if not game_id:
-        game_id = '2753915549'
-
-    if '?privateServerLinkCode=' in game_id:
-        parts = game_id.split('?privateServerLinkCode=', 1)
-        place_id = parts[0]
-        link_code = parts[1]
-        url = f'roblox://placeId={place_id}&linkCode={link_code}'
-        web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
-    elif game_id.startswith('http'):
-        match = re.search(r'/games/(\d+)', game_id)
-        place_id = match.group(1) if match else game_id
-        ps_match = re.search(r'privateServerLinkCode=([^&]+)', game_id)
-        if ps_match:
-            url = f'roblox://placeId={place_id}&linkCode={ps_match.group(1)}'
-            web_url = game_id
-        else:
-            url = f'roblox://placeId={place_id}'
-            web_url = f'https://www.roblox.com/games/{place_id}'
-    else:
-        url = f'roblox://placeId={game_id}'
-        web_url = f'https://www.roblox.com/games/{game_id}'
-
-    # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
-    # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
-    intents = [
-        f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
-        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
+    HOME_SIGNALS = [
+        'for you', 'charts', 'recommended for', 'moments',
+        'reactrootview', 'reactviewgroup', 'reactframelayout',
+        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
+        'loginactivity', 'welcomeactivity', 'titleactivity',
+        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell',
     ]
 
-    for cmd in intents:
+    GAME_SIGNALS = [
+        'renderview', 'nativegl', 'gamecanvas', 'raknet',
+        'robloxplace', 'placeview', 'engineview', 'surfaceview -',
+    ]
+
+    # Step 1: Inspect dumpsys activity top task block
+    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
-            if res.returncode == 0 and "Error" not in res.stdout:
-                return True
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            content = res.stdout
+            if not content.strip():
+                continue
+
+            pkg_lines = get_package_activity_dump(package, content)
+            if not pkg_lines:
+                pkg_lines = [line for line in content.split('\n') if package in line]
+
+            if pkg_lines:
+                full_block = '\n'.join(pkg_lines).lower()
+
+                # Rule A: If Activity state is STOPPED (mStopped=true), Roblox is on Home Screen / Lobby!
+                if 'mstopped=true' in full_block:
+                    return False
+
+                # Strip Activity header line for view hierarchy checks
+                view_hierarchy = pkg_lines[1:] if len(pkg_lines) > 1 else pkg_lines
+                block_text = '\n'.join(view_hierarchy).lower()
+
+                # Rule B: Check for Home-screen UI text & React Native UI signals
+                if any(sig in block_text for sig in HOME_SIGNALS):
+                    return False
+
+                # Rule C: Check for confirmed in-game 3D rendering surfaces
+                if any(sig in block_text for sig in GAME_SIGNALS):
+                    return True
+
+                # Rule D: Check for Activity RESUMED state without stopped
+                if 'mresumed=true' in full_block and 'mstopped=false' in full_block:
+                    return True
+
         except Exception:
             pass
 
-    return False
-
-def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
-    """Auto-arrange/tile running Roblox app windows on screen."""
-    set_landscape_orientation()
-    if packages is None:
-        packages = config.get('selected_packages', [])
-    if not packages:
-        packages = get_roblox_packages()
-
-    if not game_id:
-        game_id = config.get('game_id', '')
-
-    w, h = get_screen_size()
-    total = len(packages)
-    print(f"[+] Auto-sorting {total} window(s) on screen ({w}x{h}, landscape)...")
-
-    for idx, pkg in enumerate(packages):
-        bounds = calculate_window_bounds(idx, total, w, h, mode=mode)
-        print(f"  -> Positioning {pkg} bounds: {bounds}")
-        launch_game(pkg, game_id, bounds=bounds, freeform=True)
-        time.sleep(1)
-
-def force_stop_app(package):
-    """Force stop an application using am force-stop (hard-protects Termux)."""
-    if not package or "termux" in str(package).lower():
-        return False
-    try:
-        subprocess.run(f"su -c 'am force-stop {package}'", shell=True, timeout=5)
+    # Step 2: Check UDP Socket Game Connection State
+    udp_st = is_udp_game_connected(package)
+    if udp_st is not None and udp_st is True:
         return True
-    except Exception as e:
-        print(f"[!] Force stop error: {e}")
-        return False
+
+    # Step 3: Check latest Roblox log file tail
+    log_st = check_roblox_log_status(package)
+    if log_st is not None:
+        return log_st
+
+    # Step 4: Default fallback (return False to trigger safe Home Page rejoin)
+    return False
 
 
 def get_screen_size():

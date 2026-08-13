@@ -82,12 +82,11 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 15
-**Fix:** Window # Boundary Block Isolation & Safety Circuit Breakers
-- Integrated `target_block` container isolation (`Window #` boundary splitter) in `is_app_in_game()` to analyze `block_text` exclusively belonging to your clone package.
-- Applied `len(clean_pkg) < 5` and `termux` safety circuit breakers across `is_app_running()`, `is_app_in_game()`, and `force_stop_app()` to prevent root commands (`su -c 'am force-stop'`) from receiving empty string parameters.
+### 2026-08-14 — Session 12
+**Fix:** Activity Lifecycle State detection (`mStopped=true`) for Clone Packages
+- Added `mstopped=true` check in `is_app_in_game()` based on device dumpsys output for `free.nokaA/com.roblox.client.ActivityNativeMain`. When the clone app returns to the Home Screen/Lobby, Android marks the Activity state as `mStopped=true`, instantly triggering Home Page detection and auto-rejoin.
 ```bash
-git commit -m "Fix target_block Window # boundary isolation & add len(clean_pkg) < 5 circuit breakers" && git push origin main
+git commit -m "Fix Clone detection: check mStopped=true Activity state for ActivityNativeMain Home Page detection" && git push origin main
 ```
 
 ---
