@@ -82,11 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 13
-**Fix:** Removed vague `/proc/<pid>/fd` socket count check in `is_udp_game_connected()`
-- Roblox creates HTTP/HTTPS sockets for downloading assets on the Home Screen, which caused `socket_count >= 3` to return `True` (`Ingame`) on the Home Screen. Removed vague socket count check and restricted `is_udp_game_connected()` to established RakNet UDP game server sockets.
+### 2026-08-14 — Session 14
+**Fix:** Process Dead & Closed App Rejoin Detection
+- Removed `ps -A` grep fallback from `is_app_running()` so background service threads do not prevent closed apps from being recognized as dead
+- Removed stale `.log` file fallback from `is_app_in_game()` so old historical log entries from previous games do not falsely report killed apps as `Ingame`
 ```bash
-git commit -m "Fix UDP check: remove vague fd socket count check that falsely flagged Home Screen HTTP sockets as Ingame" && git push origin main
+git commit -m "Fix Closed App Rejoin: restrict is_app_running to pidof PIDs & remove stale log file fallback" && git push origin main
 ```
 
 ---

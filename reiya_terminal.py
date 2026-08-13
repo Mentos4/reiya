@@ -204,24 +204,12 @@ def get_roblox_packages():
 
 def is_app_running(package):
     """Check if the app process is alive. Only returns True if a real numeric PID is found."""
-    # pidof returns space-separated PIDs when running, or empty/error when not.
-    # We validate the output is ONLY digits+spaces (a real PID), not error text.
     for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
             out = res.stdout.strip()
             # Must be non-empty AND all parts must be numeric (actual PIDs)
             if out and all(part.isdigit() for part in out.split()):
-                return True
-        except Exception:
-            pass
-    # Fallback: grep ps output for an exact line containing the package name
-    for cmd in [f"su -c 'ps -A | grep -F {package}'", f"ps -A | grep -F {package}"]:
-        try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            # Only count as running if the package appears in a non-grep process line
-            lines = [l for l in res.stdout.strip().split('\n') if package in l and 'grep' not in l]
-            if lines:
                 return True
         except Exception:
             pass
@@ -246,41 +234,12 @@ def get_package_activity_dump(package, content):
 
     return pkg_lines
 
-def check_roblox_log_status(package):
-    """
-    Inspect the latest Roblox log file tail to determine game connection state.
-    Returns True if log indicates active game connection, False if on Home Screen, or None if unavailable.
-    """
-    log_dirs = [
-        f"/sdcard/Android/data/{package}/files/logs",
-        f"/data/data/{package}/files/logs"
-    ]
-    for d in log_dirs:
-        try:
-            cmd = f"su -c 'ls -t {d}/*.log 2>/dev/null | head -n 1'"
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
-            latest_log = r.stdout.strip()
-            if latest_log:
-                cmd_tail = f"su -c 'tail -n 25 \"{latest_log}\"'"
-                r_tail = subprocess.run(cmd_tail, shell=True, capture_output=True, text=True, timeout=2)
-                text = r_tail.stdout.lower()
-                if not text:
-                    continue
-                if any(k in text for k in ['leaving game', 'disconnect', 'appshell', 'maintab', 'game left', 'return to home']):
-                    return False
-                if any(k in text for k in ['connecting to game', 'loading place', 'game joined', 'placeid']):
-                    return True
-        except Exception:
-            pass
-    return None
-
 def is_udp_game_connected(package):
     """
     Check if the package process has an active UDP socket (Roblox RakNet Game Server connection).
     Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
     """
     try:
-        # Get PID of target clone package
         res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
         out = res.stdout.strip()
         if not out:
@@ -292,7 +251,6 @@ def is_udp_game_connected(package):
             return False
 
         for pid in pids:
-            # Check for active UDP socket in ss or netstat (RakNet game server socket)
             r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
             if r_ss.stdout.strip() and 'ESTAB' in r_ss.stdout:
                 return True
@@ -367,12 +325,7 @@ def is_app_in_game(package):
     if udp_st is not None and udp_st is True:
         return True
 
-    # Step 3: Check latest Roblox log file tail
-    log_st = check_roblox_log_status(package)
-    if log_st is not None:
-        return log_st
-
-    # Step 4: Default fallback (return False to trigger safe Home Page rejoin)
+    # Step 3: Default fallback (return False to trigger safe Home Page rejoin)
     return False
 
 
