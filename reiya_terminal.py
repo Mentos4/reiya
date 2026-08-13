@@ -8,8 +8,9 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REIYA REJOIN ASCII Dashboard UI (2-line REIYA REJOIN block logo + clean settings & live stats table)
+- Stable 45-Second Rejoin Cooldown (Eliminates random status cycling/flickering while Roblox is loading)
 - Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
-- Instant App Exit & Crash Re-launch (Relaunches Roblox apps instantly when closed without 15s delay)
+- Instant App Exit & Crash Re-launch (Relaunches Roblox apps instantly when closed without delay)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -33,8 +34,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v5.2.0-DIRECT-PLACE-LAUNCH"
-BUILD_TIME = "2026-08-13 22:35:00 UTC"
+BUILD_VERSION = "v5.3.0-STABLE-STATUS-LOOP"
+BUILD_TIME = "2026-08-13 22:37:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -203,29 +204,35 @@ def is_app_running(package):
             pass
     return False
 
-def is_app_on_home_screen(package):
-    """Accurately check all window instances of package across multi-window layout."""
+def check_app_window_state(package):
+    """
+    Check exact window state of package from dumpsys window windows.
+    Returns: 'INGAME', 'HOME', 'DISCONNECT', or 'UNKNOWN'
+    """
     try:
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=4)
         lines = [line for line in res.stdout.split('\n') if package in line]
         if not lines:
-            return False
+            return 'UNKNOWN'
 
-        # If any window of package is in RobloxActivity -> Ingame!
         for line in lines:
             line_lower = line.lower()
             if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity', 'nativepage']):
-                return False
+                return 'INGAME'
 
-        # If package is open but no active game window exists -> Stuck on Home / Disconnect screen!
         for line in lines:
             line_lower = line.lower()
-            if any(hkw in line_lower for hkw in ['protocollaunch', 'mainactivity', 'splash', 'landing', 'disconnect', 'error']):
-                return True
+            if any(dkw in line_lower for dkw in ['disconnect', 'errordialog', 'join error', 'error']):
+                return 'DISCONNECT'
+
+        for line in lines:
+            line_lower = line.lower()
+            if any(hkw in line_lower for hkw in ['protocollaunch', 'mainactivity', 'splash', 'landing']):
+                return 'HOME'
     except Exception:
         pass
 
-    return False
+    return 'UNKNOWN'
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -704,9 +711,6 @@ class TerminalRejoinLoop:
             pass
 
     def _loop(self, packages, cfg):
-        offline_wait   = float(cfg.get('offline_wait', 15))
-        max_retries    = int(cfg.get('retry_count', 3))
-        retry_delay    = float(cfg.get('retry_delay', 30))
         check_interval = float(cfg.get('check_interval', 10))
         delay_open_tab = float(cfg.get('launch_wait', 15))
         sequential     = cfg.get('sequential_join', False)
@@ -715,12 +719,10 @@ class TerminalRejoinLoop:
         window_mode    = cfg.get('window_mode', 'left_stack')
         home_check     = cfg.get('home_rejoin_enabled', True)
 
-        retries   = {p: 0 for p in packages}
-        last_seen = {p: time.time() for p in packages}
-
         w, h = get_screen_size()
         total_apps = len(packages)
 
+        # Launch all packages on initial start
         for i, pkg in enumerate(packages):
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
@@ -730,8 +732,7 @@ class TerminalRejoinLoop:
             if sequential and i < len(packages) - 1:
                 time.sleep(delay_open_tab)
 
-        if not sequential and delay_open_tab > 0:
-            time.sleep(delay_open_tab)
+        time.sleep(5)
 
         while self.running:
             for i, pkg in enumerate(packages):
@@ -740,43 +741,43 @@ class TerminalRejoinLoop:
 
                 gid = self._get_game_id(pkg, cfg)
                 running = is_app_running(pkg)
+                time_since_launch = time.time() - self.last_launch.get(pkg, 0)
 
-                if running:
-                    # Give initial 12-second grace period after launch before flagging home screen
-                    time_since_launch = time.time() - self.last_launch.get(pkg, 0)
-                    is_home = is_app_on_home_screen(pkg) if (home_check and time_since_launch > 12) else False
-
-                    if is_home:
-                        self.set_status(pkg, 'Home Page')
-                        time.sleep(1)
-                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        self.set_status(pkg, 'Rejoining')
-                        self.last_launch[pkg] = time.time()
-                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                        last_seen[pkg] = time.time()
-                    else:
-                        self.set_status(pkg, 'Ingame')
-                        last_seen[pkg] = time.time()
-                        retries[pkg] = 0
-                else:
-                    # App is closed / force-stopped by user -> IMMEDIATELY RELAUNCH!
+                if not running:
+                    # App crashed or force-closed -> Relaunch immediately!
                     self.set_status(pkg, 'Rejoining')
-                    if retries[pkg] >= max_retries:
-                        self.set_status(pkg, 'Cooldown')
-                        time.sleep(retry_delay)
-                        retries[pkg] = 0
-                    else:
-                        retries[pkg] += 1
-                        if auto_clear:
-                            clear_app_cache(pkg)
-                            time.sleep(1)
+                    if auto_clear:
+                        clear_app_cache(pkg)
+                        time.sleep(1)
 
-                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        self.last_launch[pkg] = time.time()
-                        ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                        if ok:
-                            last_seen[pkg] = time.time()
-                        time.sleep(3)
+                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                    self.last_launch[pkg] = time.time()
+                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                    time.sleep(2)
+                    continue
+
+                # App IS running. Allow 35 seconds cooldown after launching before checking windows
+                if time_since_launch <= 35:
+                    self.set_status(pkg, 'Launching')
+                    continue
+
+                # Inspect window state via dumpsys
+                wstate = check_app_window_state(pkg) if home_check else 'INGAME'
+
+                if wstate == 'INGAME':
+                    self.set_status(pkg, 'Ingame')
+                elif wstate in ['HOME', 'DISCONNECT']:
+                    # On Home Screen or Disconnected -> Rejoin game!
+                    self.set_status(pkg, 'Home Page')
+                    time.sleep(1)
+                    self.set_status(pkg, 'Rejoining')
+                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                    self.last_launch[pkg] = time.time()
+                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                    time.sleep(2)
+                else:
+                    # Window state unknown -> Default to Ingame if running
+                    self.set_status(pkg, 'Ingame')
 
             time.sleep(check_interval)
 
