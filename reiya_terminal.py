@@ -3,7 +3,7 @@
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
-- Smart Package Sorting (Roblox & Executor packages placed at the top of the list)
+- Roblox & Executor ONLY Filtering (detects all original Roblox apps & clones: com.roblox.client, free.nokaA, Delta, etc.)
 - Direct Game Launching via Place ID or Private Server Link
 - Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
 - Package-targeted Intent launching (bypasses "Open With" dialogs completely)
@@ -158,14 +158,15 @@ def get_installed_packages():
     return sorted(list(packages))
 
 def get_roblox_packages():
-    """Detect all installed packages dynamically, prioritizing Roblox/Executors at the top."""
+    """Filter all installed packages to ONLY include Roblox apps, Roblox clones, and Executors."""
     all_pkgs = get_installed_packages()
-    keywords = ['roblox', 'noka', 'blox', 'delta', 'arceus', 'executor']
+    keywords = [
+        'roblox', 'noka', 'blox', 'delta', 'arceus', 'executor',
+        'codex', 'fluxus', 'trigon', 'vegas', 'hydrogen', 'evon', 'krnl'
+    ]
 
     roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
-    other_pkgs = [p for p in all_pkgs if p not in roblox_pkgs]
-
-    return roblox_pkgs + other_pkgs
+    return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
     """Check if process is currently running using pidof and ps -A."""
@@ -734,7 +735,7 @@ def show_status():
     print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
 
     roblox_pkgs = get_roblox_packages()
-    print(f"\nPackages Installed ({len(roblox_pkgs)}):")
+    print(f"\nRoblox & Executor Packages ({len(roblox_pkgs)}):")
     for pkg in roblox_pkgs:
         running = is_app_running(pkg)
         status_str = "RUNNING" if running else "STOPPED"
@@ -766,23 +767,14 @@ def interactive_menu():
             show_status()
             input("\nPress Enter to return to menu...")
         elif choice == '2':
-            all_pkgs = get_roblox_packages()
-            keywords = ['roblox', 'noka', 'blox', 'delta', 'arceus', 'executor']
+            roblox_pkgs = get_roblox_packages()
 
-            roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
-            other_pkgs = [p for p in all_pkgs if p not in roblox_pkgs]
-
-            print(f"\n--- [ DETECTED PACKAGES ({len(all_pkgs)}) ] ---")
-            if roblox_pkgs:
-                print("\n=== [ RECOMMENDED: ROBLOX & EXECUTORS ] ===")
+            print(f"\n--- [ DETECTED ROBLOX & EXECUTOR PACKAGES ({len(roblox_pkgs)}) ] ---")
+            if not roblox_pkgs:
+                print("  [!] No standard Roblox/Executor packages auto-detected.")
+                print("  -> Use option 'M' below or type your package name directly!")
+            else:
                 for idx, p in enumerate(roblox_pkgs, 1):
-                    sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
-                    print(f"  {idx}. {p:<35} [{sel}]")
-
-            if other_pkgs:
-                start_idx = len(roblox_pkgs) + 1
-                print("\n=== [ OTHER INSTALLED APPS ] ===")
-                for idx, p in enumerate(other_pkgs, start_idx):
                     sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
                     print(f"  {idx}. {p:<35} [{sel}]")
 
@@ -808,8 +800,8 @@ def interactive_menu():
                         sel_set.add(item)
                     elif item.isdigit():
                         i = int(item) - 1
-                        if 0 <= i < len(all_pkgs):
-                            target = all_pkgs[i]
+                        if 0 <= i < len(roblox_pkgs):
+                            target = roblox_pkgs[i]
                             if target in sel_set:
                                 sel_set.remove(target)
                             else:
