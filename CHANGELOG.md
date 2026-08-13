@@ -82,12 +82,11 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 14
-**Fix:** Process Dead & Closed App Rejoin Detection
-- Removed `ps -A` grep fallback from `is_app_running()` so background service threads do not prevent closed apps from being recognized as dead
-- Removed stale `.log` file fallback from `is_app_in_game()` so old historical log entries from previous games do not falsely report killed apps as `Ingame`
+### 2026-08-14 — Session 15
+**Fix:** Hardware WindowManager Surface State Detection (`mHasSurface=false`, `isVisible=false`)
+- Added Step 1 WindowManager inspection in `is_app_in_game()` to check hardware surface flags (`mHasSurface=false`, `isVisible=false`, `isOnScreen=false`, `mDrawState=NO_SURFACE`) from `dumpsys window windows`. When sitting on the Roblox Home Screen or paused, WindowManager marks the 3D surface as inactive (`mHasSurface=false`), cleanly triggering Home Page detection and auto-rejoin.
 ```bash
-git commit -m "Fix Closed App Rejoin: restrict is_app_running to pidof PIDs & remove stale log file fallback" && git push origin main
+git commit -m "Fix Clone detection: WindowManager mHasSurface=false & isVisible=false hardware surface check" && git push origin main
 ```
 
 ---
