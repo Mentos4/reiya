@@ -6,7 +6,8 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
-- Clean Single-Quoted Shell Execution (Fixes nested quote parsing issue in su -c am start)
+- Live Refresh Dashboard (ANSI colored live table: No, Package, Status, Game, CPU/RAM, Feature Toggles)
+- Non-blocking live refresh via select.select (Press Enter anytime to return to main menu)
 - Roblox Home Screen / Disconnect Detection & Auto Re-entry
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -27,10 +28,11 @@ import threading
 import urllib.request
 import urllib.parse
 import mimetypes
+import select
 
 # Script version & timestamp
-BUILD_VERSION = "v3.1.0-CLEAN-SHELL-LAUNCH"
-BUILD_TIME = "2026-08-13 22:11:00 UTC"
+BUILD_VERSION = "v3.2.0-LIVE-DASHBOARD-UI"
+BUILD_TIME = "2026-08-13 22:16:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -519,7 +521,7 @@ class WebhookThread(threading.Thread):
         self.running = False
 
 # ==============================================================================
-# 4. AUTO REJOIN MONITORING LOOP
+# 4. AUTO REJOIN MONITORING LOOP & LIVE DASHBOARD
 # ==============================================================================
 
 class TerminalRejoinLoop:
@@ -586,6 +588,88 @@ class TerminalRejoinLoop:
             self.webhook_thread.stop()
         self.log("Auto rejoin loop stopped.")
 
+    def render_live_dashboard(self, cfg):
+        """Render live-updating ANSI dashboard UI matching reference design."""
+        GREEN  = "\033[92m"
+        RED    = "\033[91m"
+        YELLOW = "\033[93m"
+        CYAN   = "\033[96m"
+        BOLD   = "\033[1m"
+        RESET  = "\033[0m"
+
+        pkgs = cfg.get('selected_packages', [])
+        if not pkgs:
+            pkgs = get_roblox_packages()
+
+        gname = cfg.get('game_name') or (f"Place: {cfg.get('game_id')}" if cfg.get('game_id') else 'Blox Fruits')
+        if len(gname) > 20:
+            gname = gname[:17] + "..."
+
+        print("\n[+] Entering Live Dashboard Mode. Press [Enter] to return to Main Menu...\n")
+        time.sleep(1)
+
+        try:
+            while self.running:
+                # Clear terminal screen
+                print("\033[H\033[J", end="")
+
+                w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
+                s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
+                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
+                c_status = f"{GREEN}Enable{RESET}" if cfg.get('clear_cache', False) else f"{RED}Disable{RESET}"
+
+                cpu = get_cpu_usage()
+                used_ram, total_ram = get_ram_usage()
+
+                print(f"{BOLD}{CYAN}==================================================================={RESET}")
+                print(f"{BOLD}                    REIYA REJOIN CORE DASHBOARD                   {RESET}")
+                print(f"{CYAN}                     >>> Free Version <<<                          {RESET}")
+                print(f"{BOLD}{CYAN}==================================================================={RESET}")
+                print(f"  CHECK EXECUTOR METHOD: {BOLD}AUTO{RESET}")
+                print(f"  WEBHOOK: {w_status}       |  AUTO SORT TAB: {s_status}")
+                print(f"  HOME REJOIN: {h_status}   |  CLEAR CACHE: {c_status}")
+                print(f"-------------------------------------------------------------------")
+                print(f"  Cpu usage: {cpu:<5}%        | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB")
+                print(f"-------------------------------------------------------------------")
+                print(f"{BOLD}{'No':<3} | {'Package':<16} | {'Status':<14} | {'Game'}{RESET}")
+                print(f"----+------------------+----------------+--------------------------")
+
+                statuses = self.get_status()
+
+                for idx, p in enumerate(pkgs, 1):
+                    info = statuses.get(p, {})
+                    st = info.get('status', 'Waiting')
+
+                    if st == 'Ingame':
+                        st_colored = f"{GREEN}Ingame{RESET}"
+                    elif st in ['Rejoining', 'Rejoining Game']:
+                        st_colored = f"{RED}Rejoining{RESET}"
+                    elif st == 'Home Screen':
+                        st_colored = f"{YELLOW}Home Page{RESET}"
+                    elif st == 'Launching':
+                        st_colored = f"{CYAN}Launching{RESET}"
+                    elif st == 'Cooldown':
+                        st_colored = f"{RED}Cooldown{RESET}"
+                    else:
+                        st_colored = f"{st}"
+
+                    print(f"{idx:<3} | {p:<16} | {st_colored:<23} | 👆 {gname}")
+
+                print(f"-------------------------------------------------------------------")
+                print(f"{BOLD}Press [Enter] to return to Main Menu (loop runs in background)...{RESET}")
+
+                # Non-blocking input check for Linux/Termux
+                if os.name == 'posix':
+                    rlist, _, _ = select.select([sys.stdin], [], [], 2.0)
+                    if rlist:
+                        sys.stdin.readline()
+                        break
+                else:
+                    time.sleep(2.0)
+
+        except (KeyboardInterrupt, Exception):
+            pass
+
     def _loop(self, packages, cfg):
         offline_wait   = float(cfg.get('offline_wait', 15))
         max_retries    = int(cfg.get('retry_count', 3))
@@ -601,18 +685,12 @@ class TerminalRejoinLoop:
         retries   = {p: 0 for p in packages}
         last_seen = {p: time.time() for p in packages}
 
-        game_name = cfg.get('game_name', 'Unknown')
-        self.log(f"Starting auto rejoin — Game: {game_name}")
-        self.log(f"Packages ({len(packages)}): {', '.join(packages)}")
-        self.log(f"Check interval: {check_interval}s | Offline wait: {offline_wait}s")
-
         w, h = get_screen_size()
         total_apps = len(packages)
 
         for i, pkg in enumerate(packages):
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-            self.log(f"Launching {pkg} -> Place {gid or 'Default'} (Bounds: {bounds})")
             self.set_status(pkg, 'Launching')
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
@@ -630,11 +708,9 @@ class TerminalRejoinLoop:
                 running = is_app_running(pkg)
 
                 if running:
-                    # Check if stuck on Roblox Home Screen or Disconnect screen
                     is_home = is_app_on_home_screen(pkg) if home_check else False
                     if is_home:
-                        self.log(f"{pkg}: Detected Roblox Home Screen / Disconnect! Re-joining game place...")
-                        self.set_status(pkg, 'Rejoining Game')
+                        self.set_status(pkg, 'Home Screen')
                         bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                         launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                         last_seen[pkg] = time.time()
@@ -648,27 +724,21 @@ class TerminalRejoinLoop:
 
                     if offline_secs >= offline_wait:
                         if retries[pkg] >= max_retries:
-                            self.log(f"{pkg}: max retries ({max_retries}) hit! Cooldown {retry_delay}s...")
                             self.set_status(pkg, 'Cooldown')
                             time.sleep(retry_delay)
                             retries[pkg] = 0
                             last_seen[pkg] = time.time()
                         else:
                             retries[pkg] += 1
-                            attempt = f"{retries[pkg]}/{max_retries}"
-                            self.log(f"{pkg}: Rejoining attempt {attempt}...")
+                            self.set_status(pkg, 'Rejoining')
                             if auto_clear:
-                                self.log(f"{pkg}: Clearing cache...")
                                 clear_app_cache(pkg)
                                 time.sleep(2)
 
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                             ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                             if ok:
-                                self.log(f"{pkg}: Launch request sent OK.")
                                 last_seen[pkg] = time.time()
-                            else:
-                                self.log(f"{pkg}: Launch request failed!")
 
             time.sleep(check_interval)
 
@@ -742,7 +812,7 @@ def interactive_menu():
         print("5. Configure Timing & Auto-rejoin Options")
         print("6. Auto-Sort / Tile Windows Layout Configuration")
         print("7. Autoexecute Script Manager")
-        print("8. START Auto Rejoin Loop")
+        print("8. START Auto Rejoin Loop & Live Dashboard")
         print("9. STOP Auto Rejoin Loop")
         print("10. Auto-Sort / Tile Open Windows NOW")
         print("11. Test Launch Selected Package Now")
@@ -910,8 +980,7 @@ def interactive_menu():
 
         elif choice == '8':
             rejoin_engine.start(config)
-            print("\n[+] Auto Rejoin Engine started in background.")
-            input("\nPress Enter to return to menu...")
+            rejoin_engine.render_live_dashboard(config)
 
         elif choice == '9':
             rejoin_engine.stop()
