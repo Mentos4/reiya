@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Rei Core Global - Terminal / Termux Edition
-Single standalone CLI script combining all core functions of Rei Roblox Account Manager:
+REI REJOIN Core Global - Terminal / Termux Edition
+Single standalone CLI script combining all core functions of REI REJOIN Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.2.0-HOMEPAGE-CALLBACK-REJOIN"
-BUILD_TIME = "2026-08-13 22:45:00 UTC"
+BUILD_VERSION = "v6.3.0-REI-REJOIN"
+BUILD_TIME = "2026-08-13 22:46:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -465,7 +465,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         description += f'\n**Application Details:**\n{app_lines}'
 
     embed = {
-        'title': 'Rei Rejoin Core',
+        'title': 'REI REJOIN Core',
         'description': description,
         'color': 0x00CCCC,
         'footer': {'text': 'Roblox Account Manager CLI'},
@@ -809,7 +809,7 @@ def add_autoexecute_script(folder_path, filename, code):
 
 def print_banner():
     print("\n" + "=" * 60)
-    print("        REI ROBLOX ACCOUNT MANAGER - TERMUX CLI CORE        ")
+    print("        REI REJOIN ROBLOX ACCOUNT MANAGER - CLI CORE        ")
     print(f"      [{BUILD_VERSION}] - Updated: {BUILD_TIME}")
     print("=" * 60)
 
@@ -1050,7 +1050,7 @@ def interactive_menu():
         elif choice == '0':
             if rejoin_engine.running:
                 rejoin_engine.stop()
-            print("Exiting Reiya CLI. Goodbye!")
+            print("Exiting REI REJOIN CLI. Goodbye!")
             sys.exit(0)
 
 # ==============================================================================
@@ -1058,7 +1058,7 @@ def interactive_menu():
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Rei Roblox Account Manager - Global Termux Core Script")
+    parser = argparse.ArgumentParser(description="REI REJOIN Roblox Account Manager - Global Termux Core Script")
     parser.add_argument("--daemon", action="store_true", help="Run auto-rejoin immediately in headless daemon mode")
     parser.add_argument("--scan", action="store_true", help="Scan installed Roblox packages and list them")
     parser.add_argument("--sort", action="store_true", help="Auto-sort and tile open Roblox windows on screen")
