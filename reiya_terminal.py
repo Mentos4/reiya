@@ -203,21 +203,25 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive using pidof and ps -A."""
-    # pidof is fastest - returns space-separated PIDs if running
+    """Check if the app process is alive. Only returns True if a real numeric PID is found."""
+    # pidof returns space-separated PIDs when running, or empty/error when not.
+    # We validate the output is ONLY digits+spaces (a real PID), not error text.
     for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
             out = res.stdout.strip()
-            if out:  # Any non-empty output = PID(s) found = running
+            # Must be non-empty AND all parts must be numeric (actual PIDs)
+            if out and all(part.isdigit() for part in out.split()):
                 return True
         except Exception:
             pass
-    # Fallback: scan ps -A process list
-    for cmd in ["su -c 'ps -A'", 'ps -A']:
+    # Fallback: grep ps output for an exact line containing the package name
+    for cmd in [f"su -c 'ps -A | grep -F {package}'", f"ps -A | grep -F {package}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            if package in res.stdout:
+            # Only count as running if the package appears in a non-grep process line
+            lines = [l for l in res.stdout.strip().split('\n') if package in l and 'grep' not in l]
+            if lines:
                 return True
         except Exception:
             pass
@@ -261,8 +265,9 @@ def is_app_in_game(package):
         except Exception:
             pass
 
-    # Could not determine → fall back to simple process check
-    return is_app_running(package)
+    # Could not determine from activity stack.
+    # Return False so the loop tries to rejoin — safer than staying stuck on 'Ingame'.
+    return False
 
 
 def get_screen_size():
@@ -650,9 +655,7 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating terminal dashboard. Fully responsive to terminal width."""
-        import shutil
-
+        """Live-updating terminal dashboard. Fixed compact layout, safe for narrow terminals."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -669,102 +672,97 @@ class TerminalRejoinLoop:
         set_landscape_orientation()
         time.sleep(0.5)
 
-        def trunc(s, width):
-            """Strip ANSI codes for length measurement, then truncate plain text."""
-            plain = re.sub(r'\033\[[0-9;]*m', '', s)
-            if len(plain) > width:
-                return s[:width - 3] + '...'
-            return s
-
         try:
             while self.running:
                 clear_terminal_screen()
 
-                # Get actual terminal width every refresh
+                # Get real terminal width via stty (works in split-screen Termux)
                 try:
-                    tw = shutil.get_terminal_size((60, 24)).columns
+                    r = subprocess.run('stty size', shell=True, capture_output=True, text=True, timeout=2)
+                    _, cols = r.stdout.strip().split()
+                    W = max(36, int(cols))
                 except Exception:
-                    tw = 60
-                tw = max(tw, 36)  # minimum usable width
+                    W = 48  # safe fallback for split-screen
 
-                sep = '-' * tw
+                SEP = '-' * W
 
-                w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
-                s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
-                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
-                c_status = f"{GREEN}Enable{RESET}" if cfg.get('clear_cache') else f"{RED}Disable{RESET}"
+                w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
+                s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
+                h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
+                c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # ── Header ────────────────────────────────────────────────
+                def strip(s):
+                    return re.sub(r'\033\[[0-9;]*m', '', s)
+
+                def rpad(colored, target_vis_len):
+                    """Pad a colored string so its visible width = target_vis_len."""
+                    vis = len(strip(colored))
+                    return colored + ' ' * max(0, target_vis_len - vis)
+
+                # ── Header ────────────────────────────────────────
                 title = "REI  REJOIN"
-                pad   = max(0, (tw - len(title)) // 2)
-                print(f"{BOLD}{CYAN}{'=' * tw}{RESET}")
+                pad   = max(0, (W - len(title)) // 2)
+                print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
                 print(f"{BOLD}{CYAN}{' ' * pad}{title}{RESET}")
-                print(f"{BOLD}{CYAN}{'=' * tw}{RESET}")
-                print(trunc(f"  By seisen_ | discord.gg/5G3cStpbcx", tw))
-                print(sep)
+                print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
+                # Info line — truncate to W
+                info = f" By seisen_ | discord.gg/5G3cStpbcx"
+                print(info[:W])
+                print(SEP)
 
-                # ── Settings (two per row) ────────────────────────────────
-                left1  = f"WEBHOOK: {w_status}"
-                right1 = f"AUTO SORT: {s_status}"
-                left2  = f"HOME REJOIN: {h_status}"
-                right2 = f"CLEAR CACHE: {c_status}"
+                # ── Settings (2 per row, half-width each) ─────────
+                half = W // 2
+                l1 = f"WEBHOOK: {w_st}"
+                r1 = f"SORT: {s_st}"
+                l2 = f"HOME: {h_st}"
+                r2 = f"CACHE: {c_st}"
+                print(rpad(l1, half) + r1)
+                print(rpad(l2, half) + r2)
+                print(SEP)
 
-                half = tw // 2
-                # Plain lengths for alignment (strip ANSI)
-                l1p = re.sub(r'\033\[[0-9;]*m', '', left1)
-                l2p = re.sub(r'\033\[[0-9;]*m', '', left2)
-                pad1 = max(1, half - len(l1p))
-                pad2 = max(1, half - len(l2p))
-                print(f"{left1}{' ' * pad1}{right1}")
-                print(f"{left2}{' ' * pad2}{right2}")
-                print(sep)
+                # ── Stats ──────────────────────────────────────────
+                stat_line = f" CPU:{cpu}%  RAM:{used_ram:.1f}/{total_ram:.1f}GB"
+                print(stat_line[:W])
+                print(SEP)
 
-                # ── Stats ─────────────────────────────────────────────────
-                stats_line = f" CPU: {cpu:<5}%  |  RAM: {used_ram:.1f}/{total_ram:.1f}GB"
-                print(trunc(stats_line, tw))
-                print(sep)
+                # ── Table ──────────────────────────────────────────
+                # Fixed column visible widths; adjusted for W
+                cn = 2                          # No
+                cu = min(9,  max(5, W//6))      # User
+                cp = min(11, max(7, W//5))      # Package
+                cs = min(9,  max(6, W//6))      # Status
+                cg = max(4, W - cn - cu - cp - cs - 4)  # Game (4 pipes)
 
-                # ── Table header ──────────────────────────────────────────
-                # Column widths scaled to terminal width
-                c_no  = 2
-                c_un  = min(10, max(6, (tw - c_no - 4) // 4))
-                c_pkg = min(12, max(6, (tw - c_no - 4) // 4))
-                c_st  = min(10, max(6, (tw - c_no - 4) // 4))
-                c_gm  = max(4, tw - c_no - c_un - c_pkg - c_st - 7)  # 7 = separators
+                gname_t = gname[:cg] if len(gname) <= cg else gname[:cg-2] + '..'
 
-                h_line = (f"{'No':<{c_no}}|{'User':<{c_un}}|{'Package':<{c_pkg}}"
-                          f"|{'Status':<{c_st}}|{'Game':<{c_gm}}")
-                print(f"{BOLD}{h_line[:tw]}{RESET}")
-                print(sep)
+                hdr = f"{'No':<{cn}}|{'User':<{cu}}|{'Package':<{cp}}|{'Status':<{cs}}|{'Game'}"
+                print(f"{BOLD}{hdr[:W]}{RESET}")
+                print(SEP)
 
-                # ── Rows ──────────────────────────────────────────────────
                 statuses = self.get_status()
-                gname_trunc = gname if len(gname) <= c_gm else gname[:c_gm-3] + '...'
-
                 for idx, p in enumerate(pkgs, 1):
-                    info = statuses.get(p, {})
-                    st   = info.get('status', 'Launching')
-                    uname = f"wu***{idx:02d}"
+                    info_d  = statuses.get(p, {})
+                    st      = info_d.get('status', 'Launching')
+                    uname   = f"wu***{idx:02d}"
 
-                    if   st == 'Ingame':                           st_colored = f"{GREEN}Ingame{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):    st_colored = f"{RED}Rejoining{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):       st_colored = f"{YELLOW}HomePg{RESET}"
-                    elif st == 'Launching':                        st_colored = f"{CYAN}Launching{RESET}"
-                    else:                                          st_colored = st
+                    if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
+                    elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
+                    else:                                        st_c = st[:cs]
 
-                    pkg_t  = p if len(p) <= c_pkg else p[:c_pkg-1] + '.'
-                    # Build row — use ANSI-aware padding for status column
-                    row = (f"{idx:<{c_no}}|{uname:<{c_un}}|{pkg_t:<{c_pkg}}"
-                           f"|{st_colored:<{c_st + 9}}|{gname_trunc}")
+                    pkg_t = p[:cp] if len(p) <= cp else p[:cp-1] + '.'
+
+                    row = (f"{idx:<{cn}}|{uname:<{cu}}|{pkg_t:<{cp}}"
+                           f"|{rpad(st_c, cs)}|{gname_t}")
                     print(row)
 
-                print(sep)
+                print(SEP)
                 print(f"{BOLD}[Enter] Main Menu{RESET}")
 
-                # Non-blocking input check
                 if os.name == 'posix':
                     rlist, _, _ = select.select([sys.stdin], [], [], 2.0)
                     if rlist:
