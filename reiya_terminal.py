@@ -8,7 +8,8 @@ Single standalone CLI script combining all core functions of Rei Roblox Account 
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Clean REI REJOIN CORE Live Dashboard with accurate 4-toggle settings header
-- Instant Home Page & Disconnect Detection (Triggers immediate game rejoin when focus leaves RobloxActivity)
+- Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
+- Initial Launch Grace Period (Prevents false home-screen triggers while Roblox is loading game assets)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -31,8 +32,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v4.3.0-REI-REJOIN-CORE"
-BUILD_TIME = "2026-08-13 22:25:00 UTC"
+BUILD_VERSION = "v4.4.0-MULTI-WINDOW-ACCURATE"
+BUILD_TIME = "2026-08-13 22:27:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -202,25 +203,24 @@ def is_app_running(package):
     return False
 
 def is_app_on_home_screen(package):
-    """Check if app is currently on Roblox Home Screen or Disconnect dialog (not in RobloxActivity)."""
+    """Accurately check all window instances of package across multi-window layout."""
     try:
-        res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=3)
-        for line in res.stdout.split('\n'):
-            if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package in line:
-                line_lower = line.lower()
-                if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity']):
-                    return False
-                return True
-    except Exception:
-        pass
+        res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=4)
+        lines = [line for line in res.stdout.split('\n') if package in line]
+        if not lines:
+            return False
 
-    try:
-        res = subprocess.run("su -c 'dumpsys activity top'", shell=True, capture_output=True, text=True, timeout=3)
-        if package in res.stdout:
-            res_lower = res.stdout.lower()
-            if any(gkw in res_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity']):
+        # If any window of package is in RobloxActivity -> Ingame!
+        for line in lines:
+            line_lower = line.lower()
+            if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity', 'nativepage']):
                 return False
-            return True
+
+        # If package is open but no active game window exists -> Stuck on Home / Disconnect screen!
+        for line in lines:
+            line_lower = line.lower()
+            if any(hkw in line_lower for hkw in ['protocollaunch', 'mainactivity', 'splash', 'landing', 'disconnect', 'error']):
+                return True
     except Exception:
         pass
 
@@ -538,6 +538,7 @@ class TerminalRejoinLoop:
     def __init__(self):
         self.running = False
         self.status = {}
+        self.last_launch = {}
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
@@ -708,6 +709,7 @@ class TerminalRejoinLoop:
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
+            self.last_launch[pkg] = time.time()
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
                 time.sleep(delay_open_tab)
@@ -724,11 +726,16 @@ class TerminalRejoinLoop:
                 running = is_app_running(pkg)
 
                 if running:
-                    is_home = is_app_on_home_screen(pkg) if home_check else False
+                    # Give initial 12-second grace period after launch before flagging home screen
+                    time_since_launch = time.time() - self.last_launch.get(pkg, 0)
+                    is_home = is_app_on_home_screen(pkg) if (home_check and time_since_launch > 12) else False
+
                     if is_home:
                         self.set_status(pkg, 'Home Page')
+                        time.sleep(1)
                         bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                         self.set_status(pkg, 'Rejoining')
+                        self.last_launch[pkg] = time.time()
                         launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                         last_seen[pkg] = time.time()
                     else:
@@ -753,6 +760,7 @@ class TerminalRejoinLoop:
                                 time.sleep(2)
 
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                            self.last_launch[pkg] = time.time()
                             ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                             if ok:
                                 last_seen[pkg] = time.time()
