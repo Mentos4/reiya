@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Reiya Core Global - Terminal / Termux Edition
-Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
+Rei Core Global - Terminal / Termux Edition
+Single standalone CLI script combining all core functions of Rei Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
-- Exact Match REIYA REJOIN ASCII Dashboard UI (2-line REIYA REJOIN block logo + clean settings & live stats table)
+- Exact Match REI REJOIN ASCII Dashboard UI (2-line REI REJOIN block logo + clean settings & live stats table)
 - Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
 - Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
@@ -34,8 +34,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.0.0-PERFECT-REJOIN-UI"
-BUILD_TIME = "2026-08-13 22:40:00 UTC"
+BUILD_VERSION = "v6.1.0-REI-REJOIN-CLEAN"
+BUILD_TIME = "2026-08-13 22:44:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -464,7 +464,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         description += f'\n**Application Details:**\n{app_lines}'
 
     embed = {
-        'title': 'Reiya Rejoin Core',
+        'title': 'Rei Rejoin Core',
         'description': description,
         'color': 0x00CCCC,
         'footer': {'text': 'Roblox Account Manager CLI'},
@@ -614,7 +614,7 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI matching exact reference image for REIYA REJOIN."""
+        """Render live-updating ANSI dashboard UI matching exact reference image for REI REJOIN."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -640,30 +640,28 @@ class TerminalRejoinLoop:
                 clear_terminal_screen()
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
-                a_status = f"{GREEN}Enable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
+                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RED}"
                 c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Big 2-Line ASCII Logo matching user screenshot
+                # Big 2-Line ASCII Logo for REI REJOIN
                 print(f"{BOLD}{CYAN}")
-                print(r"  ██████╗ ███████╗██╗██╗   ██╗██╗  ██╗    ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
-                print(r"  ██╔══██╗██╔════╝██║╚██╗ ██╔╝██║  ██║    ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
-                print(r"  ██████╔╝█████╗  ██║ ╚████╔╝ ███████║    ██████╔╝█████╗  ██║██║   ██║██║██║")
-                print(r"  ██╔══██╗██╔══╝  ██║  ╚██╔╝  ██╔══██║    ██╔══██╗██╔══╝  ██║██║   ██║██║██║")
-                print(r"  ██║  ██║███████╗██║   ██║   ██║  ██║    ██║  ██║███████╗██║╚██████╔╝██║██║")
-                print(r"  ╚═╝  ╚═╝╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝    ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝╚═╝")
+                print(r"  ██████╗ ███████╗██╗    ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
+                print(r"  ██╔══██╗██╔════╝██║    ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
+                print(r"  ██████╔╝█████╗  ██║    ██████╔╝█████╗  ██║██║   ██║██║██║")
+                print(r"  ██╔══██╗██╔══╝  ██║    ██╔══██╗██╔══╝  ██║██║   ██║██║██║")
+                print(r"  ██║  ██║███████╗██║    ██║  ██║███████╗██║╚██████╔╝██║██║")
+                print(r"  ╚═╝  ╚═╝╚══════╝╚═╝    ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝╚═╝")
                 print(f"{RESET}")
                 print(f"       {BOLD}{BLUE}> > > Premium Version < < <{RESET}")
                 print(f"Discord: {BLUE}discord.gg/5G3cStpbcx{RESET}")
                 print(f"Made by {CYAN}_g_huy{RESET}")
                 print(f"CHECK EXECUTOR METHOD: {GREEN}AUTO{RESET}")
-                print(f"WEBHOOK: {w_status}")
-                print(f"AUTO BYPASS: {a_status}")
-                print(f"AUTO SORT TAB: {s_status}")
-                print(f"AUTO CHANGE ACCOUNT: {c_status}")
+                print(f"WEBHOOK: {w_status}            | AUTO SORT TAB: {s_status}")
+                print(f"HOME REJOIN: {h_status}        | CLEAR CACHE: {c_status}")
                 print(f"----------------------------------------------------------")
                 print(f" Cpu usage: {cpu:<5} %     | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB |")
                 print(f"----------------------------------------------------------")
@@ -802,7 +800,7 @@ def add_autoexecute_script(folder_path, filename, code):
 
 def print_banner():
     print("\n" + "=" * 60)
-    print("      REIYA ROBLOX ACCOUNT MANAGER - TERMUX CLI CORE       ")
+    print("        REI ROBLOX ACCOUNT MANAGER - TERMUX CLI CORE        ")
     print(f"      [{BUILD_VERSION}] - Updated: {BUILD_TIME}")
     print("=" * 60)
 
@@ -1043,7 +1041,7 @@ def interactive_menu():
         elif choice == '0':
             if rejoin_engine.running:
                 rejoin_engine.stop()
-            print("Exiting Reiya CLI. Goodbye!")
+            print("Exiting Rei CLI. Goodbye!")
             sys.exit(0)
 
 # ==============================================================================
@@ -1051,7 +1049,7 @@ def interactive_menu():
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Reiya Roblox Account Manager - Global Termux Core Script")
+    parser = argparse.ArgumentParser(description="Rei Roblox Account Manager - Global Termux Core Script")
     parser.add_argument("--daemon", action="store_true", help="Run auto-rejoin immediately in headless daemon mode")
     parser.add_argument("--scan", action="store_true", help="Scan installed Roblox packages and list them")
     parser.add_argument("--sort", action="store_true", help="Auto-sort and tile open Roblox windows on screen")
