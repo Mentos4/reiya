@@ -8,6 +8,7 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REIYA REJOIN ASCII Dashboard UI (2-line REIYA REJOIN block logo + clean settings & live stats table)
+- Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
 - Instant App Exit & Crash Re-launch (Relaunches Roblox apps instantly when closed without 15s delay)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
@@ -32,8 +33,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v5.1.0-REIYA-REJOIN-LOGO"
-BUILD_TIME = "2026-08-13 22:34:00 UTC"
+BUILD_VERSION = "v5.2.0-DIRECT-PLACE-LAUNCH"
+BUILD_TIME = "2026-08-13 22:35:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -257,7 +258,7 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
     return left, top, right, bottom
 
 def launch_game(package, game_id, bounds=None, freeform=True):
-    """Launch Roblox game targeting package cleanly using un-nested single quotes."""
+    """Launch Roblox game directly into place ID for targeted clone package."""
     game_id = str(game_id).strip()
     if not game_id:
         game_id = '2753915549'
@@ -267,28 +268,35 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         place_id = parts[0]
         link_code = parts[1]
         url = f'roblox://placeId={place_id}&linkCode={link_code}'
+        web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
     elif game_id.startswith('http'):
         match = re.search(r'/games/(\d+)', game_id)
         place_id = match.group(1) if match else game_id
         ps_match = re.search(r'privateServerLinkCode=([^&]+)', game_id)
         if ps_match:
             url = f'roblox://placeId={place_id}&linkCode={ps_match.group(1)}'
+            web_url = game_id
         else:
             url = f'roblox://placeId={place_id}'
+            web_url = f'https://www.roblox.com/games/{place_id}'
     else:
         url = f'roblox://placeId={game_id}'
+        web_url = f'https://www.roblox.com/games/{game_id}'
 
-    cmd1 = f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'"
-    cmd2 = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\"'"
-    cmd3 = f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
-    cmd4 = f"am start -a android.intent.action.VIEW -d '{url}'"
-    cmd5 = f"su -c 'monkey -p {package} -c android.intent.category.LAUNCHER 1'"
-    cmd6 = f"monkey -p {package} -c android.intent.category.LAUNCHER 1"
+    # Target ActivityProtocolLaunch inside clone package directly
+    intents = [
+        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d '{url}'",
+        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
+    ]
 
-    for cmd in [cmd1, cmd2, cmd3, cmd4, cmd5, cmd6]:
+    for cmd in intents:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
-            if res.returncode == 0:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
+            if res.returncode == 0 and "Error" not in res.stdout:
                 return True
         except Exception:
             pass
