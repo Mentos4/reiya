@@ -7,8 +7,7 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Live Refresh Dashboard (ANSI colored live table: No, Package, Status, Game, CPU/RAM, Feature Toggles)
-- Non-blocking live refresh via select.select (Press Enter anytime to return to main menu)
-- Roblox Home Screen / Disconnect Detection & Auto Re-entry
+- Roblox Home Screen & Disconnect Detection (Detects when focus leaves RobloxActivity back to Home/ProtocolLaunch)
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -31,8 +30,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v3.2.0-LIVE-DASHBOARD-UI"
-BUILD_TIME = "2026-08-13 22:16:00 UTC"
+BUILD_VERSION = "v3.3.0-HOME-REJOIN-ACCURATE"
+BUILD_TIME = "2026-08-13 22:17:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -187,16 +186,29 @@ def is_app_running(package):
     return False
 
 def is_app_on_home_screen(package):
-    """Check if app is currently stuck on Roblox Home Screen or Disconnected screen via dumpsys window."""
+    """Accurately check if app is stuck on Roblox Home/Disconnect screen (not in active RobloxActivity)."""
     try:
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=3)
         for line in res.stdout.split('\n'):
             if 'mCurrentFocus' in line or 'mFocusedApp' in line:
                 if package in line:
-                    if any(home_kw in line.lower() for home_kw in ['home', 'landing', 'protocollaunch', 'mainactivity']):
-                        return True
+                    # If in game, activity is RobloxActivity or GameActivity
+                    if any(game_kw in line for game_kw in ['RobloxActivity', 'GameActivity', 'PlaceActivity']):
+                        return False
+                    # Focused on package but not in active game activity -> Home / Disconnected screen!
+                    return True
     except Exception:
         pass
+
+    try:
+        res = subprocess.run("su -c 'dumpsys activity top'", shell=True, capture_output=True, text=True, timeout=3)
+        if package in res.stdout:
+            if any(game_kw in res.stdout for game_kw in ['RobloxActivity', 'GameActivity', 'PlaceActivity']):
+                return False
+            return True
+    except Exception:
+        pass
+
     return False
 
 def get_screen_size():
@@ -644,7 +656,7 @@ class TerminalRejoinLoop:
                         st_colored = f"{GREEN}Ingame{RESET}"
                     elif st in ['Rejoining', 'Rejoining Game']:
                         st_colored = f"{RED}Rejoining{RESET}"
-                    elif st == 'Home Screen':
+                    elif st in ['Home Screen', 'Home Page']:
                         st_colored = f"{YELLOW}Home Page{RESET}"
                     elif st == 'Launching':
                         st_colored = f"{CYAN}Launching{RESET}"
@@ -710,7 +722,7 @@ class TerminalRejoinLoop:
                 if running:
                     is_home = is_app_on_home_screen(pkg) if home_check else False
                     if is_home:
-                        self.set_status(pkg, 'Home Screen')
+                        self.set_status(pkg, 'Home Page')
                         bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                         launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                         last_seen[pkg] = time.time()
