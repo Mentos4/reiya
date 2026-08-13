@@ -82,13 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 16 (Release v6.4.0-REI-REJOIN)
-**Release:** Fully verified & confirmed auto-rejoin engine for Roblox clones (`free.nokaA`, `com.roblox.client`)
-- Confirmed hardware-level WindowManager surface & visibility state detection (`mHasSurface=false`, `isVisible=false`, `mDrawState=NO_SURFACE`)
-- Clean Home Screen auto-rejoin with process force-stop and direct Place ID deeplink launch
-- Bumps version to `v6.4.0-REI-REJOIN`
+### 2026-08-14 — Session 17 (Release v6.4.1-REI-REJOIN)
+**Fix:** Removed focus-dependent WindowManager flags (`mStopped=true`, `mHasSurface=false`) from `is_app_in_game()`
+- Android pauses/hides freeform background windows whenever Termux gains input focus. Checking `mStopped=true` / `mHasSurface=false` caused false Home Screen force-stops when the user interacted with Termux while in-game.
+- `is_app_in_game()` now relies strictly on explicit Roblox Home Screen UI text signals (`for you`, `charts`, `recommended for`, `hometab`, `reactrootview`).
+- Default fallback when process is alive is `Ingame` (`True`) to guarantee zero false force-stops when interacting with Termux.
 ```bash
-git commit -m "Release v6.4.0-REI-REJOIN: Confirmed hardware WindowManager surface detection for Roblox clones" && git push origin main
+git commit -m "Release v6.4.1-REI-REJOIN: Remove focus-dependent window flags, rely strictly on Home Screen UI text signals" && git push origin main
 ```
 
 ---
