@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Reiya Core Global - Terminal / Termux Edition
-Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
+Rei Core Global - Terminal / Termux Edition
+Single standalone CLI script combining all core functions of Rei Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
-- Clean REIYA REJOIN CORE Live Dashboard with accurate 4-toggle settings header
+- Clean REI REJOIN CORE Live Dashboard with accurate 4-toggle settings header
 - Instant Home Page & Disconnect Detection (Triggers immediate game rejoin when focus leaves RobloxActivity)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -31,8 +31,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v4.2.0-INSTANT-HOME-REJOIN"
-BUILD_TIME = "2026-08-13 22:23:00 UTC"
+BUILD_VERSION = "v4.3.0-REI-REJOIN-CORE"
+BUILD_TIME = "2026-08-13 22:25:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -208,10 +208,8 @@ def is_app_on_home_screen(package):
         for line in res.stdout.split('\n'):
             if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package in line:
                 line_lower = line.lower()
-                # If active focus contains RobloxActivity or GameActivity -> Ingame!
                 if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity']):
                     return False
-                # Focused on Roblox clone but not in RobloxActivity -> Home Screen / Disconnected!
                 return True
     except Exception:
         pass
@@ -454,7 +452,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         description += f'\n**Application Details:**\n{app_lines}'
 
     embed = {
-        'title': 'Reiya Rejoin Core',
+        'title': 'Rei Rejoin Core',
         'description': description,
         'color': 0x00CCCC,
         'footer': {'text': 'Roblox Account Manager CLI'},
@@ -603,7 +601,7 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI customized for Reiya Rejoin Core."""
+        """Render live-updating ANSI dashboard UI customized for Rei Rejoin Core."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -637,9 +635,9 @@ class TerminalRejoinLoop:
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Clean REIYA REJOIN CORE Header
+                # Clean REI REJOIN CORE Header
                 print(f"{BOLD}{CYAN}========================================================================={RESET}")
-                print(f"{BOLD}                        REIYA REJOIN CORE DASHBOARD                      {RESET}")
+                print(f"{BOLD}                         REI REJOIN CORE DASHBOARD                       {RESET}")
                 print(f"{CYAN}                         >>> Roblox Account Manager <<<                  {RESET}")
                 print(f"{BOLD}{CYAN}========================================================================={RESET}")
                 print(f"  WEBHOOK: {w_status}            |  AUTO SORT TAB: {s_status}")
@@ -796,7 +794,7 @@ def add_autoexecute_script(folder_path, filename, code):
 
 def print_banner():
     print("\n" + "=" * 60)
-    print("      REIYA ROBLOX ACCOUNT MANAGER - TERMUX CLI CORE       ")
+    print("        REI ROBLOX ACCOUNT MANAGER - TERMUX CLI CORE        ")
     print(f"      [{BUILD_VERSION}] - Updated: {BUILD_TIME}")
     print("=" * 60)
 
@@ -1036,7 +1034,7 @@ def interactive_menu():
         elif choice == '0':
             if rejoin_engine.running:
                 rejoin_engine.stop()
-            print("Exiting Reiya CLI. Goodbye!")
+            print("Exiting Rei CLI. Goodbye!")
             sys.exit(0)
 
 # ==============================================================================
@@ -1044,7 +1042,7 @@ def interactive_menu():
 # ==============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Reiya Roblox Account Manager - Global Termux Core Script")
+    parser = argparse.ArgumentParser(description="Rei Roblox Account Manager - Global Termux Core Script")
     parser.add_argument("--daemon", action="store_true", help="Run auto-rejoin immediately in headless daemon mode")
     parser.add_argument("--scan", action="store_true", help="Scan installed Roblox packages and list them")
     parser.add_argument("--sort", action="store_true", help="Auto-sort and tile open Roblox windows on screen")
