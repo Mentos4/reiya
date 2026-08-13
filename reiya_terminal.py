@@ -7,9 +7,9 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
-- Full WUYX REJOIN ASCII Logo Live Dashboard matching reference landscape design
+- Clean REIYA REJOIN CORE Live Dashboard with accurate 4-toggle settings header
+- Accurate In-Game vs Home/Disconnect Screen Status Detection (Fixes false Home Page status while in game)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
-- Roblox Home Screen & Disconnect Detection (Detects when focus leaves RobloxActivity back to Home/ProtocolLaunch)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
 - Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear, Auto-Sort)
@@ -31,8 +31,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v4.0.0-LANDSCAPE-WUYX-UI"
-BUILD_TIME = "2026-08-13 22:19:00 UTC"
+BUILD_VERSION = "v4.1.0-REIYA-ACCURATE-STATUS"
+BUILD_TIME = "2026-08-13 22:22:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -202,24 +202,25 @@ def is_app_running(package):
     return False
 
 def is_app_on_home_screen(package):
-    """Accurately check if app is stuck on Roblox Home/Disconnect screen (not in active RobloxActivity)."""
+    """Check if app is stuck on Home screen or Disconnected dialog."""
     try:
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=3)
         for line in res.stdout.split('\n'):
-            if 'mCurrentFocus' in line or 'mFocusedApp' in line:
-                if package in line:
-                    if any(game_kw in line for game_kw in ['RobloxActivity', 'GameActivity', 'PlaceActivity']):
-                        return False
+            if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package in line:
+                line_lower = line.lower()
+                if any(hk in line_lower for hk in ['disconnect', 'errordialog', 'landingpage', 'homescreen', 'loginactivity']):
                     return True
+                # If package window is active and not on disconnect/landing -> Ingame!
+                return False
     except Exception:
         pass
 
     try:
         res = subprocess.run("su -c 'dumpsys activity top'", shell=True, capture_output=True, text=True, timeout=3)
         if package in res.stdout:
-            if any(game_kw in res.stdout for game_kw in ['RobloxActivity', 'GameActivity', 'PlaceActivity']):
-                return False
-            return True
+            res_lower = res.stdout.lower()
+            if any(hk in res_lower for hk in ['disconnect', 'errordialog', 'landingpage', 'homescreen', 'loginactivity']):
+                return True
     except Exception:
         pass
 
@@ -247,7 +248,6 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
 
     total_apps = max(1, total_apps)
 
-    # Right half of screen for Roblox windows (Termux on Left half)
     half_w = int(screen_w * 0.5)
     cell_h = int(screen_h / total_apps)
     left = half_w
@@ -278,7 +278,6 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     else:
         url = f'roblox://placeId={game_id}'
 
-    # Properly escaped single-quoted shell commands
     cmd1 = f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'"
     cmd2 = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\"'"
     cmd3 = f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
@@ -453,10 +452,10 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         description += f'\n**Application Details:**\n{app_lines}'
 
     embed = {
-        'title': 'Wuyx Rejoin (Termux Core)',
+        'title': 'Reiya Rejoin Core',
         'description': description,
         'color': 0x00CCCC,
-        'footer': {'text': 'Roblox Manager CLI'},
+        'footer': {'text': 'Roblox Account Manager CLI'},
     }
 
     payload = {'embeds': [embed]}
@@ -602,7 +601,7 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI matching exact reference landscape design."""
+        """Render live-updating ANSI dashboard UI customized for Reiya Rejoin Core."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -615,11 +614,11 @@ class TerminalRejoinLoop:
         if not pkgs:
             pkgs = get_roblox_packages()
 
-        gname = cfg.get('game_name') or (f"Place: {cfg.get('game_id')}" if cfg.get('game_id') else '[PIÑATA MAZE] Pet Sim')
+        gname = cfg.get('game_name') or (f"Place: {cfg.get('game_id')}" if cfg.get('game_id') else 'Run a Restaurant')
         if len(gname) > 24:
             gname = gname[:21] + "..."
 
-        print("\n[+] Forcing Landscape Orientation & Live Dashboard Mode...")
+        print("\n[+] Entering Live Dashboard Mode...")
         set_landscape_orientation()
         time.sleep(1)
 
@@ -629,32 +628,22 @@ class TerminalRejoinLoop:
                 print("\033[H\033[J", end="")
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
-                b_status = f"{GREEN}Enable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
-                c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
+                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
+                c_status = f"{GREEN}Enable{RESET}" if cfg.get('clear_cache', False) else f"{RED}Disable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Big WUYX REJOIN ASCII Logo
-                print(f"{BOLD}{CYAN}")
-                print(r"  ██╗  ██╗██╗   ██╗██╗   ██╗██╗  ██╗    ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
-                print(r"  ██║  ██║██║   ██║╚██╗ ██╔╝╚██╗██╔╝    ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
-                print(r"  ███████║██║   ██║ ╚████╔╝  ╚███╔╝     ██████╔╝█████╗  ██║██║   ██║██║██║")
-                print(r"  ██╔══██║██║   ██║  ╚██╔╝   ██╔██╗     ██╔══██╗██╔══╝  ██║██║   ██║██║██║")
-                print(r"  ██║  ██║╚██████╔╝   ██║   ██╔╝ ██╗    ██║  ██║███████╗██║╚██████╔╝██║██║")
-                print(r"  ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝    ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝╚═╝")
-                print(f"{RESET}")
-                print(f"               {BOLD}{BLUE}> > > Premium Version < < <{RESET}")
-                print(f"Discord: {CYAN}discord.gg/5G3cStpbcx{RESET}")
-                print(f"Made by {CYAN}_g_huy{RESET}")
-                print(f"CHECK EXECUTOR METHOD: {BOLD}AUTO{RESET}")
-                print(f"WEBHOOK: {w_status}")
-                print(f"AUTO BYPASS: {b_status}")
-                print(f"AUTO SORT TAB: {s_status}")
-                print(f"AUTO CHANGE ACCOUNT: {c_status}")
+                # Clean REIYA REJOIN CORE Header
+                print(f"{BOLD}{CYAN}========================================================================={RESET}")
+                print(f"{BOLD}                        REIYA REJOIN CORE DASHBOARD                      {RESET}")
+                print(f"{CYAN}                         >>> Roblox Account Manager <<<                  {RESET}")
+                print(f"{BOLD}{CYAN}========================================================================={RESET}")
+                print(f"  WEBHOOK: {w_status}            |  AUTO SORT TAB: {s_status}")
+                print(f"  HOME REJOIN: {h_status}        |  CLEAR CACHE: {c_status}")
                 print(f"-------------------------------------------------------------------------")
-                print(f" Cpu usage: {cpu:<5} %      | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB")
+                print(f"  Cpu usage: {cpu:<5} %          | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB")
                 print(f"-------------------------------------------------------------------------")
                 print(f"{BOLD}{'No':<3} | {'Username':<12} | {'Package':<12} | {'Status':<11} | {'Game'}{RESET}")
                 print(f"----+--------------+--------------+-------------+------------------------")
@@ -663,9 +652,8 @@ class TerminalRejoinLoop:
 
                 for idx, p in enumerate(pkgs, 1):
                     info = statuses.get(p, {})
-                    st = info.get('status', 'Waiting')
+                    st = info.get('status', 'Ingame')
 
-                    # Obfuscate username placeholder matching wu****01 style
                     short_uname = f"wu****{idx:02d}"
 
                     if st == 'Ingame':
