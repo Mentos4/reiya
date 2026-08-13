@@ -28,6 +28,10 @@ import urllib.request
 import urllib.parse
 import mimetypes
 
+# Script version & timestamp
+BUILD_VERSION = "v2.5.0-ROBLOX-AUTO-CORE"
+BUILD_TIME = "2026-08-13 21:58:00 UTC"
+
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
 # ==============================================================================
@@ -733,6 +737,7 @@ def add_autoexecute_script(folder_path, filename, code):
 def print_banner():
     print("\n" + "=" * 60)
     print("      REIYA ROBLOX ACCOUNT MANAGER - TERMUX CLI CORE       ")
+    print(f"      [{BUILD_VERSION}] - Updated: {BUILD_TIME}")
     print("=" * 60)
 
 def show_status():
