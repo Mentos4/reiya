@@ -6,9 +6,10 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
-- Live Refresh Dashboard (ANSI colored live table: No, Package, Status, Game, CPU/RAM, Feature Toggles)
+- Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
+- Full WUYX REJOIN ASCII Logo Live Dashboard matching reference landscape design
+- Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - Roblox Home Screen & Disconnect Detection (Detects when focus leaves RobloxActivity back to Home/ProtocolLaunch)
-- Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
 - Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear, Auto-Sort)
@@ -30,8 +31,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v3.3.0-HOME-REJOIN-ACCURATE"
-BUILD_TIME = "2026-08-13 22:17:00 UTC"
+BUILD_VERSION = "v4.0.0-LANDSCAPE-WUYX-UI"
+BUILD_TIME = "2026-08-13 22:19:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -69,7 +70,7 @@ DEFAULT_CONFIG = {
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
-    'window_mode': 'left_stack',  # 'left_stack' (vertical stack on left) or 'grid' (2x2 grid)
+    'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
     'home_rejoin_enabled': True,
 }
 
@@ -94,8 +95,23 @@ def save_config():
         json.dump(config, f, indent=2, default=str)
 
 # ==============================================================================
-# 1. APP LAUNCHER, WINDOW TILING & PACKAGE MANAGEMENT
+# 1. ORIENTATION, APP LAUNCHER, WINDOW TILING & PACKAGE MANAGEMENT
 # ==============================================================================
+
+def set_landscape_orientation():
+    """Force Android screen orientation to Landscape (Horizontal mode)."""
+    cmds = [
+        "su -c 'settings put system accelerometer_rotation 0'",
+        "su -c 'settings put system user_rotation 1'",
+        "su -c 'wm set-user-rotation lock 1'",
+        "settings put system accelerometer_rotation 0",
+        "settings put system user_rotation 1"
+    ]
+    for c in cmds:
+        try:
+            subprocess.run(c, shell=True, capture_output=True, timeout=2)
+        except Exception:
+            pass
 
 def get_installed_packages():
     """
@@ -192,10 +208,8 @@ def is_app_on_home_screen(package):
         for line in res.stdout.split('\n'):
             if 'mCurrentFocus' in line or 'mFocusedApp' in line:
                 if package in line:
-                    # If in game, activity is RobloxActivity or GameActivity
                     if any(game_kw in line for game_kw in ['RobloxActivity', 'GameActivity', 'PlaceActivity']):
                         return False
-                    # Focused on package but not in active game activity -> Home / Disconnected screen!
                     return True
     except Exception:
         pass
@@ -217,7 +231,8 @@ def get_screen_size():
         res = subprocess.run('wm size', shell=True, capture_output=True, text=True, timeout=3)
         match = re.search(r'(\d+)x(\d+)', res.stdout)
         if match:
-            return int(match.group(1)), int(match.group(2))
+            w, h = int(match.group(1)), int(match.group(2))
+            return (max(w, h), min(w, h))  # Always return landscape orientation (w > h)
     except Exception:
         pass
     return 1280, 720
@@ -225,37 +240,20 @@ def get_screen_size():
 def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
     """
     Calculate (left, top, right, bottom) bounds for window tiling.
-    Modes:
-    - 'left_stack': Stacks windows vertically on the left half of screen (matching multi-instance layout)
-    - 'grid': Tiles windows in an even N x M grid across the screen
+    Places Roblox windows on the RIGHT 50% of the landscape screen so Termux stays on Left 50%.
     """
     if not screen_w or not screen_h:
         screen_w, screen_h = get_screen_size()
 
     total_apps = max(1, total_apps)
 
-    if mode == 'left_stack':
-        half_w = int(screen_w * 0.5)
-        cell_h = int(screen_h / total_apps)
-        left = 0
-        top = index * cell_h
-        right = half_w
-        bottom = (index + 1) * cell_h
-        return left, top, right, bottom
-
-    # Default 'grid' mode
-    cols = math.ceil(math.sqrt(total_apps))
-    rows = math.ceil(total_apps / cols)
-    cell_w = int(screen_w / cols)
-    cell_h = int(screen_h / rows)
-
-    r = index // cols
-    c = index % cols
-
-    left = c * cell_w
-    top = r * cell_h
-    right = (c + 1) * cell_w
-    bottom = (r + 1) * cell_h
+    # Right half of screen for Roblox windows (Termux on Left half)
+    half_w = int(screen_w * 0.5)
+    cell_h = int(screen_h / total_apps)
+    left = half_w
+    top = index * cell_h
+    right = screen_w
+    bottom = (index + 1) * cell_h
     return left, top, right, bottom
 
 def launch_game(package, game_id, bounds=None, freeform=True):
@@ -300,6 +298,7 @@ def launch_game(package, game_id, bounds=None, freeform=True):
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
+    set_landscape_orientation()
     if packages is None:
         packages = config.get('selected_packages', [])
     if not packages:
@@ -310,7 +309,7 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
 
     w, h = get_screen_size()
     total = len(packages)
-    print(f"[+] Auto-sorting {total} window(s) on screen ({w}x{h}, mode: {mode})...")
+    print(f"[+] Auto-sorting {total} window(s) on screen ({w}x{h}, landscape)...")
 
     for idx, pkg in enumerate(packages):
         bounds = calculate_window_bounds(idx, total, w, h, mode=mode)
@@ -566,6 +565,8 @@ class TerminalRejoinLoop:
             print("[!] Auto rejoin is already running.")
             return False
 
+        set_landscape_orientation()
+
         packages = cfg.get('selected_packages', [])
         if not packages:
             packages = get_roblox_packages()
@@ -601,11 +602,12 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI matching reference design."""
+        """Render live-updating ANSI dashboard UI matching exact reference landscape design."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
         CYAN   = "\033[96m"
+        BLUE   = "\033[94m"
         BOLD   = "\033[1m"
         RESET  = "\033[0m"
 
@@ -613,11 +615,12 @@ class TerminalRejoinLoop:
         if not pkgs:
             pkgs = get_roblox_packages()
 
-        gname = cfg.get('game_name') or (f"Place: {cfg.get('game_id')}" if cfg.get('game_id') else 'Blox Fruits')
-        if len(gname) > 20:
-            gname = gname[:17] + "..."
+        gname = cfg.get('game_name') or (f"Place: {cfg.get('game_id')}" if cfg.get('game_id') else '[PIÑATA MAZE] Pet Sim')
+        if len(gname) > 24:
+            gname = gname[:21] + "..."
 
-        print("\n[+] Entering Live Dashboard Mode. Press [Enter] to return to Main Menu...\n")
+        print("\n[+] Forcing Landscape Orientation & Live Dashboard Mode...")
+        set_landscape_orientation()
         time.sleep(1)
 
         try:
@@ -626,31 +629,44 @@ class TerminalRejoinLoop:
                 print("\033[H\033[J", end="")
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
+                b_status = f"{GREEN}Enable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
-                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
-                c_status = f"{GREEN}Enable{RESET}" if cfg.get('clear_cache', False) else f"{RED}Disable{RESET}"
+                c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                print(f"{BOLD}{CYAN}==================================================================={RESET}")
-                print(f"{BOLD}                    REIYA REJOIN CORE DASHBOARD                   {RESET}")
-                print(f"{CYAN}                     >>> Free Version <<<                          {RESET}")
-                print(f"{BOLD}{CYAN}==================================================================={RESET}")
-                print(f"  CHECK EXECUTOR METHOD: {BOLD}AUTO{RESET}")
-                print(f"  WEBHOOK: {w_status}       |  AUTO SORT TAB: {s_status}")
-                print(f"  HOME REJOIN: {h_status}   |  CLEAR CACHE: {c_status}")
-                print(f"-------------------------------------------------------------------")
-                print(f"  Cpu usage: {cpu:<5}%        | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB")
-                print(f"-------------------------------------------------------------------")
-                print(f"{BOLD}{'No':<3} | {'Package':<16} | {'Status':<14} | {'Game'}{RESET}")
-                print(f"----+------------------+----------------+--------------------------")
+                # Big WUYX REJOIN ASCII Logo
+                print(f"{BOLD}{CYAN}")
+                print(r"  ██╗  ██╗██╗   ██╗██╗   ██╗██╗  ██╗    ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
+                print(r"  ██║  ██║██║   ██║╚██╗ ██╔╝╚██╗██╔╝    ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
+                print(r"  ███████║██║   ██║ ╚████╔╝  ╚███╔╝     ██████╔╝█████╗  ██║██║   ██║██║██║")
+                print(r"  ██╔══██║██║   ██║  ╚██╔╝   ██╔██╗     ██╔══██╗██╔══╝  ██║██║   ██║██║██║")
+                print(r"  ██║  ██║╚██████╔╝   ██║   ██╔╝ ██╗    ██║  ██║███████╗██║╚██████╔╝██║██║")
+                print(r"  ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝    ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝╚═╝")
+                print(f"{RESET}")
+                print(f"               {BOLD}{BLUE}> > > Premium Version < < <{RESET}")
+                print(f"Discord: {CYAN}discord.gg/5G3cStpbcx{RESET}")
+                print(f"Made by {CYAN}_g_huy{RESET}")
+                print(f"CHECK EXECUTOR METHOD: {BOLD}AUTO{RESET}")
+                print(f"WEBHOOK: {w_status}")
+                print(f"AUTO BYPASS: {b_status}")
+                print(f"AUTO SORT TAB: {s_status}")
+                print(f"AUTO CHANGE ACCOUNT: {c_status}")
+                print(f"-------------------------------------------------------------------------")
+                print(f" Cpu usage: {cpu:<5} %      | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB")
+                print(f"-------------------------------------------------------------------------")
+                print(f"{BOLD}{'No':<3} | {'Username':<12} | {'Package':<12} | {'Status':<11} | {'Game'}{RESET}")
+                print(f"----+--------------+--------------+-------------+------------------------")
 
                 statuses = self.get_status()
 
                 for idx, p in enumerate(pkgs, 1):
                     info = statuses.get(p, {})
                     st = info.get('status', 'Waiting')
+
+                    # Obfuscate username placeholder matching wu****01 style
+                    short_uname = f"wu****{idx:02d}"
 
                     if st == 'Ingame':
                         st_colored = f"{GREEN}Ingame{RESET}"
@@ -665,9 +681,9 @@ class TerminalRejoinLoop:
                     else:
                         st_colored = f"{st}"
 
-                    print(f"{idx:<3} | {p:<16} | {st_colored:<23} | 👆 {gname}")
+                    print(f"{idx:<3} | {short_uname:<12} | {p:<12} | {st_colored:<20} | 🪵 {gname}")
 
-                print(f"-------------------------------------------------------------------")
+                print(f"-------------------------------------------------------------------------")
                 print(f"{BOLD}Press [Enter] to return to Main Menu (loop runs in background)...{RESET}")
 
                 # Non-blocking input check for Linux/Termux
