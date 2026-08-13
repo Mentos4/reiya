@@ -82,14 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 18 (Release v6.5.0-REI-REJOIN)
-**Major Release:** Bulletproof Linux Kernel UDP Socket Game Detection (`is_udp_game_connected`)
-- Empirically verified via device dumpsys & netstat trace: Roblox C++ engine (RakNet) opens an active UDP socket when connected to a game server, but opens 0 UDP sockets on the Home Screen.
-- `is_app_in_game()` now uses kernel UDP socket inspection as primary status detector.
-- Works 100% reliably regardless of whether Roblox is focused, split-screened, floating bubble, minimized, or behind Termux.
-- Eliminates all false force-stops permanently.
+### 2026-08-14 — Session 19 (Release v6.5.1-REI-REJOIN)
+**Fix:** Strict UDP Game Server Socket Filtering (`is_udp_game_connected`)
+- Excluded idle unbound local sockets (`0.0.0.0:*`, `*:*`, `:::*`) from `is_udp_game_connected()`.
+- Only counts active UDP RakNet sockets with `ESTABLISHED` state or explicit foreign game server IP endpoints.
+- Home Screen now cleanly returns 0 active game server sockets (`Home Page`), triggering automatic force-stop and place rejoin!
 ```bash
-git commit -m "Release v6.5.0-REI-REJOIN: Bulletproof Linux Kernel UDP socket detection for Roblox clones" && git push origin main
+git commit -m "Release v6.5.1-REI-REJOIN: Filter out idle 0.0.0.0:* UDP sockets for accurate Home Page detection" && git push origin main
 ```
 
 ---

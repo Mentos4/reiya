@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.5.0-REI-REJOIN"
-BUILD_TIME = "2026-08-14 01:43:00 UTC"
+BUILD_VERSION = "v6.5.1-REI-REJOIN"
+BUILD_TIME = "2026-08-14 01:47:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -236,7 +236,7 @@ def get_package_activity_dump(package, content):
 
 def is_udp_game_connected(package):
     """
-    Check if package process has an active UDP RakNet Game Server connection.
+    Check if package process has an active connected UDP RakNet Game Server connection.
     Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
     """
     try:
@@ -255,15 +255,26 @@ def is_udp_game_connected(package):
             # Check 1: netstat -anp for active UDP sockets belonging to PID
             cmd = f"su -c 'netstat -anp 2>/dev/null | grep {pid} | grep -i udp'"
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
-            if r.stdout.strip():
-                lines = [l for l in r.stdout.strip().split('\n') if 'ESTABLISHED' in l or 'udp' in l.lower()]
-                if lines:
-                    return True
+            raw_out = r.stdout.strip()
+            if raw_out:
+                for line in raw_out.split('\n'):
+                    l = line.strip()
+                    # Skip unbound idle local sockets (0.0.0.0:* or *:* or :::*)
+                    if '0.0.0.0:*' in l or '*:*' in l or ':::*' in l:
+                        continue
+                    # Must be an ESTABLISHED connection or active remote endpoint socket
+                    if 'ESTABLISHED' in l or 'estab' in l.lower():
+                        return True
+                    parts = l.split()
+                    if len(parts) >= 5:
+                        foreign_addr = parts[4]
+                        if foreign_addr not in ['0.0.0.0:*', '*:*', ':::*', '*']:
+                            return True
 
-            # Check 2: ss -u -a -p for active UDP sockets
+            # Check 2: ss -u -a -p for active ESTABLISHED UDP sockets
             cmd_ss = f"su -c 'ss -u -a -p 2>/dev/null | grep pid={pid}'"
             r_ss = subprocess.run(cmd_ss, shell=True, capture_output=True, text=True, timeout=2)
-            if r_ss.stdout.strip() and ('ESTAB' in r_ss.stdout or 'udp' in r_ss.stdout.lower()):
+            if r_ss.stdout.strip() and 'ESTAB' in r_ss.stdout:
                 return True
 
         return False
