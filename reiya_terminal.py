@@ -203,12 +203,20 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if process is currently running using ps -A and pidof."""
-    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}", f"su -c 'ps -A'", "ps -A"]:
+    """Check if the app process is alive using pidof and ps -A."""
+    # pidof is fastest - returns space-separated PIDs if running
+    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
-            if "pidof" in cmd and res.stdout.strip().isdigit():
+            out = res.stdout.strip()
+            if out:  # Any non-empty output = PID(s) found = running
                 return True
+        except Exception:
+            pass
+    # Fallback: scan ps -A process list
+    for cmd in ["su -c 'ps -A'", 'ps -A']:
+        try:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
             if package in res.stdout:
                 return True
         except Exception:
@@ -217,50 +225,13 @@ def is_app_running(package):
 
 def is_app_in_game(package):
     """
-    Detect if the app is in-game vs on the Roblox Home Screen.
-    Strategy: read mCurrentFocus / mFocusedApp from dumpsys window windows.
-    These are single reliable lines showing exactly what activity is on screen right now.
-    - Home Screen activity keywords -> False (trigger rejoin)
-    - In-game / unknown activity -> True (leave it alone)
+    Simplified reliable check: if the process is alive, the app is 'in-game' (or loading).
+    Complex window/activity inspection fails when Termux is focused in split-screen
+    because mCurrentFocus always shows Termux, not Roblox.
+    Home Screen keep-alive is handled separately by a periodic game intent re-send.
     """
-    # Activity name fragments that mean the user is on Roblox HOME SCREEN (not in a game)
-    HOME_SIGNALS = [
-        'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
-        'launchactivity', 'homeactivity', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'activitymain', 'robloxmain', 'lobbyactivity',
-    ]
+    return is_app_running(package)
 
-    try:
-        res = subprocess.run(
-            "su -c 'dumpsys window windows'",
-            shell=True, capture_output=True, text=True, timeout=4
-        )
-        content = res.stdout
-
-        # Find mCurrentFocus and mFocusedApp lines — the most reliable signal
-        for line in content.split('\n'):
-            if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package in line:
-                line_lower = line.lower()
-                # If the focused activity is a Home Screen activity -> NOT in game
-                if any(sig in line_lower for sig in HOME_SIGNALS):
-                    return False
-                # Package is focused but not a known home screen -> treat as in-game
-                return True
-
-        # Package not in focus lines at all - could be loading or background
-        # Check if the package has ANY window entry (it's visible somewhere)
-        for line in content.split('\n'):
-            if package in line and 'Window{' in line:
-                line_lower = line.lower()
-                if any(sig in line_lower for sig in HOME_SIGNALS):
-                    return False
-                return True
-
-    except Exception:
-        pass
-
-    # Cannot determine - assume not in game to trigger a safe rejoin attempt
-    return False
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -318,16 +289,16 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         url = f'roblox://placeId={game_id}'
         web_url = f'https://www.roblox.com/games/{game_id}'
 
-    # Target ActivityProtocolLaunch inside clone package directly.
-    # -f 0x14000000 = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK
-    # This forces navigation into the game even when Roblox is already open on Home Screen.
+    # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
+    # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
     intents = [
-        f"su -c 'am start -f 0x14000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x14000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"su -c 'am start -f 0x14000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x14000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"am start -f 0x14000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d '{url}'",
-        f"am start -f 0x14000000 -p {package} -a android.intent.action.VIEW -d '{url}'"
+        f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
+        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
     ]
 
     for cmd in intents:
@@ -733,22 +704,30 @@ class TerminalRejoinLoop:
             pass
 
     def _loop(self, packages, cfg):
-        check_interval = float(cfg.get('check_interval', 6))
-        delay_open_tab = float(cfg.get('launch_wait', 15))
-        sequential     = cfg.get('sequential_join', False)
-        auto_clear     = cfg.get('clear_cache', False)
-        auto_sort      = cfg.get('auto_sort', True)
-        window_mode    = cfg.get('window_mode', 'left_stack')
+        check_interval  = float(cfg.get('check_interval', 8))
+        delay_open_tab  = float(cfg.get('launch_wait', 15))
+        sequential      = cfg.get('sequential_join', False)
+        auto_clear      = cfg.get('clear_cache', False)
+        auto_sort       = cfg.get('auto_sort', True)
+        window_mode     = cfg.get('window_mode', 'left_stack')
+        # After launching, wait this long before checking status again (game load time)
+        LAUNCH_GRACE    = 50
+        # Every N seconds while running, re-send game intent as Home Screen keep-alive
+        KEEPALIVE_SECS  = 300  # 5 minutes
 
         w, h = get_screen_size()
         total_apps = len(packages)
 
-        # Launch all packages initially
+        # Track last keep-alive per package
+        last_keepalive = {pkg: 0 for pkg in packages}
+
+        # Initial launch of all packages
         for i, pkg in enumerate(packages):
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
             self.last_launch[pkg] = time.time()
+            last_keepalive[pkg] = time.time()
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
                 time.sleep(delay_open_tab)
@@ -761,38 +740,40 @@ class TerminalRejoinLoop:
                     break
 
                 gid = self._get_game_id(pkg, cfg)
+                now = time.time()
+
+                # ── GRACE PERIOD: skip check right after launching ────────────────
+                time_since_launch = now - self.last_launch.get(pkg, 0)
+                if time_since_launch < LAUNCH_GRACE:
+                    cur = self.status.get(pkg, {}).get('status', '')
+                    if cur not in ('Ingame',):
+                        self.set_status(pkg, 'Launching')
+                    continue
+                # ─────────────────────────────────────────────────────────────
+
                 running = is_app_running(pkg)
-                in_game = is_app_in_game(pkg) if running else False
 
                 if not running:
-                    # APP IS CLOSED / FORCE STOPPED -> REJOIN IMMEDIATELY!
+                    # ★ PROCESS DEAD → REJOIN
                     self.set_status(pkg, 'Rejoining')
                     if auto_clear:
                         clear_app_cache(pkg)
                         time.sleep(1)
-
                     bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                    self.last_launch[pkg] = time.time()
-                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                    time.sleep(2)
-                elif not in_game:
-                    # APP IS STUCK ON HOME SCREEN / DISCONNECT / ERROR 524
-                    # Only send the game launch intent — NEVER force-stop (that crashes Termux)
-                    self.set_status(pkg, 'Home Page')
-                    time.sleep(0.5)
-                    self.set_status(pkg, 'Rejoining')
-
-                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                    self.last_launch[pkg] = time.time()
+                    self.last_launch[pkg] = now
+                    last_keepalive[pkg] = now
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
-                    # Callback retry: wait and fire again if still not in-game
-                    time.sleep(5)
-                    if not is_app_in_game(pkg):
-                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                 else:
-                    # APP IS RUNNING AND ACTIVELY IN GAME -> INGAME!
+                    # ★ PROCESS ALIVE → INGAME
                     self.set_status(pkg, 'Ingame')
+
+                    # Keep-alive: re-send game intent every 5 minutes
+                    # Handles case where user drifts back to Roblox Home Screen
+                    if now - last_keepalive.get(pkg, 0) >= KEEPALIVE_SECS:
+                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        last_keepalive[pkg] = now
 
             time.sleep(check_interval)
 
