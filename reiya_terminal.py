@@ -8,6 +8,7 @@ Single standalone CLI script combining all core functions of Rei Roblox Account 
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Clean REI REJOIN CORE Live Dashboard with accurate 4-toggle settings header
+- Instant App Exit & Crash Re-launch (Relaunches Roblox apps instantly when closed without 15s delay)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Initial Launch Grace Period (Prevents false home-screen triggers while Roblox is loading game assets)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
@@ -32,8 +33,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v4.4.0-MULTI-WINDOW-ACCURATE"
-BUILD_TIME = "2026-08-13 22:27:00 UTC"
+BUILD_VERSION = "v4.5.0-INSTANT-EXIT-RELAUNCH"
+BUILD_TIME = "2026-08-13 22:29:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -743,27 +744,24 @@ class TerminalRejoinLoop:
                         last_seen[pkg] = time.time()
                         retries[pkg] = 0
                 else:
-                    self.set_status(pkg, 'Waiting')
-                    offline_secs = time.time() - last_seen[pkg]
+                    # App is closed / force-stopped by user -> IMMEDIATELY RELAUNCH!
+                    self.set_status(pkg, 'Rejoining')
+                    if retries[pkg] >= max_retries:
+                        self.set_status(pkg, 'Cooldown')
+                        time.sleep(retry_delay)
+                        retries[pkg] = 0
+                    else:
+                        retries[pkg] += 1
+                        if auto_clear:
+                            clear_app_cache(pkg)
+                            time.sleep(1)
 
-                    if offline_secs >= offline_wait:
-                        if retries[pkg] >= max_retries:
-                            self.set_status(pkg, 'Cooldown')
-                            time.sleep(retry_delay)
-                            retries[pkg] = 0
+                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                        self.last_launch[pkg] = time.time()
+                        ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        if ok:
                             last_seen[pkg] = time.time()
-                        else:
-                            retries[pkg] += 1
-                            self.set_status(pkg, 'Rejoining')
-                            if auto_clear:
-                                clear_app_cache(pkg)
-                                time.sleep(2)
-
-                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                            self.last_launch[pkg] = time.time()
-                            ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                            if ok:
-                                last_seen[pkg] = time.time()
+                        time.sleep(3)
 
             time.sleep(check_interval)
 
