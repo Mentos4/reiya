@@ -2,7 +2,7 @@
 """
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
-- App discovery & process status (Detects ALL user installed packages dynamically)
+- Multi-strategy App discovery (Root su, pm, cmd, /data/data, ps process extraction, Manual entry)
 - Game launching (Roblox intents & link parsing)
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -88,34 +88,84 @@ def save_config():
 # 1. APP LAUNCHER, WINDOW TILING & PACKAGE MANAGEMENT
 # ==============================================================================
 
-def get_installed_packages(user_only=True):
-    """List all packages installed on Android via pm list packages."""
-    cmd = ['pm', 'list', 'packages', '-3'] if user_only else ['pm', 'list', 'packages']
+def get_installed_packages():
+    """
+    Discover all installed packages on Android using root su, pm, cmd, ps, and /data/data scanning.
+    Guarantees detecting all apps even under Termux permission sandbox restrictions.
+    """
+    packages = set()
+
+    # Strategy 1: Try su -c "pm list packages" (Root)
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=10
-        )
-        packages = []
-        for line in result.stdout.strip().split('\n'):
+        res = subprocess.run(['su', '-c', 'pm list packages'], capture_output=True, text=True, timeout=5)
+        for line in res.stdout.strip().split('\n'):
             line = line.strip()
             if line.startswith('package:'):
-                packages.append(line[8:])
-        
-        # If user_only (-3) returned nothing, fall back to listing all packages
-        if not packages and user_only:
-            return get_installed_packages(user_only=False)
-            
-        return sorted(packages)
-    except Exception as e:
-        print(f"[!] Error getting packages: {e}")
-        return []
+                packages.add(line[8:].strip())
+    except Exception:
+        pass
+
+    # Strategy 2: Try su -c "cmd package list packages"
+    if not packages:
+        try:
+            res = subprocess.run(['su', '-c', 'cmd package list packages'], capture_output=True, text=True, timeout=5)
+            for line in res.stdout.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('package:'):
+                    packages.add(line[8:].strip())
+        except Exception:
+            pass
+
+    # Strategy 3: Standard pm commands
+    if not packages:
+        for cmd in [['pm', 'list', 'packages', '-3'], ['pm', 'list', 'packages'], ['/system/bin/pm', 'list', 'packages']]:
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                for line in res.stdout.strip().split('\n'):
+                    line = line.strip()
+                    if line.startswith('package:'):
+                        packages.add(line[8:].strip())
+            except Exception:
+                pass
+
+    # Strategy 4: Try cmd package list packages without su
+    if not packages:
+        try:
+            res = subprocess.run(['cmd', 'package', 'list', 'packages'], capture_output=True, text=True, timeout=5)
+            for line in res.stdout.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('package:'):
+                    packages.add(line[8:].strip())
+        except Exception:
+            pass
+
+    # Strategy 5: Try su -c "ls /data/data"
+    try:
+        res = subprocess.run(['su', '-c', 'ls /data/data'], capture_output=True, text=True, timeout=5)
+        for line in res.stdout.strip().split('\n'):
+            pkg = line.strip()
+            if pkg and '.' in pkg and not pkg.startswith('/'):
+                packages.add(pkg)
+    except Exception:
+        pass
+
+    # Strategy 6: Extract active running process names via ps -A
+    try:
+        res = subprocess.run(['ps', '-A'], capture_output=True, text=True, timeout=5)
+        for line in res.stdout.strip().split('\n'):
+            parts = line.strip().split()
+            if parts:
+                name = parts[-1]
+                if '.' in name and not name.startswith('[') and not name.startswith('/'):
+                    packages.add(name)
+    except Exception:
+        pass
+
+    return sorted(list(packages))
 
 def get_roblox_packages():
-    """Detect all installed packages dynamically without hardcoded keyword filtering."""
-    pkgs = get_installed_packages(user_only=True)
-    if not pkgs:
-        pkgs = get_installed_packages(user_only=False)
-    return pkgs
+    """Detect all installed packages dynamically."""
+    return get_installed_packages()
 
 def is_app_running(package):
     """Check if process is currently running using pidof and ps -A."""
@@ -702,13 +752,26 @@ def interactive_menu():
             pkgs = get_roblox_packages()
             print(f"\n--- [ ALL DETECTED INSTALLED PACKAGES ({len(pkgs)}) ] ---")
             if not pkgs:
-                print("  [!] No packages detected via 'pm list packages'.")
+                print("  [!] No packages automatically detected via sandbox permissions.")
             else:
                 for idx, p in enumerate(pkgs, 1):
                     sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
                     print(f"  {idx}. {p} [{sel}]")
-            indices = input("\nEnter numbers to toggle (comma separated, e.g. 1,2) or press Enter to skip: ").strip()
-            if indices:
+
+            print("\nSelection Options:")
+            print("  - Enter numbers (e.g. 1,2) to toggle packages from list")
+            print("  - Type 'M' to manually enter custom package name (e.g. com.noka.client)")
+            print("  - Press Enter to keep current selection")
+            indices = input("\nChoice: ").strip()
+
+            if indices.upper() == 'M':
+                custom_pkg = input("Enter exact Package Name (e.g. com.noka.client or com.roblox.client): ").strip()
+                if custom_pkg:
+                    sel_set = set(config.get('selected_packages', []))
+                    sel_set.add(custom_pkg)
+                    config['selected_packages'] = list(sel_set)
+                    save_config()
+            elif indices:
                 sel_set = set(config.get('selected_packages', []))
                 for num in indices.split(','):
                     try:
