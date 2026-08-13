@@ -292,19 +292,13 @@ def is_udp_game_connected(package):
             return False
 
         for pid in pids:
-            # Check for active UDP socket in ss or netstat
+            # Check for active UDP socket in ss or netstat (RakNet game server socket)
             r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
-            if r_ss.stdout.strip():
+            if r_ss.stdout.strip() and 'ESTAB' in r_ss.stdout:
                 return True
 
             r_ns = subprocess.run(f"su -c 'netstat -unp 2>/dev/null | grep {pid}'", shell=True, capture_output=True, text=True, timeout=2)
-            if r_ns.stdout.strip():
-                return True
-
-            # Check open socket descriptors in /proc/<pid>/fd
-            r_fd = subprocess.run(f"su -c 'ls -l /proc/{pid}/fd 2>/dev/null | grep socket'", shell=True, capture_output=True, text=True, timeout=2)
-            socket_count = len([l for l in r_fd.stdout.strip().split('\n') if l.strip()]) if r_fd.stdout.strip() else 0
-            if socket_count >= 3:
+            if r_ns.stdout.strip() and 'ESTABLISHED' in r_ns.stdout:
                 return True
 
         return False

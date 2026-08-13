@@ -82,11 +82,11 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 12
-**Fix:** Activity Lifecycle State detection (`mStopped=true`) for Clone Packages
-- Added `mstopped=true` check in `is_app_in_game()` based on device dumpsys output for `free.nokaA/com.roblox.client.ActivityNativeMain`. When the clone app returns to the Home Screen/Lobby, Android marks the Activity state as `mStopped=true`, instantly triggering Home Page detection and auto-rejoin.
+### 2026-08-14 — Session 13
+**Fix:** Removed vague `/proc/<pid>/fd` socket count check in `is_udp_game_connected()`
+- Roblox creates HTTP/HTTPS sockets for downloading assets on the Home Screen, which caused `socket_count >= 3` to return `True` (`Ingame`) on the Home Screen. Removed vague socket count check and restricted `is_udp_game_connected()` to established RakNet UDP game server sockets.
 ```bash
-git commit -m "Fix Clone detection: check mStopped=true Activity state for ActivityNativeMain Home Page detection" && git push origin main
+git commit -m "Fix UDP check: remove vague fd socket count check that falsely flagged Home Screen HTTP sockets as Ingame" && git push origin main
 ```
 
 ---
