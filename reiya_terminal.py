@@ -274,26 +274,64 @@ def check_roblox_log_status(package):
             pass
     return None
 
+def is_udp_game_connected(package):
+    """
+    Check if the package process has an active UDP socket (Roblox RakNet Game Server connection).
+    Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
+    """
+    try:
+        # Get PID of target clone package
+        res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
+        out = res.stdout.strip()
+        if not out:
+            res = subprocess.run(f"pidof {package}", shell=True, capture_output=True, text=True, timeout=2)
+            out = res.stdout.strip()
+
+        pids = [p for p in out.split() if p.isdigit()]
+        if not pids:
+            return False
+
+        for pid in pids:
+            # Check for active UDP socket in ss or netstat
+            r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
+            if r_ss.stdout.strip():
+                return True
+
+            r_ns = subprocess.run(f"su -c 'netstat -unp 2>/dev/null | grep {pid}'", shell=True, capture_output=True, text=True, timeout=2)
+            if r_ns.stdout.strip():
+                return True
+
+            # Check open socket descriptors in /proc/<pid>/fd
+            r_fd = subprocess.run(f"su -c 'ls -l /proc/{pid}/fd 2>/dev/null | grep socket'", shell=True, capture_output=True, text=True, timeout=2)
+            socket_count = len([l for l in r_fd.stdout.strip().split('\n') if l.strip()]) if r_fd.stdout.strip() else 0
+            if socket_count >= 3:
+                return True
+
+        return False
+    except Exception:
+        return None
+
 def is_app_in_game(package):
     """
     Check if the package is in-game vs on the Roblox Home Screen.
-    Combines dumpsys activity top inspection, log status, and strict UI signals.
+    Combines dumpsys activity top view hierarchy inspection, UDP socket checks, and log status.
     """
     HOME_SIGNALS = [
+        'for you', 'charts', 'recommended for', 'moments',
         'reactrootview', 'reactviewgroup', 'reactframelayout',
         'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
         'loginactivity', 'welcomeactivity', 'titleactivity',
         'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
         'loginview', 'landingview', 'authactivity', 'appshell',
-        'for you', 'charts', 'recommended for', 'moments',
     ]
 
+    # Strict 3D Engine Surface View indicators — NEVER include Activity class names (e.g. RobloxActivity/GameActivity) here!
     GAME_SIGNALS = [
-        'renderview', 'nativegl', 'gameactivity', 'robloxactivity',
-        'gamecanvas', 'raknet', 'robloxplace', 'placeview',
+        'renderview', 'nativegl', 'gamecanvas', 'raknet',
+        'robloxplace', 'placeview', 'engineview', 'surfaceview -',
     ]
 
-    # Step 1: Inspect dumpsys activity top task block
+    # Step 1: Inspect dumpsys activity top View Hierarchy (excluding Activity class declaration header)
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
@@ -306,25 +344,37 @@ def is_app_in_game(package):
                 pkg_lines = [line for line in content.split('\n') if package in line]
 
             if pkg_lines:
-                block_text = '\n'.join(pkg_lines).lower()
+                # IMPORTANT: Strip line 1 (the ACTIVITY declaration line) so class names like RobloxActivity/GameActivity don't trigger false Ingame status!
+                view_hierarchy = pkg_lines[1:] if len(pkg_lines) > 1 else pkg_lines
+                block_text = '\n'.join(view_hierarchy).lower()
 
-                # First, check for Home-screen & React Native UI signals
+                # First, check for Home-screen UI text & React Native UI signals
                 if any(sig in block_text for sig in HOME_SIGNALS):
                     return False
 
-                # Second, check for confirmed in-game 3D rendering signals
+                # Second, check for confirmed in-game 3D rendering surfaces
                 if any(sig in block_text for sig in GAME_SIGNALS):
                     return True
+
+                # Check entire block for explicit Home Screen UI titles
+                full_text = '\n'.join(pkg_lines).lower()
+                if any(sig in full_text for sig in ['for you', 'charts', 'moments', 'recommended for']):
+                    return False
 
         except Exception:
             pass
 
-    # Step 2: Fallback to reading latest Roblox log file tail
+    # Step 2: Check UDP Socket Game Connection State
+    udp_st = is_udp_game_connected(package)
+    if udp_st is not None and udp_st is True:
+        return True
+
+    # Step 3: Check latest Roblox log file tail
     log_st = check_roblox_log_status(package)
     if log_st is not None:
         return log_st
 
-    # Step 3: Default fallback (return False to allow safe rejoin)
+    # Step 4: Default fallback (return False to trigger safe Home Page rejoin)
     return False
 
 
