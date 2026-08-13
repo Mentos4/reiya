@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.0-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:07:00 UTC"
+BUILD_VERSION = "v6.8.0-REI-REJOIN"
+BUILD_TIME = "2026-08-14 02:11:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -327,11 +327,11 @@ def is_app_in_game(package):
 
     # Step 2: Check UDP RakNet Game Server Connection
     udp_st = is_udp_game_connected(package)
-    if udp_st is not None and udp_st is True:
-        return True
+    if udp_st is not None:
+        return udp_st  # True if connected to game server via UDP, False if on Home Screen with 0 UDP sockets
 
     # Default fallback when process is alive: treat as Ingame to prevent false force-stops
-    return True
+    return False
 
 
 def get_screen_size():

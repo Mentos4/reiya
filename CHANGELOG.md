@@ -82,13 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 22 (Release v6.7.0-REI-REJOIN)
-**Major Fix:** Active Process Rejoin & Launching Status Override Fix
-- Reduced initial launch grace period to 12s so Home Page and Process Dead rejoins trigger promptly.
-- Enforced `force_stop_app()` + 2s sleep on Home Page detection before firing `launch_game()`. Android requires a process force-stop when Roblox is already sitting open on the Home Screen so the new place ID deeplink intent (`ActivityProtocolLaunch`) re-initializes a fresh place connection.
-- Fixed dashboard table package key lookup to display real-time live status updates without falling back to `Launching`.
+### 2026-08-14 — Session 23 (Release v6.8.0-REI-REJOIN)
+**Major Fix:** Home Page Status Fallback Override Fix (`is_app_in_game`)
+- Fixed fallback bug in `is_app_in_game()` where `udp_st` returning `False` (0 active UDP sockets on Home Screen) was being overridden by `return True` at the bottom of the function.
+- `is_app_in_game()` now returns `udp_st` directly when non-None. When sitting on the Home Screen, 0 UDP sockets cleanly returns `False` (`Home Page`), instantly triggering force-stop & place rejoin!
 ```bash
-git commit -m "Release v6.7.0-REI-REJOIN: Force-stop on Home Page rejoin & 12s launch grace for instant rejoin" && git push origin main
+git commit -m "Release v6.8.0-REI-REJOIN: Return udp_st directly to enable instant Home Screen auto-rejoin" && git push origin main
 ```
 
 ---
