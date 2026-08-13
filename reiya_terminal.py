@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.6.0-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:14:00 UTC"
+BUILD_VERSION = "v6.7.0-REI-REJOIN"
+BUILD_TIME = "2026-08-14 02:16:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -234,71 +234,20 @@ def get_package_activity_dump(package, content):
 
     return pkg_lines
 
-def is_udp_game_connected(package):
-    """
-    Check if package process has an active connected UDP RakNet Game Server connection.
-    Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
-    """
-    try:
-        # Get PID of target clone package
-        res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
-        out = res.stdout.strip()
-        if not out:
-            res = subprocess.run(f"pidof {package}", shell=True, capture_output=True, text=True, timeout=2)
-            out = res.stdout.strip()
-
-        pids = [p for p in out.split() if p.isdigit()]
-        if not pids:
-            return False
-
-        for pid in pids:
-            # Check 1: netstat -anp for active UDP sockets belonging to PID
-            cmd = f"su -c 'netstat -anp 2>/dev/null | grep {pid} | grep -i udp'"
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
-            raw_out = r.stdout.strip()
-            if raw_out:
-                for line in raw_out.split('\n'):
-                    l = line.strip()
-                    # Skip unbound idle local sockets (0.0.0.0:* or *:* or :::*)
-                    if '0.0.0.0:*' in l or '*:*' in l or ':::*' in l:
-                        continue
-                    # Must be an ESTABLISHED connection or active remote endpoint socket
-                    if 'ESTABLISHED' in l or 'estab' in l.lower():
-                        return True
-                    parts = l.split()
-                    if len(parts) >= 5:
-                        foreign_addr = parts[4]
-                        if foreign_addr not in ['0.0.0.0:*', '*:*', ':::*', '*']:
-                            return True
-
-            # Check 2: ss -u -a -p for active ESTABLISHED UDP sockets
-            cmd_ss = f"su -c 'ss -u -a -p 2>/dev/null | grep pid={pid}'"
-            r_ss = subprocess.run(cmd_ss, shell=True, capture_output=True, text=True, timeout=2)
-            if r_ss.stdout.strip() and 'ESTAB' in r_ss.stdout:
-                return True
-
-        return False
-    except Exception:
-        return None
-
 def is_app_in_game(package):
     """
-    Check if package is in-game vs on Roblox Home Screen.
-    Uses UDP RakNet kernel socket detection (100% accurate across minimized, freeform & split-screen modes).
+    Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
+    Rule-compliant: Checks GAME_SIGNALS vs HOME_SIGNALS, fallbacks to False if package not found in dump.
     """
-    # Step 1: Primary Check — Active UDP RakNet Game Server Connection
-    udp_st = is_udp_game_connected(package)
-    if udp_st is not None:
-        return udp_st
-
-    # Step 2: Fallback — Inspect dumpsys activity top
     HOME_SIGNALS = [
-        'for you', 'charts', 'recommended for', 'moments',
-        'reactrootview', 'reactviewgroup', 'reactframelayout',
-        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
-        'loginactivity', 'welcomeactivity', 'titleactivity',
-        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell',
+        'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell', 'for you',
+        'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
+        'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
+    ]
+    GAME_SIGNALS = [
+        'gameactivity', 'robloxactivity', 'renderview', 'nativemain'
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -311,14 +260,20 @@ def is_app_in_game(package):
                     pkg_lines = [line for line in content.split('\n') if package in line]
                 if pkg_lines:
                     block_text = '\n'.join(pkg_lines).lower()
+                    # Check for explicit home screen signals first
                     if any(sig in block_text for sig in HOME_SIGNALS):
                         return False
-                    return True
+                    # Check for explicit game activity signals
+                    if any(sig in block_text for sig in GAME_SIGNALS):
+                        return True
+                    # If signals are ambiguous, default to False (safe rejoin)
+                    return False
         except Exception:
             pass
 
-    # Default fallback when process is alive: treat as Ingame to prevent false force-stops
-    return True
+    # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
+    return False
+
 
 
 def get_screen_size():
@@ -879,16 +834,18 @@ class TerminalRejoinLoop:
                     if in_game:
                         self.set_status(pkg, 'Ingame')
                     else:
-                        # NOT in-game — check if still within launch grace period (45s)
+                        # NOT in-game — check if still within launch grace period (20s)
                         time_since_launch = now - self.last_launch.get(pkg, 0)
-                        if time_since_launch < 45:
+                        if time_since_launch < LAUNCH_GRACE:
                             self.set_status(pkg, 'Launching')
                         else:
-                            # HOME SCREEN detected (past 45s grace period)
+                            # HOME SCREEN detected (past 20s grace period)
                             self.set_status(pkg, 'Home Page')
                             if home_rejoin_enabled:
-                                self.log(f"[{pkg}] Home Screen detected → Rejoining place")
+                                self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
                                 self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                time.sleep(2)
                                 bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                                 self.last_launch[pkg] = time.time()
                                 launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
