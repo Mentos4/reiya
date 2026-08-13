@@ -5,6 +5,7 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - Smart Package Sorting (Roblox & Executor packages placed at the top of the list)
 - Direct Game Launching via Place ID or Private Server Link
+- Package-targeted Intent launching (bypasses "Open With" dialogs completely)
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -230,7 +231,7 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
     return left, top, right, bottom
 
 def launch_game(package, game_id, bounds=None, freeform=True):
-    """Launch Roblox game via Android Intent with optional freeform windowing and bounds positioning."""
+    """Launch Roblox game targeting package directly to bypass 'Open With' system chooser."""
     game_id = str(game_id).strip()
     if '?privateServerLinkCode=' in game_id:
         parts = game_id.split('?privateServerLinkCode=', 1)
@@ -248,7 +249,8 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     else:
         url = f'roblox://placeId={game_id}'
 
-    cmd = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url]
+    # Target the specific package directly using -p flag
+    cmd = ['am', 'start', '-p', package, '-a', 'android.intent.action.VIEW', '-d', url]
     if freeform:
         cmd.extend(['--windowingMode', '5'])
     if bounds:
@@ -260,20 +262,23 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         if result.returncode == 0:
             return True
     except Exception as e:
-        print(f"[!] Intent freeform launch failed: {e}")
+        print(f"[!] Direct package intent launch failed: {e}")
 
-    # Fallback to standard intent without bounds/freeform
+    # Fallback: Intent without -p flag
     try:
-        result = subprocess.run(
-            ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url],
-            capture_output=True, text=True, timeout=10
-        )
+        cmd_fallback = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url]
+        if freeform:
+            cmd_fallback.extend(['--windowingMode', '5'])
+        if bounds:
+            l, t, r, b = bounds
+            cmd_fallback.extend(['--bounds', f'{l},{t},{r},{b}'])
+        result = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             return True
     except Exception:
         pass
 
-    # Fallback to monkey launcher
+    # Fallback to monkey launcher directly opening the package
     try:
         subprocess.run(
             ['monkey', '-p', package, '-c', 'android.intent.category.LAUNCHER', '1'],
