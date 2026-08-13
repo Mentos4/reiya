@@ -217,19 +217,27 @@ def is_app_running(package):
 
 def is_app_in_game(package):
     """
-    Check if package is actively in Roblox game place (RobloxActivity).
-    Returns True if RobloxActivity is visible in dumpsys window list.
+    Check if package has any active visible window on screen.
+    Uses broad window visibility check so clones like free.nokaA are detected correctly.
+    Returns True if the package appears anywhere in dumpsys window list (visible window).
     """
     try:
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=4)
-        for line in res.stdout.split('\n'):
+        content = res.stdout
+        # Check if the package has any window entry in the window manager
+        for line in content.split('\n'):
             if package in line:
-                line_lower = line.lower()
-                if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity', 'nativepage']):
+                # If the package appears as a Window entry, it has an active window on screen
+                if 'Window{' in line or 'mCurrentFocus' in line or 'mFocusedApp' in line:
+                    return True
+        # Fallback: check if package is the focused app at all
+        if f'/{package}' in content or f'{package}/' in content:
+            # Package has a component visible
+            for line in content.split('\n'):
+                if package in line and ('isVisible=true' in line or 'visible=true' in line.lower() or 'mHasSurface=true' in line):
                     return True
     except Exception:
         pass
-
     return False
 
 def get_screen_size():
@@ -648,25 +656,18 @@ class TerminalRejoinLoop:
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Big 2-Line ASCII Logo for REI REJOIN
-                print(f"{BOLD}{CYAN}")
-                print(r"  ██████╗ ███████╗██╗    ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
-                print(r"  ██╔══██╗██╔════╝██║    ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
-                print(r"  ██████╔╝█████╗  ██║    ██████╔╝█████╗  ██║██║   ██║██║██║")
-                print(r"  ██╔══██╗██╔══╝  ██║    ██╔══██╗██╔══╝  ██║██║   ██║██║██║")
-                print(r"  ██║  ██║███████╗██║    ██║  ██║███████╗██║╚██████╔╝██║██║")
-                print(r"  ╚═╝  ╚═╝╚══════╝╚═╝    ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝╚═╝")
-                print(f"{RESET}")
-                print(f"       {BOLD}{BLUE}> > > Premium Version < < <{RESET}")
-                print(f"Discord: {BLUE}discord.gg/5G3cStpbcx{RESET}")
-                print(f"Made by {CYAN}_g_huy{RESET}")
-                print(f"CHECK EXECUTOR METHOD: {GREEN}AUTO{RESET}")
+                # Clean plain-text header
+                print(f"{BOLD}{CYAN}  ============================{RESET}")
+                print(f"{BOLD}{CYAN}         REI  REJOIN          {RESET}")
+                print(f"{BOLD}{CYAN}  ============================{RESET}")
+                print(f"  Made by {CYAN}seisen_{RESET}  |  discord.gg/5G3cStpbcx")
+                print(f"  CHECK EXECUTOR METHOD: {GREEN}AUTO{RESET}")
                 print(f"WEBHOOK: {w_status}            | AUTO SORT TAB: {s_status}")
                 print(f"HOME REJOIN: {h_status}        | CLEAR CACHE: {c_status}")
                 print(f"----------------------------------------------------------")
                 print(f" Cpu usage: {cpu:<5} %     | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB |")
                 print(f"----------------------------------------------------------")
-                print(f"{BOLD}{'No':<3} | {'Username':<11} | {'Package':<11} | {'Status':<10} | {'Game'}{RESET}")
+                print(f"{BOLD}{'No':<3}|{'Username':<11}|{'Package':<11}|{'Status':<10}|{'Game'}{RESET}")
                 print(f"----+-------------+-------------+------------+------------")
 
                 statuses = self.get_status()
