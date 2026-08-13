@@ -6,8 +6,8 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
+- Robust Intent Launching (Component-targeted -n package/ActivityProtocolLaunch + fallback strategies)
 - Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
-- Package-targeted Intent launching (bypasses "Open With" dialogs completely)
 - Roblox Home Screen / Disconnect Detection & Auto Re-entry
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -30,8 +30,8 @@ import urllib.parse
 import mimetypes
 
 # Script version & timestamp
-BUILD_VERSION = "v2.8.0-DIRECT-NUMBER-MULTI"
-BUILD_TIME = "2026-08-13 22:03:00 UTC"
+BUILD_VERSION = "v2.9.0-COMPONENT-LAUNCH-FIX"
+BUILD_TIME = "2026-08-13 22:04:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -247,8 +247,11 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
     return left, top, right, bottom
 
 def launch_game(package, game_id, bounds=None, freeform=True):
-    """Launch Roblox game targeting package directly via shell to bypass 'Open With' system chooser."""
+    """Launch Roblox game targeting package directly via component and intent fallbacks."""
     game_id = str(game_id).strip()
+    if not game_id:
+        game_id = '2753915549'
+
     if '?privateServerLinkCode=' in game_id:
         parts = game_id.split('?privateServerLinkCode=', 1)
         place_id = parts[0]
@@ -268,32 +271,29 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     freeform_flag = '--windowingMode 5' if freeform else ''
     bounds_flag = f'--bounds {bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}' if bounds else ''
 
-    # Strategy 1: Targeted package launch with shell=True for Termux/VPhone pathing
-    cmd_str = f'am start -p {package} -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
-    for launcher in [f'su -c "{cmd_str}"', cmd_str, f'/system/bin/{cmd_str}']:
-        try:
-            res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
-            if res.returncode == 0:
-                return True
-        except Exception:
-            pass
+    # Strategy 1: Explicit Component Launch (Package/ActivityProtocolLaunch)
+    cmd_comp = f'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
 
-    # Strategy 2: Fallback intent without -p flag
-    cmd_fallback = f'am start -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
-    for launcher in [f'su -c "{cmd_fallback}"', cmd_fallback, f'/system/bin/{cmd_fallback}']:
-        try:
-            res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
-            if res.returncode == 0:
-                return True
-        except Exception:
-            pass
+    # Strategy 2: Targeted package launch (-p flag)
+    cmd_pkg = f'am start -p {package} -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
 
-    # Strategy 3: Fallback monkey launcher
-    monkey_cmd = f'monkey -p {package} -c android.intent.category.LAUNCHER 1'
-    for launcher in [f'su -c "{monkey_cmd}"', monkey_cmd, f'/system/bin/{monkey_cmd}']:
+    # Strategy 3: General intent launch
+    cmd_gen = f'am start -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
+
+    # Strategy 4: Monkey launcher
+    cmd_monkey = f'monkey -p {package} -c android.intent.category.LAUNCHER 1'
+
+    launch_cmds = [
+        f'su -c "{cmd_comp}"', cmd_comp, f'/system/bin/{cmd_comp}',
+        f'su -c "{cmd_pkg}"', cmd_pkg, f'/system/bin/{cmd_pkg}',
+        f'su -c "{cmd_gen}"', cmd_gen, f'/system/bin/{cmd_gen}',
+        f'su -c "{cmd_monkey}"', cmd_monkey, f'/system/bin/{cmd_monkey}'
+    ]
+
+    for launcher in launch_cmds:
         try:
             res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
-            if res.returncode == 0:
+            if res.returncode == 0 and "Error:" not in res.stdout:
                 return True
         except Exception:
             pass
@@ -627,13 +627,8 @@ class TerminalRejoinLoop:
 
         for i, pkg in enumerate(packages):
             gid = self._get_game_id(pkg, cfg)
-            if not gid:
-                self.log(f"WARNING: No game set for {pkg}, skipping launch.")
-                self.set_status(pkg, 'No game set')
-                continue
-
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-            self.log(f"Launching {pkg} -> Place {gid} (Bounds: {bounds})")
+            self.log(f"Launching {pkg} -> Place {gid or 'Default'} (Bounds: {bounds})")
             self.set_status(pkg, 'Launching')
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
@@ -684,7 +679,7 @@ class TerminalRejoinLoop:
                                 time.sleep(2)
 
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                            ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort) if gid else False
+                            ok = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                             if ok:
                                 self.log(f"{pkg}: Launch request sent OK.")
                                 last_seen[pkg] = time.time()
