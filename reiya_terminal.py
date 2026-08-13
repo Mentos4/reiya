@@ -8,7 +8,7 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Clean REIYA REJOIN CORE Live Dashboard with accurate 4-toggle settings header
-- Accurate In-Game vs Home/Disconnect Screen Status Detection (Fixes false Home Page status while in game)
+- Instant Home Page & Disconnect Detection (Triggers immediate game rejoin when focus leaves RobloxActivity)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -31,8 +31,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v4.1.0-REIYA-ACCURATE-STATUS"
-BUILD_TIME = "2026-08-13 22:22:00 UTC"
+BUILD_VERSION = "v4.2.0-INSTANT-HOME-REJOIN"
+BUILD_TIME = "2026-08-13 22:23:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -202,16 +202,17 @@ def is_app_running(package):
     return False
 
 def is_app_on_home_screen(package):
-    """Check if app is stuck on Home screen or Disconnected dialog."""
+    """Check if app is currently on Roblox Home Screen or Disconnect dialog (not in RobloxActivity)."""
     try:
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=3)
         for line in res.stdout.split('\n'):
             if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package in line:
                 line_lower = line.lower()
-                if any(hk in line_lower for hk in ['disconnect', 'errordialog', 'landingpage', 'homescreen', 'loginactivity']):
-                    return True
-                # If package window is active and not on disconnect/landing -> Ingame!
-                return False
+                # If active focus contains RobloxActivity or GameActivity -> Ingame!
+                if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity']):
+                    return False
+                # Focused on Roblox clone but not in RobloxActivity -> Home Screen / Disconnected!
+                return True
     except Exception:
         pass
 
@@ -219,8 +220,9 @@ def is_app_on_home_screen(package):
         res = subprocess.run("su -c 'dumpsys activity top'", shell=True, capture_output=True, text=True, timeout=3)
         if package in res.stdout:
             res_lower = res.stdout.lower()
-            if any(hk in res_lower for hk in ['disconnect', 'errordialog', 'landingpage', 'homescreen', 'loginactivity']):
-                return True
+            if any(gkw in res_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity']):
+                return False
+            return True
     except Exception:
         pass
 
@@ -728,6 +730,7 @@ class TerminalRejoinLoop:
                     if is_home:
                         self.set_status(pkg, 'Home Page')
                         bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                        self.set_status(pkg, 'Rejoining')
                         launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                         last_seen[pkg] = time.time()
                     else:
