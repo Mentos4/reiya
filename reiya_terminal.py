@@ -5,6 +5,7 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - Smart Package Sorting (Roblox & Executor packages placed at the top of the list)
 - Direct Game Launching via Place ID or Private Server Link
+- Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
 - Package-targeted Intent launching (bypasses "Open With" dialogs completely)
 - Roblox Home Screen / Disconnect Detection & Auto Re-entry
 - Freeform Window Tiling & Auto-Sorting on screen
@@ -169,26 +170,21 @@ def get_roblox_packages():
 def is_app_running(package):
     """Check if process is currently running using pidof and ps -A."""
     try:
-        result = subprocess.run(
-            ['pidof', package],
-            capture_output=True, text=True, timeout=3
-        )
-        if result.stdout.strip():
+        res = subprocess.run(f'pidof {package}', shell=True, capture_output=True, text=True, timeout=3)
+        if res.stdout.strip():
             return True
     except Exception:
         pass
     try:
-        result = subprocess.run(
-            ['ps', '-A'], capture_output=True, text=True, timeout=5
-        )
-        return package in result.stdout
+        res = subprocess.run('ps -A', shell=True, capture_output=True, text=True, timeout=5)
+        return package in res.stdout
     except Exception:
         return False
 
 def is_app_on_home_screen(package):
     """Check if app is currently stuck on Roblox Home Screen or Disconnected screen via dumpsys window."""
     try:
-        res = subprocess.run(['dumpsys', 'window', 'windows'], capture_output=True, text=True, timeout=3)
+        res = subprocess.run('dumpsys window windows', shell=True, capture_output=True, text=True, timeout=3)
         for line in res.stdout.split('\n'):
             if 'mCurrentFocus' in line or 'mFocusedApp' in line:
                 if package in line:
@@ -201,7 +197,7 @@ def is_app_on_home_screen(package):
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
     try:
-        res = subprocess.run(['wm', 'size'], capture_output=True, text=True, timeout=3)
+        res = subprocess.run('wm size', shell=True, capture_output=True, text=True, timeout=3)
         match = re.search(r'(\d+)x(\d+)', res.stdout)
         if match:
             return int(match.group(1)), int(match.group(2))
@@ -246,7 +242,7 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
     return left, top, right, bottom
 
 def launch_game(package, game_id, bounds=None, freeform=True):
-    """Launch Roblox game targeting package directly to bypass 'Open With' system chooser."""
+    """Launch Roblox game targeting package directly via shell to bypass 'Open With' system chooser."""
     game_id = str(game_id).strip()
     if '?privateServerLinkCode=' in game_id:
         parts = game_id.split('?privateServerLinkCode=', 1)
@@ -264,45 +260,40 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     else:
         url = f'roblox://placeId={game_id}'
 
-    # Target the specific package directly using -p flag
-    cmd = ['am', 'start', '-p', package, '-a', 'android.intent.action.VIEW', '-d', url]
-    if freeform:
-        cmd.extend(['--windowingMode', '5'])
-    if bounds:
-        l, t, r, b = bounds
-        cmd.extend(['--bounds', f'{l},{t},{r},{b}'])
+    freeform_flag = '--windowingMode 5' if freeform else ''
+    bounds_flag = f'--bounds {bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}' if bounds else ''
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return True
-    except Exception as e:
-        print(f"[!] Direct package intent launch failed: {e}")
+    # Strategy 1: Targeted package launch with shell=True for Termux/VPhone pathing
+    cmd_str = f'am start -p {package} -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
+    for launcher in [f'su -c "{cmd_str}"', cmd_str, f'/system/bin/{cmd_str}']:
+        try:
+            res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
 
-    # Fallback: Intent without -p flag
-    try:
-        cmd_fallback = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url]
-        if freeform:
-            cmd_fallback.extend(['--windowingMode', '5'])
-        if bounds:
-            l, t, r, b = bounds
-            cmd_fallback.extend(['--bounds', f'{l},{t},{r},{b}'])
-        result = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return True
-    except Exception:
-        pass
+    # Strategy 2: Fallback intent without -p flag
+    cmd_fallback = f'am start -a android.intent.action.VIEW -d "{url}" {freeform_flag} {bounds_flag}'.strip()
+    for launcher in [f'su -c "{cmd_fallback}"', cmd_fallback, f'/system/bin/{cmd_fallback}']:
+        try:
+            res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
 
-    # Fallback to monkey launcher directly opening the package
-    try:
-        subprocess.run(
-            ['monkey', '-p', package, '-c', 'android.intent.category.LAUNCHER', '1'],
-            capture_output=True, timeout=10
-        )
-        return True
-    except Exception as e:
-        print(f"[!] Monkey launch failed: {e}")
-        return False
+    # Strategy 3: Fallback monkey launcher
+    monkey_cmd = f'monkey -p {package} -c android.intent.category.LAUNCHER 1'
+    for launcher in [f'su -c "{monkey_cmd}"', monkey_cmd, f'/system/bin/{monkey_cmd}']:
+        try:
+            res = subprocess.run(launcher, shell=True, capture_output=True, text=True, timeout=8)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    return False
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
@@ -328,7 +319,7 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
     try:
-        subprocess.run(['am', 'force-stop', package], timeout=5)
+        subprocess.run(f'am force-stop {package}', shell=True, timeout=5)
         return True
     except Exception as e:
         print(f"[!] Force stop error: {e}")
@@ -337,7 +328,7 @@ def force_stop_app(package):
 def clear_app_cache(package):
     """Clear app data/cache using pm clear."""
     try:
-        subprocess.run(['pm', 'clear', package], timeout=10)
+        subprocess.run(f'pm clear {package}', shell=True, timeout=10)
         return True
     except Exception as e:
         print(f"[!] Clear cache error: {e}")
@@ -387,8 +378,8 @@ def get_ram_usage():
 def get_process_ram(package):
     try:
         result = subprocess.run(
-            ['dumpsys', 'meminfo', package, '-c'],
-            capture_output=True, text=True, timeout=5
+            f'dumpsys meminfo {package} -c',
+            shell=True, capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.split('\n'):
             if 'TOTAL' in line:
@@ -402,8 +393,8 @@ def get_process_ram(package):
 def get_device_name():
     try:
         result = subprocess.run(
-            ['getprop', 'ro.product.model'],
-            capture_output=True, text=True, timeout=3
+            'getprop ro.product.model',
+            shell=True, capture_output=True, text=True, timeout=3
         )
         return result.stdout.strip() or 'Unknown'
     except Exception:
@@ -417,7 +408,7 @@ def format_uptime(seconds):
 
 def take_screenshot(output_path='/sdcard/roblox_mgr_shot.png'):
     try:
-        subprocess.run(['screencap', '-p', output_path], timeout=8)
+        subprocess.run(f'screencap -p {output_path}', shell=True, timeout=8)
         if os.path.exists(output_path):
             return output_path
     except Exception:
