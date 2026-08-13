@@ -241,14 +241,16 @@ def is_app_in_game(package):
       - If package not found in dump at all → return False (safe: triggers rejoin).
     """
     HOME_SIGNALS = [
-        'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
-        'homeactivity', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'activitymain', 'lobbyactivity',
-        'loadingactivity', 'bootstrapactivity',
+        'splashactivity', 'startupactivity', 'homeactivity',
+        'loginactivity', 'welcomeactivity', 'titleactivity',
+        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity',
     ]
 
     GAME_SIGNALS = [
         'gameactivity', 'robloxactivity', 'renderview',
+        'surfaceview', 'textureview', 'glsurfaceview',
+        'nativegl', 'gamecanvas', 'place', 'game',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
