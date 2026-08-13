@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.3.2-REI-REJOIN"
-BUILD_TIME = "2026-08-13 23:59:00 UTC"
+BUILD_VERSION = "v6.3.3-REI-REJOIN"
+BUILD_TIME = "2026-08-14 00:03:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -235,17 +235,20 @@ def is_app_in_game(package):
 
     Strategy:
       - Collect all lines in the activity dump that reference the package.
-      - If ANY such line contains a HOME_SIGNAL keyword → return False (Home Page).
+      - If ANY line contains a GAME_SIGNAL keyword → return True (In-Game).
+      - If ANY line contains a HOME_SIGNAL keyword → return False (Home Page).
       - If lines found with no home signals → return True (In-Game).
       - If package not found in dump at all → return False (safe: triggers rejoin).
-    Note: Do NOT require GAME_SIGNALS — Roblox in-game activity names vary per build
-    and won't reliably match a fixed list. HOME_SIGNALS are the only discriminator needed.
     """
     HOME_SIGNALS = [
         'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
-        'launchactivity', 'homeactivity', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'activitymain', 'robloxmain', 'lobbyactivity',
+        'homeactivity', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'activitymain', 'lobbyactivity',
         'loadingactivity', 'bootstrapactivity',
+    ]
+
+    GAME_SIGNALS = [
+        'gameactivity', 'robloxactivity', 'renderview',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -260,9 +263,15 @@ def is_app_in_game(package):
                 # Package not visible in top at all — not confirmed in-game
                 continue
 
+            # First, check for confirmed in-game activity signals
             for line in pkg_lines:
                 ll = line.lower()
-                # If ANY line shows a home-screen signal → definitely NOT in-game
+                if any(sig in ll for sig in GAME_SIGNALS):
+                    return True
+
+            # Second, check for home-screen activity signals
+            for line in pkg_lines:
+                ll = line.lower()
                 if any(sig in ll for sig in HOME_SIGNALS):
                     return False
 
@@ -273,7 +282,6 @@ def is_app_in_game(package):
             pass
 
     # Could not determine from activity stack.
-    # Return False so the loop tries to rejoin — safer than staying stuck on 'Ingame'.
     return False
 
 
@@ -816,15 +824,6 @@ class TerminalRejoinLoop:
                 gid = self._get_game_id(pkg, cfg)
                 now = time.time()
 
-                # ── GRACE PERIOD: skip check right after launching ────────────────
-                time_since_launch = now - self.last_launch.get(pkg, 0)
-                if time_since_launch < LAUNCH_GRACE:
-                    cur = self.status.get(pkg, {}).get('status', '')
-                    if cur not in ('Ingame',):
-                        self.set_status(pkg, 'Launching')
-                    continue
-                # ─────────────────────────────────────────────────────────────
-
                 running = is_app_running(pkg)
 
                 if not running:
@@ -839,25 +838,26 @@ class TerminalRejoinLoop:
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
                 else:
-                    # ★ PROCESS ALIVE → check if actually in-game or on Home Screen
+                    # ★ PROCESS ALIVE → check if in-game or on Home Screen
                     in_game = is_app_in_game(pkg)
                     if in_game:
                         self.set_status(pkg, 'Ingame')
                     else:
-                        # HOME SCREEN detected
-                        self.set_status(pkg, 'Home Page')
-                        if home_rejoin_enabled:
-                            self.log(f"[{pkg}] Home Screen detected → Sending rejoin intent")
-                            # Do NOT use am force-stop here — on split-screen VPhone it also
-                            # disrupts the window layout and kills the Termux side.
-                            # FLAG_ACTIVITY_NEW_TASK (0x10000000) is sufficient to navigate
-                            # Roblox directly from its Home Screen into the game place.
-                            self.set_status(pkg, 'Rejoining')
-                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                            self.last_launch[pkg] = now
-                            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        # NOT in-game — check if still within initial launch grace period
+                        time_since_launch = now - self.last_launch.get(pkg, 0)
+                        if time_since_launch < LAUNCH_GRACE:
+                            self.set_status(pkg, 'Launching')
                         else:
-                            self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
+                            # HOME SCREEN detected (past grace period)
+                            self.set_status(pkg, 'Home Page')
+                            if home_rejoin_enabled:
+                                self.log(f"[{pkg}] Home Screen detected → Sending rejoin intent")
+                                self.set_status(pkg, 'Rejoining')
+                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                                self.last_launch[pkg] = now
+                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            else:
+                                self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
 
             time.sleep(check_interval)
 
