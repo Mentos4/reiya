@@ -313,63 +313,166 @@ def is_udp_game_connected(package):
 
 def is_app_in_game(package):
     """
-    Check if the package is in-game vs on the Roblox Home Screen.
-    Uses structural window layout metrics from 'dumpsys window windows':
-      - Home Page: mSubLayer=0 and no 3D SurfaceView layers.
-      - In-Game: Active SurfaceView / 3D engine render surface layers.
+    Advanced layout inspector for Roblox clients & clones (Noka, Delta, etc.)
+    Safely captures SurfaceView layers without breaking when Termux is focused.
     """
+    # Safety Check: Never allow Termux to be checked as a game package
+    if not package or "termux" in str(package).lower():
+        return False
+
     try:
+        # Pull complete system window manager details WITHOUT piping grep early
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=5)
         output = res.stdout
+        if not output.strip() or package not in output:
+            return False
 
-        if package in output:
-            lines = output.split('\n')
-            target_block = []
-            capture = False
+        lines = output.split('\n')
+        has_target_window = False
+        has_3d_surface = False
 
-            for line in lines:
-                if "Window #" in line and package in line:
-                    capture = True
-                elif "Window #" in line and package not in line:
-                    capture = False
+        for line in lines:
+            # Check if this line belongs to our specific executor app window or activity
+            if package in line and ("Window #" in line or "Activity" in line or "TASK" in line):
+                has_target_window = True
 
-                if capture:
-                    target_block.append(line)
+            # Check if a 3D rendering context engine layer (SurfaceView / RenderView) is open on screen
+            if "SurfaceView" in line or "RenderView" in line:
+                has_3d_surface = True
 
-            block_text = "\n".join(target_block) if target_block else output
-
-            # Structural Layer Check:
-            # On Homepage, mSubLayer sits at 0 and no 3D SurfaceView engine layers exist.
-            if "mSubLayer=0" in block_text and "SurfaceView" not in block_text:
-                return False  # Home Page detected → triggers auto-rejoin
-
-            # If SurfaceView / 3D Engine Surface exists for package → In-Game
-            if "SurfaceView" in block_text and package in block_text:
-                return True
-
-            # If PlaceActivity or RenderView is explicitly visible in stack → In-Game
-            if any(sig in output for sig in ['PlaceActivity', 'RenderView', 'gameactivity']):
-                return True
-
-            # If React Native / Home UI text is present → Home Page
-            if any(sig in output.lower() for sig in ['for you', 'charts', 'moments', 'recommended for', 'reactrootview', 'hometab']):
-                return False
+        # State Separation:
+        if has_target_window:
+            # If target app is open on screen but 3D map engine surface layer is missing -> sit on 2D Homepage
+            if not has_3d_surface:
+                return False  # Home Page -> triggers auto-rejoin
+            else:
+                return True   # In-Game
 
     except Exception:
         pass
 
-    # Step 2: Check UDP Socket RakNet Game Connection State
+    # Fallback to UDP Socket Game Connection State
     udp_st = is_udp_game_connected(package)
     if udp_st is not None:
         return udp_st
 
-    # Step 3: Check latest Roblox log file tail
+    # Fallback to Roblox log status
     log_st = check_roblox_log_status(package)
     if log_st is not None:
         return log_st
 
-    # Default fallback: safe Home Page rejoin trigger
     return False
+
+
+def get_screen_size():
+    """Get screen resolution width and height via wm size."""
+    try:
+        res = subprocess.run('wm size', shell=True, capture_output=True, text=True, timeout=3)
+        match = re.search(r'(\d+)x(\d+)', res.stdout)
+        if match:
+            w, h = int(match.group(1)), int(match.group(2))
+            return (max(w, h), min(w, h))  # Always return landscape orientation (w > h)
+    except Exception:
+        pass
+    return 1280, 720
+
+def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
+    """
+    Calculate (left, top, right, bottom) bounds for window tiling.
+    Places Roblox windows on the RIGHT 50% of the landscape screen so Termux stays on Left 50%.
+    """
+    if not screen_w or not screen_h:
+        screen_w, screen_h = get_screen_size()
+
+    total_apps = max(1, total_apps)
+
+    half_w = int(screen_w * 0.5)
+    cell_h = int(screen_h / total_apps)
+    left = half_w
+    top = index * cell_h
+    right = screen_w
+    bottom = (index + 1) * cell_h
+    return left, top, right, bottom
+
+def launch_game(package, game_id, bounds=None, freeform=True):
+    """Launch Roblox game directly into place ID for targeted clone package."""
+    game_id = str(game_id).strip()
+    if not game_id:
+        game_id = '2753915549'
+
+    if '?privateServerLinkCode=' in game_id:
+        parts = game_id.split('?privateServerLinkCode=', 1)
+        place_id = parts[0]
+        link_code = parts[1]
+        url = f'roblox://placeId={place_id}&linkCode={link_code}'
+        web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
+    elif game_id.startswith('http'):
+        match = re.search(r'/games/(\d+)', game_id)
+        place_id = match.group(1) if match else game_id
+        ps_match = re.search(r'privateServerLinkCode=([^&]+)', game_id)
+        if ps_match:
+            url = f'roblox://placeId={place_id}&linkCode={ps_match.group(1)}'
+            web_url = game_id
+        else:
+            url = f'roblox://placeId={place_id}'
+            web_url = f'https://www.roblox.com/games/{place_id}'
+    else:
+        url = f'roblox://placeId={game_id}'
+        web_url = f'https://www.roblox.com/games/{game_id}'
+
+    # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
+    # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
+    intents = [
+        f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
+        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
+    ]
+
+    for cmd in intents:
+        try:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
+            if res.returncode == 0 and "Error" not in res.stdout:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
+    """Auto-arrange/tile running Roblox app windows on screen."""
+    set_landscape_orientation()
+    if packages is None:
+        packages = config.get('selected_packages', [])
+    if not packages:
+        packages = get_roblox_packages()
+
+    if not game_id:
+        game_id = config.get('game_id', '')
+
+    w, h = get_screen_size()
+    total = len(packages)
+    print(f"[+] Auto-sorting {total} window(s) on screen ({w}x{h}, landscape)...")
+
+    for idx, pkg in enumerate(packages):
+        bounds = calculate_window_bounds(idx, total, w, h, mode=mode)
+        print(f"  -> Positioning {pkg} bounds: {bounds}")
+        launch_game(pkg, game_id, bounds=bounds, freeform=True)
+        time.sleep(1)
+
+def force_stop_app(package):
+    """Force stop an application using am force-stop (hard-protects Termux)."""
+    if not package or "termux" in str(package).lower():
+        return False
+    try:
+        subprocess.run(f"su -c 'am force-stop {package}'", shell=True, timeout=5)
+        return True
+    except Exception as e:
+        print(f"[!] Force stop error: {e}")
+        return False
 
 
 def get_screen_size():

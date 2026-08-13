@@ -82,13 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 13
-**Fix:** Structural Sub-Layer Window Metric Inspection (`mSubLayer=0` & `SurfaceView`)
-- Evaluates `dumpsys window windows` specifically for the target package's window block.
-- On the Roblox Home Screen, secondary 3D engine surface layers are destroyed, resetting structural containers to `mSubLayer=0` with no `SurfaceView` -> immediately flags `Home Page` (`return False`) and triggers auto-rejoin.
-- Completely ignores orientation locks (`mOrientation`) forced by Termux.
+### 2026-08-14 — Session 14
+**Fix:** Hard Termux Protection & Un-Piped Window System Parsing
+- Hard-blocked any string containing `termux` from entering `force_stop_app()` or state routines to prevent Termux terminal session crashes.
+- Removed early shell-level piping (`grep free.nokaA`) from `dumpsys window windows` command in Python, allowing full output parsing to correctly pair window activity presence with 3D engine `SurfaceView` layer existence.
 ```bash
-git commit -m "Fix Roblox Home Screen detection: structural sub-layer window metrics (mSubLayer=0 & SurfaceView)" && git push origin main
+git commit -m "Fix Termux safety & un-piped dumpsys SurfaceView layer scanning" && git push origin main
 ```
 
 ---
