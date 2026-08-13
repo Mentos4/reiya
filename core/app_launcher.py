@@ -54,7 +54,37 @@ def is_app_running(package):
         return False
 
 
-def launch_game(package, game_id):
+def get_screen_size():
+    try:
+        res = subprocess.run(['wm', 'size'], capture_output=True, text=True, timeout=3)
+        match = re.search(r'(\d+)x(\d+)', res.stdout)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    except Exception:
+        pass
+    return 1280, 720
+
+
+def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
+    import math
+    if not screen_w or not screen_h:
+        screen_w, screen_h = get_screen_size()
+    total_apps = max(1, total_apps)
+
+    if mode == 'left_stack':
+        half_w = int(screen_w * 0.5)
+        cell_h = int(screen_h / total_apps)
+        return 0, index * cell_h, half_w, (index + 1) * cell_h
+
+    cols = math.ceil(math.sqrt(total_apps))
+    rows = math.ceil(total_apps / cols)
+    cell_w = int(screen_w / cols)
+    cell_h = int(screen_h / rows)
+    r, c = index // cols, index % cols
+    return c * cell_w, r * cell_h, (c + 1) * cell_w, (r + 1) * cell_h
+
+
+def launch_game(package, game_id, bounds=None, freeform=True):
     game_id = str(game_id).strip()
     # Private server link format: PLACE_ID?privateServerLinkCode=LINK_CODE
     if '?privateServerLinkCode=' in game_id:
@@ -76,12 +106,27 @@ def launch_game(package, game_id):
     else:
         url = f'roblox://placeId={game_id}'
 
+    cmd = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url]
+    if freeform:
+        cmd.extend(['--windowingMode', '5'])
+    if bounds:
+        l, t, r, b = bounds
+        cmd.extend(['--bounds', f'{l},{t},{r},{b}'])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            return True
+    except Exception:
+        pass
+
     try:
         result = subprocess.run(
             ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url],
             capture_output=True, text=True, timeout=10
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
     except Exception:
         pass
 
