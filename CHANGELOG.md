@@ -82,14 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 20 (Release v6.6.0-REI-REJOIN)
-**Major Release:** Direct MuMu Player ADB Inspection & View Hierarchy Surface Mapping (`is_app_in_game`)
-- Connected ADB directly to live MuMu Player instance (`127.0.0.1:7555`) and extracted complete View Hierarchy tree.
-- Found exact Roblox Android UI resource IDs active during Home Screen & loading state: `loading_layout`, `loading_view`, `splash_progress_bar`, `loading_progress_view`, `retry_layout_stub`, `dotimage1/2/3`.
-- `is_app_in_game()` now matches these exact hardware view IDs to detect Home Screen vs 3D `RBXSurfaceView` rendering.
-- Rejoin loop safely triggers place rejoin intent without killing process.
+### 2026-08-14 — Session 21 (Release v6.6.1-REI-REJOIN)
+**Fix:** Unblocked `Launching` status & restored instant `Ingame` detection (`is_app_in_game`)
+- Removed permanent `retry_layout_stub` ViewStub from `LOADING_HOME_VIEW_IDS`. `retry_layout_stub` is a permanent layout XML stub in Roblox's activity layout, which was falsely causing `is_app_in_game()` to return `False` and get stuck on `Launching`.
+- `is_app_in_game()` now matches 3D surface view (`RBXSurfaceView` / `surfaceview`) cleanly to display `Ingame` (green).
 ```bash
-git commit -m "Release v6.6.0-REI-REJOIN: MuMu Player ADB View Hierarchy surface mapping & safe place rejoin" && git push origin main
+git commit -m "Release v6.6.1-REI-REJOIN: Remove retry_layout_stub to unblock Launching status & show Ingame" && git push origin main
 ```
 
 ---

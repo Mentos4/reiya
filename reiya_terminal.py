@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.6.0-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:00:00 UTC"
+BUILD_VERSION = "v6.6.1-REI-REJOIN"
+BUILD_TIME = "2026-08-14 02:04:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -283,15 +283,20 @@ def is_udp_game_connected(package):
 
 def is_app_in_game(package):
     """
-    Check if package is in-game vs on Roblox Home / Loading Screen.
-    Derived directly from empirical MuMu Player dumpsys View Hierarchy inspection.
+    Check if package is in-game vs on Roblox Home Screen.
+    Safe for multi-window / freeform mode when Termux is focused.
     """
-    # Explicit Roblox Loading / Home Screen View resource IDs
-    LOADING_HOME_VIEW_IDS = [
-        'loading_layout', 'loading_view', 'splash_progress_bar',
-        'loading_progress_view', 'dotimage1', 'dotimage2', 'dotimage3',
-        'retry_layout_stub', 'for you', 'charts', 'recommended for',
-        'reactrootview', 'hometab', 'loginactivity', 'welcomeactivity',
+    # Explicit Roblox Home Screen UI text & tab signals (visible ONLY on Home Page / Lobby)
+    HOME_SIGNALS = [
+        'for you', 'charts', 'recommended for', 'moments',
+        'hometab', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'authactivity', 'appshell',
+    ]
+
+    # Explicit 3D Engine Surface View indicators
+    GAME_SIGNALS = [
+        'rbxsurfaceview', 'surfaceview', 'renderview',
+        'nativegl', 'gamecanvas', 'raknet',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -306,21 +311,21 @@ def is_app_in_game(package):
                 if pkg_lines:
                     full_text = '\n'.join(pkg_lines).lower()
 
-                    # Rule 1: If Roblox loading / splash / home screen views are active → Home Page (False)
-                    if any(v_id in full_text for v_id in LOADING_HOME_VIEW_IDS):
+                    # Rule 1: If explicit Roblox Home Screen UI text/views are present → Home Screen (False)
+                    if any(sig in full_text for sig in HOME_SIGNALS):
                         return False
 
                     # Rule 2: If 3D rendering surface (RBXSurfaceView / surfaceview) is active → Ingame (True)
-                    if 'rbxsurfaceview' in full_text or 'surfaceview' in full_text or 'renderview' in full_text:
+                    if any(sig in full_text for sig in GAME_SIGNALS):
                         return True
 
-                    # Rule 3: Package visible in activity dump with NO loading/home views → Ingame (True)
+                    # Rule 3: Package visible in activity dump with NO Home Screen text → Ingame (True)
                     return True
 
         except Exception:
             pass
 
-    # Step 2: Fallback — Check UDP RakNet Game Server Connection
+    # Step 2: Check UDP RakNet Game Server Connection
     udp_st = is_udp_game_connected(package)
     if udp_st is not None and udp_st is True:
         return True
