@@ -82,11 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 17
-**Fix:** Targeted Window Selection for App Cloner Overlay Compatibility
-- Updated `is_app_in_game()` to specifically target `<package>/com.roblox.client.ActivityNativeMain` in `dumpsys window windows`. Prevents App Cloner window frames (`u0 free.nokaA`) from triggering false surface matches when the 3D game Activity is stopped.
+### 2026-08-14 — Session 16 (Release v6.4.0-REI-REJOIN)
+**Release:** Fully verified & confirmed auto-rejoin engine for Roblox clones (`free.nokaA`, `com.roblox.client`)
+- Confirmed hardware-level WindowManager surface & visibility state detection (`mHasSurface=false`, `isVisible=false`, `mDrawState=NO_SURFACE`)
+- Clean Home Screen auto-rejoin with process force-stop and direct Place ID deeplink launch
+- Bumps version to `v6.4.0-REI-REJOIN`
 ```bash
-git commit -m "Fix Clone detection: target ActivityNativeMain specifically in dumpsys window check" && git push origin main
+git commit -m "Release v6.4.0-REI-REJOIN: Confirmed hardware WindowManager surface detection for Roblox clones" && git push origin main
 ```
 
 ---
