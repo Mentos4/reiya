@@ -227,19 +227,30 @@ def is_app_running(package):
             pass
     return False
 
+def get_package_activity_dump(package, content):
+    """
+    Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block.
+    """
+    lines = content.split('\n')
+    pkg_lines = []
+    capturing = False
+
+    for line in lines:
+        if ('TASK ' in line or 'ACTIVITY ' in line) and package in line:
+            capturing = True
+            pkg_lines.append(line)
+        elif capturing:
+            if ('TASK ' in line or 'ACTIVITY ' in line) and package not in line:
+                break
+            pkg_lines.append(line)
+
+    return pkg_lines
+
 def is_app_in_game(package):
     """
     Check if the package is in-game vs on the Roblox Home Screen.
     Uses 'dumpsys activity top' which shows the ACTUAL top visible activity
     regardless of which window (Termux vs Roblox) currently has focus.
-
-    Strategy:
-      - Collect all lines in the activity dump that reference the package.
-      - First check HOME_SIGNALS (e.g. reactrootview, homeactivity, splash, login).
-        If ANY home signal is found → return False (Home Page).
-      - Next check GAME_SIGNALS (e.g. renderview, glsurfaceview, surfaceview, nativegl).
-        If ANY game signal is found → return True (In-Game).
-      - If package not found in dump at all → return False (safe: triggers rejoin).
     """
     HOME_SIGNALS = [
         'reactrootview', 'reactviewgroup', 'reactframelayout',
@@ -261,29 +272,28 @@ def is_app_in_game(package):
             if not content.strip():
                 continue
 
-            pkg_lines = [line for line in content.split('\n') if package in line]
+            pkg_lines = get_package_activity_dump(package, content)
             if not pkg_lines:
-                # Package not visible in top at all — not confirmed in-game
-                continue
+                # If section parsing returned empty, fallback to simple matching
+                pkg_lines = [line for line in content.split('\n') if package in line]
+                if not pkg_lines:
+                    continue
 
-            # First, check for Home-screen activity & React Native UI signals
-            for line in pkg_lines:
-                ll = line.lower()
-                if any(sig in ll for sig in HOME_SIGNALS):
-                    return False
+            block_text = '\n'.join(pkg_lines).lower()
 
-            # Second, check for confirmed in-game 3D rendering signals
-            for line in pkg_lines:
-                ll = line.lower()
-                if any(sig in ll for sig in GAME_SIGNALS):
-                    return True
-
-            # If React Native UI components exist in dump, it's Home Screen
-            content_lower = content.lower()
-            if any(sig in content_lower for sig in ['reactrootview', 'reactviewgroup']):
+            # First, check for Home-screen & React Native UI signals anywhere in package block
+            if any(sig in block_text for sig in HOME_SIGNALS):
                 return False
 
-            # Package visible in top with no home signals → in-game
+            # Second, check for confirmed in-game 3D rendering surface signals
+            if any(sig in block_text for sig in GAME_SIGNALS):
+                return True
+
+            # If React Native UI components exist anywhere in package dump, it's Home Screen
+            if any(sig in block_text for sig in ['reactrootview', 'reactviewgroup', 'reactframelayout']):
+                return False
+
+            # Package visible in top stack with no home signals → in-game
             return True
 
         except Exception:
@@ -859,10 +869,12 @@ class TerminalRejoinLoop:
                             # HOME SCREEN detected (past grace period)
                             self.set_status(pkg, 'Home Page')
                             if home_rejoin_enabled:
-                                self.log(f"[{pkg}] Home Screen detected → Sending rejoin intent")
+                                self.log(f"[{pkg}] Home Screen detected → Force-stopping & rejoining place")
                                 self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                time.sleep(2)
                                 bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                self.last_launch[pkg] = now
+                                self.last_launch[pkg] = time.time()
                                 launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                             else:
                                 self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
