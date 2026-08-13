@@ -8,9 +8,9 @@ Single standalone CLI script combining all core functions of Reiya Roblox Accoun
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REIYA REJOIN ASCII Dashboard UI (2-line REIYA REJOIN block logo + clean settings & live stats table)
-- Stable 45-Second Rejoin Cooldown (Eliminates random status cycling/flickering while Roblox is loading)
 - Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
-- Instant App Exit & Crash Re-launch (Relaunches Roblox apps instantly when closed without delay)
+- Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
+- Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -34,8 +34,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v5.3.0-STABLE-STATUS-LOOP"
-BUILD_TIME = "2026-08-13 22:37:00 UTC"
+BUILD_VERSION = "v6.0.0-PERFECT-REJOIN-UI"
+BUILD_TIME = "2026-08-13 22:40:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -116,6 +116,16 @@ def set_landscape_orientation():
         except Exception:
             pass
 
+def clear_terminal_screen():
+    """Clear terminal screen completely preventing duplicate overlapping headers."""
+    try:
+        if os.name == 'posix':
+            os.system('clear')
+        else:
+            os.system('cls')
+    except Exception:
+        print("\033[H\033[2J\033[3J", end="")
+
 def get_installed_packages():
     """
     Discover all installed packages on Android / VPhone / Emulators.
@@ -193,46 +203,33 @@ def get_roblox_packages():
 
 def is_app_running(package):
     """Check if process is currently running using ps -A and pidof."""
-    for cmd in [f"su -c 'ps -A'", "ps -A", f"su -c 'pidof {package}'", f"pidof {package}"]:
+    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}", f"su -c 'ps -A'", "ps -A"]:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            if package in res.stdout:
-                return True
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
             if "pidof" in cmd and res.stdout.strip().isdigit():
+                return True
+            if package in res.stdout:
                 return True
         except Exception:
             pass
     return False
 
-def check_app_window_state(package):
+def is_app_in_game(package):
     """
-    Check exact window state of package from dumpsys window windows.
-    Returns: 'INGAME', 'HOME', 'DISCONNECT', or 'UNKNOWN'
+    Check if package is actively in Roblox game place (RobloxActivity).
+    Returns True if RobloxActivity is visible in dumpsys window list.
     """
     try:
         res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=4)
-        lines = [line for line in res.stdout.split('\n') if package in line]
-        if not lines:
-            return 'UNKNOWN'
-
-        for line in lines:
-            line_lower = line.lower()
-            if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity', 'nativepage']):
-                return 'INGAME'
-
-        for line in lines:
-            line_lower = line.lower()
-            if any(dkw in line_lower for dkw in ['disconnect', 'errordialog', 'join error', 'error']):
-                return 'DISCONNECT'
-
-        for line in lines:
-            line_lower = line.lower()
-            if any(hkw in line_lower for hkw in ['protocollaunch', 'mainactivity', 'splash', 'landing']):
-                return 'HOME'
+        for line in res.stdout.split('\n'):
+            if package in line:
+                line_lower = line.lower()
+                if any(gkw in line_lower for gkw in ['robloxactivity', 'gameactivity', 'placeactivity', 'nativepage']):
+                    return True
     except Exception:
         pass
 
-    return 'UNKNOWN'
+    return False
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -617,7 +614,7 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI matching reference image for REIYA REJOIN."""
+        """Render live-updating ANSI dashboard UI matching exact reference image for REIYA REJOIN."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -634,23 +631,23 @@ class TerminalRejoinLoop:
         if len(gname) > 22:
             gname = gname[:19] + "..."
 
-        print("\n[+] Entering Live Dashboard Mode...")
         set_landscape_orientation()
-        time.sleep(1)
+        time.sleep(0.5)
 
         try:
             while self.running:
-                # Clear terminal screen
-                print("\033[H\033[J", end="")
+                # Clear terminal screen completely
+                clear_terminal_screen()
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
+                a_status = f"{GREEN}Enable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
-                h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
+                c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Big 2-Line ASCII Logo for REIYA REJOIN
+                # Big 2-Line ASCII Logo matching user screenshot
                 print(f"{BOLD}{CYAN}")
                 print(r"  ██████╗ ███████╗██╗██╗   ██╗██╗  ██╗    ██████╗ ███████╗██╗ ██████╗ ██╗██╗")
                 print(r"  ██╔══██╗██╔════╝██║╚██╗ ██╔╝██║  ██║    ██╔══██╗██╔════╝██║██╔═══██╗██║██║")
@@ -664,8 +661,9 @@ class TerminalRejoinLoop:
                 print(f"Made by {CYAN}_g_huy{RESET}")
                 print(f"CHECK EXECUTOR METHOD: {GREEN}AUTO{RESET}")
                 print(f"WEBHOOK: {w_status}")
+                print(f"AUTO BYPASS: {a_status}")
                 print(f"AUTO SORT TAB: {s_status}")
-                print(f"HOME REJOIN: {h_status}")
+                print(f"AUTO CHANGE ACCOUNT: {c_status}")
                 print(f"----------------------------------------------------------")
                 print(f" Cpu usage: {cpu:<5} %     | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB |")
                 print(f"----------------------------------------------------------")
@@ -711,18 +709,17 @@ class TerminalRejoinLoop:
             pass
 
     def _loop(self, packages, cfg):
-        check_interval = float(cfg.get('check_interval', 10))
+        check_interval = float(cfg.get('check_interval', 8))
         delay_open_tab = float(cfg.get('launch_wait', 15))
         sequential     = cfg.get('sequential_join', False)
         auto_clear     = cfg.get('clear_cache', False)
         auto_sort      = cfg.get('auto_sort', True)
         window_mode    = cfg.get('window_mode', 'left_stack')
-        home_check     = cfg.get('home_rejoin_enabled', True)
 
         w, h = get_screen_size()
         total_apps = len(packages)
 
-        # Launch all packages on initial start
+        # Launch all packages initially
         for i, pkg in enumerate(packages):
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
@@ -732,7 +729,7 @@ class TerminalRejoinLoop:
             if sequential and i < len(packages) - 1:
                 time.sleep(delay_open_tab)
 
-        time.sleep(5)
+        time.sleep(4)
 
         while self.running:
             for i, pkg in enumerate(packages):
@@ -741,10 +738,10 @@ class TerminalRejoinLoop:
 
                 gid = self._get_game_id(pkg, cfg)
                 running = is_app_running(pkg)
-                time_since_launch = time.time() - self.last_launch.get(pkg, 0)
+                in_game = is_app_in_game(pkg) if running else False
 
                 if not running:
-                    # App crashed or force-closed -> Relaunch immediately!
+                    # APP IS CLOSED / FORCE STOPPED -> REJOIN IMMEDIATELY!
                     self.set_status(pkg, 'Rejoining')
                     if auto_clear:
                         clear_app_cache(pkg)
@@ -754,29 +751,18 @@ class TerminalRejoinLoop:
                     self.last_launch[pkg] = time.time()
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     time.sleep(2)
-                    continue
-
-                # App IS running. Allow 35 seconds cooldown after launching before checking windows
-                if time_since_launch <= 35:
-                    self.set_status(pkg, 'Launching')
-                    continue
-
-                # Inspect window state via dumpsys
-                wstate = check_app_window_state(pkg) if home_check else 'INGAME'
-
-                if wstate == 'INGAME':
-                    self.set_status(pkg, 'Ingame')
-                elif wstate in ['HOME', 'DISCONNECT']:
-                    # On Home Screen or Disconnected -> Rejoin game!
+                elif not in_game:
+                    # APP IS RUNNING BUT NOT IN GAME (HOME PAGE / ERROR CODE 524 / DISCONNECTED) -> REJOIN!
                     self.set_status(pkg, 'Home Page')
                     time.sleep(1)
                     self.set_status(pkg, 'Rejoining')
+
                     bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                     self.last_launch[pkg] = time.time()
                     launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     time.sleep(2)
                 else:
-                    # Window state unknown -> Default to Ingame if running
+                    # APP IS RUNNING AND ACTIVELY IN GAME -> INGAME!
                     self.set_status(pkg, 'Ingame')
 
             time.sleep(check_interval)
@@ -843,6 +829,7 @@ def interactive_menu():
     load_config()
 
     while True:
+        clear_terminal_screen()
         print_banner()
         print("1. View System & Package Status")
         print("2. Scan & Select Roblox Packages")
