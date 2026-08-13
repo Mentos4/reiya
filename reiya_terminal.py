@@ -4,7 +4,7 @@ Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - Smart Package Sorting (Roblox & Executor packages placed at the top of the list)
-- Game launching (Roblox intents & link parsing)
+- Direct Game Launching via Place ID or Private Server Link
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
@@ -809,12 +809,12 @@ def interactive_menu():
             for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
                 print(f"  {idx}. {gname} (ID: {gid})")
             print("  C. Custom Place ID or Private Server Link")
-            gchoice = input("Choice: ").strip()
+            gchoice = input("\nChoice: ").strip()
             if gchoice.upper() == 'C':
                 gid = input("Enter Place ID / Link: ").strip()
-                gname = input("Enter Game Name: ").strip() or "Custom Game"
-                config['game_id'] = gid
-                config['game_name'] = gname
+                if gid:
+                    config['game_id'] = gid
+                    config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
             else:
                 try:
                     idx = int(gchoice) - 1
@@ -823,7 +823,7 @@ def interactive_menu():
                 except ValueError:
                     pass
             save_config()
-            print(f"\n[+] Active Game Set: {config.get('game_name')} (ID: {config.get('game_id')})")
+            print(f"\n[+] Active Game ID / Link Set: {config.get('game_id')}")
             input("\nPress Enter to return to menu...")
 
         elif choice == '4':
