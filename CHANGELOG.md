@@ -82,12 +82,12 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 11
-**Fix:** Root Cause Fix for stuck `Ingame` status on Roblox Home Screen
-- Stripped line 1 (Activity declaration header `ACTIVITY free.nokaA/com.roblox.client.RobloxActivity`) from `dumpsys activity top` view hierarchy inspection so package Activity class names like `RobloxActivity` or `GameActivity` never trigger false `GAME_SIGNALS` matches
-- Added `is_udp_game_connected()` to check active UDP RakNet sockets (`ss -u`, `netstat -u`, `/proc/<pid>/fd`) connected to Roblox game servers
+### 2026-08-14 — Session 12
+**Fix:** Roblox Subclass Activity Architecture Detection (`PlaceActivity` vs `RobloxActivity`)
+- Integrated user suggestion for Android Activity Manager parsing: `PlaceActivity` / `GameActivity` / `RenderView` explicitly indicates INGAME status.
+- `RobloxActivity` / `MainActivity` / `ActivityMain` without `PlaceActivity` explicitly indicates HOMEPAGE status (`return False`), immediately triggering auto-rejoin.
 ```bash
-git commit -m "Fix stuck Ingame: strip Activity class header from dumpsys check, add is_udp_game_connected RakNet check" && git push origin main
+git commit -m "Fix Roblox Home Screen detection: PlaceActivity vs RobloxActivity subclass architecture parsing" && git push origin main
 ```
 
 ---

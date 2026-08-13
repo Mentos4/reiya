@@ -314,57 +314,45 @@ def is_udp_game_connected(package):
 def is_app_in_game(package):
     """
     Check if the package is in-game vs on the Roblox Home Screen.
-    Combines dumpsys activity top view hierarchy inspection, UDP socket checks, and log status.
+    Analyzes Roblox Activity architecture (PlaceActivity vs RobloxActivity):
+      - Returns True ('Ingame') if PlaceActivity, GameActivity, or RenderView is active.
+      - Returns False ('Home Page') if RobloxActivity, MainActivity, or Home UI is active without PlaceActivity.
+      - Falls back to UDP RakNet socket & log tail verification.
     """
-    HOME_SIGNALS = [
-        'for you', 'charts', 'recommended for', 'moments',
-        'reactrootview', 'reactviewgroup', 'reactframelayout',
-        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
-        'loginactivity', 'welcomeactivity', 'titleactivity',
-        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell',
-    ]
-
-    # Strict 3D Engine Surface View indicators — NEVER include Activity class names (e.g. RobloxActivity/GameActivity) here!
-    GAME_SIGNALS = [
-        'renderview', 'nativegl', 'gamecanvas', 'raknet',
-        'robloxplace', 'placeview', 'engineview', 'surfaceview -',
-    ]
-
-    # Step 1: Inspect dumpsys activity top View Hierarchy (excluding Activity class declaration header)
-    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
+    for cmd in [
+        f"su -c 'dumpsys activity top'",
+        f"su -c 'dumpsys activity activities'",
+        "dumpsys activity top",
+        "dumpsys window windows"
+    ]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
             content = res.stdout
-            if not content.strip():
+            if not content.strip() or package not in content:
                 continue
 
             pkg_lines = get_package_activity_dump(package, content)
             if not pkg_lines:
                 pkg_lines = [line for line in content.split('\n') if package in line]
 
-            if pkg_lines:
-                # IMPORTANT: Strip line 1 (the ACTIVITY declaration line) so class names like RobloxActivity/GameActivity don't trigger false Ingame status!
-                view_hierarchy = pkg_lines[1:] if len(pkg_lines) > 1 else pkg_lines
-                block_text = '\n'.join(view_hierarchy).lower()
+            output = '\n'.join(pkg_lines) if pkg_lines else content
 
-                # First, check for Home-screen UI text & React Native UI signals
-                if any(sig in block_text for sig in HOME_SIGNALS):
-                    return False
+            # 1. PlaceActivity / GameActivity / RenderView = Actively playing inside a game place
+            if any(sig in output for sig in ['PlaceActivity', 'GameActivity', 'RenderView', 'placeactivity', 'gameactivity', 'renderview']):
+                return True
 
-                # Second, check for confirmed in-game 3D rendering surfaces
-                if any(sig in block_text for sig in GAME_SIGNALS):
-                    return True
+            # 2. Check for Home Screen UI text / React views / AppShell
+            if any(sig in output.lower() for sig in ['for you', 'charts', 'moments', 'recommended for', 'reactrootview', 'reactviewgroup', 'hometab', 'homeactivity', 'appshell']):
+                return False
 
-                # Check entire block for explicit Home Screen UI titles
-                full_text = '\n'.join(pkg_lines).lower()
-                if any(sig in full_text for sig in ['for you', 'charts', 'moments', 'recommended for']):
-                    return False
+            # 3. RobloxActivity / MainActivity without PlaceActivity = Main UI / Home Page / Catalog
+            if any(sig in output for sig in ['RobloxActivity', 'MainActivity', 'ActivityMain', 'NativeMain', 'robloxactivity', 'mainactivity']):
+                return False
 
         except Exception:
             pass
 
-    # Step 2: Check UDP Socket Game Connection State
+    # Step 2: Check UDP Socket RakNet Game Connection State
     udp_st = is_udp_game_connected(package)
     if udp_st is not None and udp_st is True:
         return True
