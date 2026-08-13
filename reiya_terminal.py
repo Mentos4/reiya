@@ -217,28 +217,53 @@ def is_app_running(package):
 
 def is_app_in_game(package):
     """
-    Check if package has any active visible window on screen.
-    Uses broad window visibility check so clones like free.nokaA are detected correctly.
-    Returns True if the package appears anywhere in dumpsys window list (visible window).
+    Check if the package is actively in a Roblox GAME PLACE (not Home Screen/Lobby).
+    Uses dumpsys activity activities to read the top activity name for the package.
+    - Home Screen activities (NativeMain, Splash, Login, etc.) -> return False -> trigger rejoin
+    - In-game activities (RobloxActivity, NativeActivity, etc.) -> return True -> Ingame status
+    - Unknown activities -> return True (app is running and doing something, don't interrupt)
     """
+    # Activities that indicate user is on Roblox Home Screen / Lobby / not in a game
+    HOME_ACTIVITIES = [
+        'activitynativemain', 'nativemain', 'splashactivity', 'activitysplash',
+        'mainactivity', 'startupactivity', 'launchactivity', 'homeactivity',
+        'loginactivity', 'activitylogin', 'welcomeactivity', 'titleactivity',
+        'activitystartup', 'activitymain', 'robloxmainactivity', 'lobbyactivity',
+    ]
+    # Activities that confirm user is inside a game place
+    INGAME_ACTIVITIES = [
+        'robloxactivity', 'nativeactivity', 'gameactivity', 'placeactivity',
+        'activityprotocollaunch', 'nativepage', 'luaactivity', 'placeid',
+    ]
+
     try:
-        res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=4)
+        res = subprocess.run(
+            "su -c 'dumpsys activity activities'",
+            shell=True, capture_output=True, text=True, timeout=5
+        )
         content = res.stdout
-        # Check if the package has any window entry in the window manager
+
+        # Scan for the topmost activity record that belongs to our package
         for line in content.split('\n'):
-            if package in line:
-                # If the package appears as a Window entry, it has an active window on screen
-                if 'Window{' in line or 'mCurrentFocus' in line or 'mFocusedApp' in line:
-                    return True
-        # Fallback: check if package is the focused app at all
-        if f'/{package}' in content or f'{package}/' in content:
-            # Package has a component visible
-            for line in content.split('\n'):
-                if package in line and ('isVisible=true' in line or 'visible=true' in line.lower() or 'mHasSurface=true' in line):
+            if package in line and ('Hist #' in line or 'ActivityRecord' in line):
+                # Extract the activity class name: package/com.x.ActivityName
+                match = re.search(rf'{re.escape(package)}/([^\s}}]+)', line)
+                if match:
+                    activity = match.group(1).lower()
+                    # Home Screen activity -> NOT in game, trigger rejoin
+                    if any(ha in activity for ha in HOME_ACTIVITIES):
+                        return False
+                    # In-game activity -> confirmed in game
+                    if any(ga in activity for ga in INGAME_ACTIVITIES):
+                        return True
+                    # Unknown activity - app is running something, treat as in-game
+                    # to avoid interrupting game loading screens
                     return True
     except Exception:
         pass
+
     return False
+
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
