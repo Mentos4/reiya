@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.1-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:18:00 UTC"
+BUILD_VERSION = "v6.7.2-REI-REJOIN"
+BUILD_TIME = "2026-08-14 02:24:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -237,7 +237,7 @@ def get_package_activity_dump(package, content):
 def is_app_in_game(package):
     """
     Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
-    Rule-compliant: Checks GAME_SIGNALS vs HOME_SIGNALS, fallbacks to False if package not found in dump.
+    Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
     """
     HOME_SIGNALS = [
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
@@ -246,8 +246,9 @@ def is_app_in_game(package):
         'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
         'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
     ]
+    # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
     GAME_SIGNALS = [
-        'gameactivity', 'robloxactivity', 'renderview', 'nativemain'
+        'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -260,12 +261,13 @@ def is_app_in_game(package):
                     pkg_lines = [line for line in content.split('\n') if package in line]
                 if pkg_lines:
                     block_text = '\n'.join(pkg_lines).lower()
-                    # Check for active game activity signals FIRST
-                    if any(sig in block_text for sig in GAME_SIGNALS):
-                        return True
-                    # Check for home screen signals
+                    # 1. Check for explicit Home Screen / React UI signals FIRST
                     if any(sig in block_text for sig in HOME_SIGNALS):
                         return False
+                    # 2. Check for explicit 3D Game rendering signals
+                    if any(sig in block_text for sig in GAME_SIGNALS):
+                        return True
+                    # 3. Default fallback if ambiguous
                     return False
         except Exception:
             pass
@@ -788,7 +790,7 @@ class TerminalRejoinLoop:
         window_mode         = cfg.get('window_mode', 'left_stack')
         home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
         # Grace period after launch — avoids false "Home Page" detection during app startup
-        LAUNCH_GRACE        = max(45, int(cfg.get('launch_wait', 45)))
+        LAUNCH_GRACE        = 20
 
         w, h = get_screen_size()
         total_apps = len(packages)
@@ -833,12 +835,12 @@ class TerminalRejoinLoop:
                     if in_game:
                         self.set_status(pkg, 'Ingame')
                     else:
-                        # NOT in-game — check if still within launch grace period (45s)
+                        # NOT in-game — check if still within launch grace period (20s)
                         time_since_launch = now - self.last_launch.get(pkg, 0)
                         if time_since_launch < LAUNCH_GRACE:
                             self.set_status(pkg, 'Launching')
                         else:
-                            # HOME SCREEN detected (past 45s grace period)
+                            # HOME SCREEN detected (past 20s grace period)
                             self.set_status(pkg, 'Home Page')
                             if home_rejoin_enabled:
                                 self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
