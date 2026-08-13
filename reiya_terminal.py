@@ -235,22 +235,23 @@ def is_app_in_game(package):
 
     Strategy:
       - Collect all lines in the activity dump that reference the package.
-      - If ANY line contains a GAME_SIGNAL keyword → return True (In-Game).
-      - If ANY line contains a HOME_SIGNAL keyword → return False (Home Page).
-      - If lines found with no home signals → return True (In-Game).
+      - First check HOME_SIGNALS (e.g. reactrootview, homeactivity, splash, login).
+        If ANY home signal is found → return False (Home Page).
+      - Next check GAME_SIGNALS (e.g. renderview, glsurfaceview, surfaceview, nativegl).
+        If ANY game signal is found → return True (In-Game).
       - If package not found in dump at all → return False (safe: triggers rejoin).
     """
     HOME_SIGNALS = [
-        'splashactivity', 'startupactivity', 'homeactivity',
+        'reactrootview', 'reactviewgroup', 'reactframelayout',
+        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
         'loginactivity', 'welcomeactivity', 'titleactivity',
         'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
         'loginview', 'landingview', 'authactivity',
     ]
 
     GAME_SIGNALS = [
-        'gameactivity', 'robloxactivity', 'renderview',
-        'surfaceview', 'textureview', 'glsurfaceview',
-        'nativegl', 'gamecanvas', 'place', 'game',
+        'renderview', 'glsurfaceview', 'surfaceview', 'textureview',
+        'nativegl', 'gameactivity', 'robloxactivity', 'gamecanvas',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -265,19 +266,24 @@ def is_app_in_game(package):
                 # Package not visible in top at all — not confirmed in-game
                 continue
 
-            # First, check for confirmed in-game activity signals
-            for line in pkg_lines:
-                ll = line.lower()
-                if any(sig in ll for sig in GAME_SIGNALS):
-                    return True
-
-            # Second, check for home-screen activity signals
+            # First, check for Home-screen activity & React Native UI signals
             for line in pkg_lines:
                 ll = line.lower()
                 if any(sig in ll for sig in HOME_SIGNALS):
                     return False
 
-            # Package is visible in top with no home signals → in-game
+            # Second, check for confirmed in-game 3D rendering signals
+            for line in pkg_lines:
+                ll = line.lower()
+                if any(sig in ll for sig in GAME_SIGNALS):
+                    return True
+
+            # If React Native UI components exist in dump, it's Home Screen
+            content_lower = content.lower()
+            if any(sig in content_lower for sig in ['reactrootview', 'reactviewgroup']):
+                return False
+
+            # Package visible in top with no home signals → in-game
             return True
 
         except Exception:

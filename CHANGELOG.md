@@ -82,12 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 7
-**Fix:** Option 8 auto rejoin false Home Screen detection when in-game
-- Removed generic main activity names (`nativemain`, `mainactivity`, `activitymain`) from `HOME_SIGNALS` because Roblox uses `com.roblox.client.ActivityMain` as its primary activity both on home screen and in-game
-- Expanded `GAME_SIGNALS` to detect rendering surfaces (`surfaceview`, `textureview`, `glsurfaceview`, `nativegl`, `gamecanvas`, `place`, `game`)
+### 2026-08-14 — Session 8
+**Fix:** Roblox Home Screen falsely recognized as Ingame
+- Check `HOME_SIGNALS` before `GAME_SIGNALS` to ensure Home Screen signals take precedence
+- Added React Native UI signals (`reactrootview`, `reactviewgroup`, `reactframelayout`, `hometab`) to `HOME_SIGNALS`
+- Removed broad keywords (`game`, `place`) from `GAME_SIGNALS` that matched URLs and text on the Home Screen UI
 ```bash
-git commit -m "Fix Option 8 auto rejoin status detection: remove base activity names from HOME_SIGNALS, expand GAME_SIGNALS" && git push origin main
+git commit -m "Fix Roblox Home Screen detection: check HOME_SIGNALS (React Native UI) before GAME_SIGNALS, remove broad keywords" && git push origin main
 ```
 
 ---
