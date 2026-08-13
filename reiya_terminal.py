@@ -650,12 +650,13 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Render live-updating ANSI dashboard UI matching exact reference image for REI REJOIN."""
+        """Render live-updating terminal dashboard. Fully responsive to terminal width."""
+        import shutil
+
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
         CYAN   = "\033[96m"
-        BLUE   = "\033[94m"
         BOLD   = "\033[1m"
         RESET  = "\033[0m"
 
@@ -663,67 +664,107 @@ class TerminalRejoinLoop:
         if not pkgs:
             pkgs = get_roblox_packages()
 
-        gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else '[PIÑATA MAZE] Pet Sim')
-        if len(gname) > 22:
-            gname = gname[:19] + "..."
+        gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else 'No Game Set')
 
         set_landscape_orientation()
         time.sleep(0.5)
 
+        def trunc(s, width):
+            """Strip ANSI codes for length measurement, then truncate plain text."""
+            plain = re.sub(r'\033\[[0-9;]*m', '', s)
+            if len(plain) > width:
+                return s[:width - 3] + '...'
+            return s
+
         try:
             while self.running:
-                # Clear terminal screen completely
                 clear_terminal_screen()
+
+                # Get actual terminal width every refresh
+                try:
+                    tw = shutil.get_terminal_size((60, 24)).columns
+                except Exception:
+                    tw = 60
+                tw = max(tw, 36)  # minimum usable width
+
+                sep = '-' * tw
 
                 w_status = f"{GREEN}Enable{RESET}" if cfg.get('webhook_enabled') else f"{RED}Disable{RESET}"
                 s_status = f"{GREEN}Enable{RESET}" if cfg.get('auto_sort', True) else f"{RED}Disable{RESET}"
                 h_status = f"{GREEN}Enable{RESET}" if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
-                c_status = f"{RED}Disable{RESET}" if not cfg.get('clear_cache') else f"{GREEN}Enable{RESET}"
+                c_status = f"{GREEN}Enable{RESET}" if cfg.get('clear_cache') else f"{RED}Disable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                # Clean plain-text header
-                print(f"{BOLD}{CYAN}  ============================{RESET}")
-                print(f"{BOLD}{CYAN}         REI  REJOIN          {RESET}")
-                print(f"{BOLD}{CYAN}  ============================{RESET}")
-                print(f"  Made by {CYAN}seisen_{RESET}  |  discord.gg/5G3cStpbcx")
-                print(f"  CHECK EXECUTOR METHOD: {GREEN}AUTO{RESET}")
-                print(f"WEBHOOK: {w_status}            | AUTO SORT TAB: {s_status}")
-                print(f"HOME REJOIN: {h_status}        | CLEAR CACHE: {c_status}")
-                print(f"----------------------------------------------------------")
-                print(f" Cpu usage: {cpu:<5} %     | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB |")
-                print(f"----------------------------------------------------------")
-                print(f"{BOLD}{'No':<3}|{'Username':<11}|{'Package':<11}|{'Status':<10}|{'Game'}{RESET}")
-                print(f"----+-------------+-------------+------------+------------")
+                # ── Header ────────────────────────────────────────────────
+                title = "REI  REJOIN"
+                pad   = max(0, (tw - len(title)) // 2)
+                print(f"{BOLD}{CYAN}{'=' * tw}{RESET}")
+                print(f"{BOLD}{CYAN}{' ' * pad}{title}{RESET}")
+                print(f"{BOLD}{CYAN}{'=' * tw}{RESET}")
+                print(trunc(f"  By seisen_ | discord.gg/5G3cStpbcx", tw))
+                print(sep)
 
+                # ── Settings (two per row) ────────────────────────────────
+                left1  = f"WEBHOOK: {w_status}"
+                right1 = f"AUTO SORT: {s_status}"
+                left2  = f"HOME REJOIN: {h_status}"
+                right2 = f"CLEAR CACHE: {c_status}"
+
+                half = tw // 2
+                # Plain lengths for alignment (strip ANSI)
+                l1p = re.sub(r'\033\[[0-9;]*m', '', left1)
+                l2p = re.sub(r'\033\[[0-9;]*m', '', left2)
+                pad1 = max(1, half - len(l1p))
+                pad2 = max(1, half - len(l2p))
+                print(f"{left1}{' ' * pad1}{right1}")
+                print(f"{left2}{' ' * pad2}{right2}")
+                print(sep)
+
+                # ── Stats ─────────────────────────────────────────────────
+                stats_line = f" CPU: {cpu:<5}%  |  RAM: {used_ram:.1f}/{total_ram:.1f}GB"
+                print(trunc(stats_line, tw))
+                print(sep)
+
+                # ── Table header ──────────────────────────────────────────
+                # Column widths scaled to terminal width
+                c_no  = 2
+                c_un  = min(10, max(6, (tw - c_no - 4) // 4))
+                c_pkg = min(12, max(6, (tw - c_no - 4) // 4))
+                c_st  = min(10, max(6, (tw - c_no - 4) // 4))
+                c_gm  = max(4, tw - c_no - c_un - c_pkg - c_st - 7)  # 7 = separators
+
+                h_line = (f"{'No':<{c_no}}|{'User':<{c_un}}|{'Package':<{c_pkg}}"
+                          f"|{'Status':<{c_st}}|{'Game':<{c_gm}}")
+                print(f"{BOLD}{h_line[:tw]}{RESET}")
+                print(sep)
+
+                # ── Rows ──────────────────────────────────────────────────
                 statuses = self.get_status()
+                gname_trunc = gname if len(gname) <= c_gm else gname[:c_gm-3] + '...'
 
                 for idx, p in enumerate(pkgs, 1):
                     info = statuses.get(p, {})
-                    st = info.get('status', 'Ingame')
+                    st   = info.get('status', 'Launching')
+                    uname = f"wu***{idx:02d}"
 
-                    short_uname = f"wu****{idx:02d}"
+                    if   st == 'Ingame':                           st_colored = f"{GREEN}Ingame{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):    st_colored = f"{RED}Rejoining{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):       st_colored = f"{YELLOW}HomePg{RESET}"
+                    elif st == 'Launching':                        st_colored = f"{CYAN}Launching{RESET}"
+                    else:                                          st_colored = st
 
-                    if st == 'Ingame':
-                        st_colored = f"{GREEN}Ingame{RESET}"
-                    elif st in ['Rejoining', 'Rejoining Game']:
-                        st_colored = f"{RED}Rejoining{RESET}"
-                    elif st in ['Home Screen', 'Home Page']:
-                        st_colored = f"{YELLOW}Home Page{RESET}"
-                    elif st == 'Launching':
-                        st_colored = f"{CYAN}Launching{RESET}"
-                    elif st == 'Cooldown':
-                        st_colored = f"{RED}Cooldown{RESET}"
-                    else:
-                        st_colored = f"{st}"
+                    pkg_t  = p if len(p) <= c_pkg else p[:c_pkg-1] + '.'
+                    # Build row — use ANSI-aware padding for status column
+                    row = (f"{idx:<{c_no}}|{uname:<{c_un}}|{pkg_t:<{c_pkg}}"
+                           f"|{st_colored:<{c_st + 9}}|{gname_trunc}")
+                    print(row)
 
-                    print(f"{idx:<3} | {short_uname:<11} | {p:<11} | {st_colored:<19} | 🪵 {gname}")
+                print(sep)
+                print(f"{BOLD}[Enter] Main Menu{RESET}")
 
-                print(f"----------------------------------------------------------")
-                print(f"{BOLD}Press [Enter] to return to Main Menu...{RESET}")
-
-                # Non-blocking input check for Linux/Termux
+                # Non-blocking input check
                 if os.name == 'posix':
                     rlist, _, _ = select.select([sys.stdin], [], [], 2.0)
                     if rlist:
