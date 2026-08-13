@@ -314,55 +314,61 @@ def is_udp_game_connected(package):
 def is_app_in_game(package):
     """
     Check if the package is in-game vs on the Roblox Home Screen.
-    Analyzes Roblox Activity architecture (PlaceActivity vs RobloxActivity):
-      - Returns True ('Ingame') if PlaceActivity, GameActivity, or RenderView is active.
-      - Returns False ('Home Page') if RobloxActivity, MainActivity, or Home UI is active without PlaceActivity.
-      - Falls back to UDP RakNet socket & log tail verification.
+    Uses structural window layout metrics from 'dumpsys window windows':
+      - Home Page: mSubLayer=0 and no 3D SurfaceView layers.
+      - In-Game: Active SurfaceView / 3D engine render surface layers.
     """
-    for cmd in [
-        f"su -c 'dumpsys activity top'",
-        f"su -c 'dumpsys activity activities'",
-        "dumpsys activity top",
-        "dumpsys window windows"
-    ]:
-        try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-            content = res.stdout
-            if not content.strip() or package not in content:
-                continue
+    try:
+        res = subprocess.run("su -c 'dumpsys window windows'", shell=True, capture_output=True, text=True, timeout=5)
+        output = res.stdout
 
-            pkg_lines = get_package_activity_dump(package, content)
-            if not pkg_lines:
-                pkg_lines = [line for line in content.split('\n') if package in line]
+        if package in output:
+            lines = output.split('\n')
+            target_block = []
+            capture = False
 
-            output = '\n'.join(pkg_lines) if pkg_lines else content
+            for line in lines:
+                if "Window #" in line and package in line:
+                    capture = True
+                elif "Window #" in line and package not in line:
+                    capture = False
 
-            # 1. PlaceActivity / GameActivity / RenderView = Actively playing inside a game place
-            if any(sig in output for sig in ['PlaceActivity', 'GameActivity', 'RenderView', 'placeactivity', 'gameactivity', 'renderview']):
+                if capture:
+                    target_block.append(line)
+
+            block_text = "\n".join(target_block) if target_block else output
+
+            # Structural Layer Check:
+            # On Homepage, mSubLayer sits at 0 and no 3D SurfaceView engine layers exist.
+            if "mSubLayer=0" in block_text and "SurfaceView" not in block_text:
+                return False  # Home Page detected → triggers auto-rejoin
+
+            # If SurfaceView / 3D Engine Surface exists for package → In-Game
+            if "SurfaceView" in block_text and package in block_text:
                 return True
 
-            # 2. Check for Home Screen UI text / React views / AppShell
-            if any(sig in output.lower() for sig in ['for you', 'charts', 'moments', 'recommended for', 'reactrootview', 'reactviewgroup', 'hometab', 'homeactivity', 'appshell']):
+            # If PlaceActivity or RenderView is explicitly visible in stack → In-Game
+            if any(sig in output for sig in ['PlaceActivity', 'RenderView', 'gameactivity']):
+                return True
+
+            # If React Native / Home UI text is present → Home Page
+            if any(sig in output.lower() for sig in ['for you', 'charts', 'moments', 'recommended for', 'reactrootview', 'hometab']):
                 return False
 
-            # 3. RobloxActivity / MainActivity without PlaceActivity = Main UI / Home Page / Catalog
-            if any(sig in output for sig in ['RobloxActivity', 'MainActivity', 'ActivityMain', 'NativeMain', 'robloxactivity', 'mainactivity']):
-                return False
-
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     # Step 2: Check UDP Socket RakNet Game Connection State
     udp_st = is_udp_game_connected(package)
-    if udp_st is not None and udp_st is True:
-        return True
+    if udp_st is not None:
+        return udp_st
 
     # Step 3: Check latest Roblox log file tail
     log_st = check_roblox_log_status(package)
     if log_st is not None:
         return log_st
 
-    # Step 4: Default fallback (return False to trigger safe Home Page rejoin)
+    # Default fallback: safe Home Page rejoin trigger
     return False
 
 

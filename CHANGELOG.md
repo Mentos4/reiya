@@ -82,12 +82,13 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 12
-**Fix:** Roblox Subclass Activity Architecture Detection (`PlaceActivity` vs `RobloxActivity`)
-- Integrated user suggestion for Android Activity Manager parsing: `PlaceActivity` / `GameActivity` / `RenderView` explicitly indicates INGAME status.
-- `RobloxActivity` / `MainActivity` / `ActivityMain` without `PlaceActivity` explicitly indicates HOMEPAGE status (`return False`), immediately triggering auto-rejoin.
+### 2026-08-14 — Session 13
+**Fix:** Structural Sub-Layer Window Metric Inspection (`mSubLayer=0` & `SurfaceView`)
+- Evaluates `dumpsys window windows` specifically for the target package's window block.
+- On the Roblox Home Screen, secondary 3D engine surface layers are destroyed, resetting structural containers to `mSubLayer=0` with no `SurfaceView` -> immediately flags `Home Page` (`return False`) and triggers auto-rejoin.
+- Completely ignores orientation locks (`mOrientation`) forced by Termux.
 ```bash
-git commit -m "Fix Roblox Home Screen detection: PlaceActivity vs RobloxActivity subclass architecture parsing" && git push origin main
+git commit -m "Fix Roblox Home Screen detection: structural sub-layer window metrics (mSubLayer=0 & SurfaceView)" && git push origin main
 ```
 
 ---
