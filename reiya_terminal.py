@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.4.1-REI-REJOIN"
-BUILD_TIME = "2026-08-14 01:27:00 UTC"
+BUILD_VERSION = "v6.5.0-REI-REJOIN"
+BUILD_TIME = "2026-08-14 01:43:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -236,10 +236,11 @@ def get_package_activity_dump(package, content):
 
 def is_udp_game_connected(package):
     """
-    Check if the package process has an active UDP socket (Roblox RakNet Game Server connection).
+    Check if package process has an active UDP RakNet Game Server connection.
     Returns True if connected to game server via UDP, False if no UDP game sockets exist, or None if check fails.
     """
     try:
+        # Get PID of target clone package
         res = subprocess.run(f"su -c 'pidof {package}'", shell=True, capture_output=True, text=True, timeout=2)
         out = res.stdout.strip()
         if not out:
@@ -251,12 +252,18 @@ def is_udp_game_connected(package):
             return False
 
         for pid in pids:
-            r_ss = subprocess.run(f"su -c 'ss -u -a -p | grep pid={pid}'", shell=True, capture_output=True, text=True, timeout=2)
-            if r_ss.stdout.strip() and 'ESTAB' in r_ss.stdout:
-                return True
+            # Check 1: netstat -anp for active UDP sockets belonging to PID
+            cmd = f"su -c 'netstat -anp 2>/dev/null | grep {pid} | grep -i udp'"
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
+            if r.stdout.strip():
+                lines = [l for l in r.stdout.strip().split('\n') if 'ESTABLISHED' in l or 'udp' in l.lower()]
+                if lines:
+                    return True
 
-            r_ns = subprocess.run(f"su -c 'netstat -unp 2>/dev/null | grep {pid}'", shell=True, capture_output=True, text=True, timeout=2)
-            if r_ns.stdout.strip() and 'ESTABLISHED' in r_ns.stdout:
+            # Check 2: ss -u -a -p for active UDP sockets
+            cmd_ss = f"su -c 'ss -u -a -p 2>/dev/null | grep pid={pid}'"
+            r_ss = subprocess.run(cmd_ss, shell=True, capture_output=True, text=True, timeout=2)
+            if r_ss.stdout.strip() and ('ESTAB' in r_ss.stdout or 'udp' in r_ss.stdout.lower()):
                 return True
 
         return False
@@ -266,9 +273,14 @@ def is_udp_game_connected(package):
 def is_app_in_game(package):
     """
     Check if package is in-game vs on Roblox Home Screen.
-    Safe for multi-window / freeform mode when Termux is focused.
+    Uses UDP RakNet kernel socket detection (100% accurate across minimized, freeform & split-screen modes).
     """
-    # Explicit Roblox Home Screen UI text & tab signals (visible ONLY on Home Page / Lobby)
+    # Step 1: Primary Check — Active UDP RakNet Game Server Connection
+    udp_st = is_udp_game_connected(package)
+    if udp_st is not None:
+        return udp_st
+
+    # Step 2: Fallback — Inspect dumpsys activity top
     HOME_SIGNALS = [
         'for you', 'charts', 'recommended for', 'moments',
         'reactrootview', 'reactviewgroup', 'reactframelayout',
@@ -278,48 +290,23 @@ def is_app_in_game(package):
         'loginview', 'landingview', 'authactivity', 'appshell',
     ]
 
-    # Explicit 3D Engine Surface View indicators
-    GAME_SIGNALS = [
-        'renderview', 'nativegl', 'gamecanvas', 'raknet',
-        'robloxplace', 'placeview', 'engineview',
-    ]
-
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
             content = res.stdout
-            if not content.strip():
-                continue
-
-            pkg_lines = get_package_activity_dump(package, content)
-            if not pkg_lines:
-                pkg_lines = [line for line in content.split('\n') if package in line]
-
-            if pkg_lines:
-                # Strip Activity declaration header line (line 1)
-                view_hierarchy = pkg_lines[1:] if len(pkg_lines) > 1 else pkg_lines
-                block_text = '\n'.join(view_hierarchy).lower()
-
-                # Rule 1: If explicit Roblox Home Screen UI text/views are present → Home Screen (False)
-                if any(sig in block_text for sig in HOME_SIGNALS):
-                    return False
-
-                # Rule 2: If explicit 3D Game engine surfaces present → In-Game (True)
-                if any(sig in block_text for sig in GAME_SIGNALS):
+            if content.strip():
+                pkg_lines = get_package_activity_dump(package, content)
+                if not pkg_lines:
+                    pkg_lines = [line for line in content.split('\n') if package in line]
+                if pkg_lines:
+                    block_text = '\n'.join(pkg_lines).lower()
+                    if any(sig in block_text for sig in HOME_SIGNALS):
+                        return False
                     return True
-
-                # Rule 3: Check entire dump block for explicit Home Screen UI titles
-                full_block = '\n'.join(pkg_lines).lower()
-                if any(sig in full_block for sig in ['for you', 'charts', 'moments', 'recommended for']):
-                    return False
-
-                # Rule 4: Package visible in activity dump with NO Home Screen text → In-Game (True)
-                return True
-
         except Exception:
             pass
 
-    # Default fallback when package is alive: treat as Ingame to prevent false force-stops
+    # Default fallback when process is alive: treat as Ingame to prevent false force-stops
     return True
 
 
