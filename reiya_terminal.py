@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.3.1-REI-REJOIN"
-BUILD_TIME = "2026-08-13 23:54:00 UTC"
+BUILD_VERSION = "v6.3.2-REI-REJOIN"
+BUILD_TIME = "2026-08-13 23:59:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -234,21 +234,18 @@ def is_app_in_game(package):
     regardless of which window (Termux vs Roblox) currently has focus.
 
     Strategy:
-      - Scan every line in the activity dump that references the package.
-      - If ANY such line contains a home-screen signal keyword → return False (Home Page).
-      - If lines are found but none are home signals → return True (In-Game).
+      - Collect all lines in the activity dump that reference the package.
+      - If ANY such line contains a HOME_SIGNAL keyword → return False (Home Page).
+      - If lines found with no home signals → return True (In-Game).
       - If package not found in dump at all → return False (safe: triggers rejoin).
+    Note: Do NOT require GAME_SIGNALS — Roblox in-game activity names vary per build
+    and won't reliably match a fixed list. HOME_SIGNALS are the only discriminator needed.
     """
     HOME_SIGNALS = [
         'nativemain', 'mainactivity', 'splashactivity', 'startupactivity',
         'launchactivity', 'homeactivity', 'loginactivity', 'welcomeactivity',
         'titleactivity', 'activitymain', 'robloxmain', 'lobbyactivity',
         'loadingactivity', 'bootstrapactivity',
-    ]
-
-    # Also treat 'GameActivity' / 'RobloxActivity' as confirmed in-game
-    GAME_SIGNALS = [
-        'gameactivity', 'robloxactivity', 'renderview',
     ]
 
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
@@ -260,22 +257,16 @@ def is_app_in_game(package):
 
             pkg_lines = [line for line in content.split('\n') if package in line]
             if not pkg_lines:
-                # Package not visible in top at all — treat as home/not-in-game
+                # Package not visible in top at all — not confirmed in-game
                 continue
 
             for line in pkg_lines:
                 ll = line.lower()
-                # Priority: if any line shows a home-screen signal → definitely NOT in-game
+                # If ANY line shows a home-screen signal → definitely NOT in-game
                 if any(sig in ll for sig in HOME_SIGNALS):
                     return False
 
-            # Check for confirmed in-game signals
-            for line in pkg_lines:
-                ll = line.lower()
-                if any(sig in ll for sig in GAME_SIGNALS):
-                    return True
-
-            # Package found in top output with no home signals → assume in-game
+            # Package is visible in top with no home signals → in-game
             return True
 
         except Exception:
@@ -856,13 +847,11 @@ class TerminalRejoinLoop:
                         # HOME SCREEN detected
                         self.set_status(pkg, 'Home Page')
                         if home_rejoin_enabled:
-                            self.log(f"[{pkg}] Home Screen detected → Force-stopping and rejoining")
-                            # Force stop the stuck Home Screen then relaunch directly into game
-                            subprocess.run(
-                                f"su -c 'am force-stop {pkg}'",
-                                shell=True, capture_output=True, timeout=4
-                            )
-                            time.sleep(2)
+                            self.log(f"[{pkg}] Home Screen detected → Sending rejoin intent")
+                            # Do NOT use am force-stop here — on split-screen VPhone it also
+                            # disrupts the window layout and kills the Termux side.
+                            # FLAG_ACTIVITY_NEW_TASK (0x10000000) is sufficient to navigate
+                            # Roblox directly from its Home Screen into the game place.
                             self.set_status(pkg, 'Rejoining')
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                             self.last_launch[pkg] = now
