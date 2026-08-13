@@ -3,7 +3,8 @@
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
-- FULL AUTOMATIC ROBLOX & CLONE SELECTION (Auto-detects and auto-selects ALL Roblox apps & clones: com.roblox.client, free.nokaA, Delta, etc.)
+- MULTI-PACKAGE SUPPORT (Simultaneously selects and launches multiple Roblox accounts / clones: free.nokaA, com.roblox.client, etc.)
+- FULL AUTOMATIC ROBLOX & CLONE SELECTION (Auto-detects and auto-selects ALL Roblox apps & clones)
 - Direct Game Launching via Place ID or Private Server Link
 - Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
 - Package-targeted Intent launching (bypasses "Open With" dialogs completely)
@@ -29,8 +30,8 @@ import urllib.parse
 import mimetypes
 
 # Script version & timestamp
-BUILD_VERSION = "v2.5.0-ROBLOX-AUTO-CORE"
-BUILD_TIME = "2026-08-13 21:58:00 UTC"
+BUILD_VERSION = "v2.6.0-MULTI-PACKAGE-CORE"
+BUILD_TIME = "2026-08-13 22:00:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -175,9 +176,12 @@ def auto_select_roblox_packages():
     """Auto-detect and AUTO-SELECT all installed Roblox packages and clones automatically."""
     detected = get_roblox_packages()
     if detected:
-        config['selected_packages'] = detected
+        # Combine detected with current, ensuring multiple packages are kept
+        current = config.get('selected_packages', [])
+        combined = list(set(detected + current))
+        config['selected_packages'] = combined
         save_config()
-        return detected
+        return combined
     return config.get('selected_packages', [])
 
 def is_app_running(package):
@@ -766,7 +770,7 @@ def interactive_menu():
     while True:
         print_banner()
         print("1. View System & Package Status")
-        print("2. Scan & Manage Roblox Packages (AUTO-SELECTED)")
+        print("2. Scan & Manage Roblox Packages (MULTI-PACKAGE READY)")
         print("3. Configure Game Setup (Place ID / Private Server Link)")
         print("4. Configure Webhook Settings")
         print("5. Configure Timing & Auto-rejoin Options")
@@ -786,43 +790,46 @@ def interactive_menu():
         elif choice == '2':
             roblox_pkgs = auto_select_roblox_packages()
 
-            print(f"\n--- [ AUTO-DETECTED ROBLOX PACKAGES ({len(roblox_pkgs)}) ] ---")
+            print(f"\n--- [ DETECTED ROBLOX PACKAGES ({len(roblox_pkgs)}) ] ---")
             if not roblox_pkgs:
                 print("  [!] No standard Roblox/Executor packages auto-detected.")
                 print("  -> Use option 'M' below or type your package name directly!")
             else:
                 for idx, p in enumerate(roblox_pkgs, 1):
-                    sel = "AUTO-SELECTED" if p in config.get('selected_packages', []) else "---"
+                    sel = "✓ SELECTED" if p in config.get('selected_packages', []) else "  ---"
                     print(f"  {idx}. {p:<35} [{sel}]")
 
             print("\nSelection Options:")
-            print("  - Enter numbers (e.g. 1,2) to toggle packages from list")
-            print("  - Type package name directly (e.g. com.noka.client or com.roblox.client)")
+            print("  - Type 'ALL' (or press Enter) to select ALL packages")
+            print("  - Type numbers (e.g. 1,2) to select multiple packages")
+            print("  - Type package names directly separated by comma (e.g. free.nokaA, com.roblox.client)")
+            print("  - Type 'CLEAR' to clear all selections")
             print("  - Type 'M' to prompt for custom package name")
-            print("  - Press Enter to keep auto-selected packages")
-            indices = input("\nChoice: ").strip()
+            indices = input("\nChoice [ALL]: ").strip()
 
-            if indices.upper() == 'M':
-                custom_pkg = input("\nEnter exact Package Name (e.g. com.noka.client or com.roblox.client): ").strip()
+            if indices.upper() == 'ALL' or not indices:
+                config['selected_packages'] = list(set(roblox_pkgs + config.get('selected_packages', [])))
+                save_config()
+            elif indices.upper() == 'CLEAR':
+                config['selected_packages'] = []
+                save_config()
+            elif indices.upper() == 'M':
+                custom_pkg = input("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
                 if custom_pkg:
                     sel_set = set(config.get('selected_packages', []))
                     sel_set.add(custom_pkg)
                     config['selected_packages'] = list(sel_set)
                     save_config()
             elif indices:
-                sel_set = set(config.get('selected_packages', []))
+                sel_set = set()
                 for item in indices.split(','):
                     item = item.strip()
-                    if '.' in item: # Direct package name like com.noka.client
+                    if '.' in item:
                         sel_set.add(item)
                     elif item.isdigit():
                         i = int(item) - 1
                         if 0 <= i < len(roblox_pkgs):
-                            target = roblox_pkgs[i]
-                            if target in sel_set:
-                                sel_set.remove(target)
-                            else:
-                                sel_set.add(target)
+                            sel_set.add(roblox_pkgs[i])
                 config['selected_packages'] = list(sel_set)
                 save_config()
 
