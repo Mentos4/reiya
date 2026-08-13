@@ -2,7 +2,7 @@
 """
 Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
-- Multi-strategy App discovery (Root su, pm, cmd, /data/data, ps process extraction, Manual entry)
+- VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, manual entry)
 - Game launching (Roblox intents & link parsing)
 - Freeform Window Tiling & Auto-Sorting on screen
 - System monitoring (CPU, RAM, Uptime, Screenshots)
@@ -90,14 +90,14 @@ def save_config():
 
 def get_installed_packages():
     """
-    Discover all installed packages on Android using root su, pm, cmd, ps, and /data/data scanning.
-    Guarantees detecting all apps even under Termux permission sandbox restrictions.
+    Discover all installed packages on Android / VPhone / Emulators.
+    Uses shell execution with su root fallbacks for maximum compatibility.
     """
     packages = set()
 
-    # Strategy 1: Try su -c "pm list packages" (Root)
+    # Strategy 1: Try su shell pm list packages (VPhone / Rooted Emulators)
     try:
-        res = subprocess.run(['su', '-c', 'pm list packages'], capture_output=True, text=True, timeout=5)
+        res = subprocess.run('su -c "pm list packages"', shell=True, capture_output=True, text=True, timeout=5)
         for line in res.stdout.strip().split('\n'):
             line = line.strip()
             if line.startswith('package:'):
@@ -105,22 +105,22 @@ def get_installed_packages():
     except Exception:
         pass
 
-    # Strategy 2: Try su -c "cmd package list packages"
+    # Strategy 2: Try su shell dumpsys package packages
     if not packages:
         try:
-            res = subprocess.run(['su', '-c', 'cmd package list packages'], capture_output=True, text=True, timeout=5)
+            res = subprocess.run('su -c "dumpsys package packages"', shell=True, capture_output=True, text=True, timeout=5)
             for line in res.stdout.strip().split('\n'):
-                line = line.strip()
-                if line.startswith('package:'):
-                    packages.add(line[8:].strip())
+                match = re.search(r'Package \[([^\]]+)\]', line)
+                if match:
+                    packages.add(match.group(1).strip())
         except Exception:
             pass
 
     # Strategy 3: Standard pm commands
     if not packages:
-        for cmd in [['pm', 'list', 'packages', '-3'], ['pm', 'list', 'packages'], ['/system/bin/pm', 'list', 'packages']]:
+        for cmd in ['pm list packages -3', 'pm list packages', 'cmd package list packages', '/system/bin/pm list packages']:
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
                 for line in res.stdout.strip().split('\n'):
                     line = line.strip()
                     if line.startswith('package:'):
@@ -128,20 +128,9 @@ def get_installed_packages():
             except Exception:
                 pass
 
-    # Strategy 4: Try cmd package list packages without su
-    if not packages:
-        try:
-            res = subprocess.run(['cmd', 'package', 'list', 'packages'], capture_output=True, text=True, timeout=5)
-            for line in res.stdout.strip().split('\n'):
-                line = line.strip()
-                if line.startswith('package:'):
-                    packages.add(line[8:].strip())
-        except Exception:
-            pass
-
-    # Strategy 5: Try su -c "ls /data/data"
+    # Strategy 4: Try su -c "ls /data/data"
     try:
-        res = subprocess.run(['su', '-c', 'ls /data/data'], capture_output=True, text=True, timeout=5)
+        res = subprocess.run('su -c "ls /data/data"', shell=True, capture_output=True, text=True, timeout=5)
         for line in res.stdout.strip().split('\n'):
             pkg = line.strip()
             if pkg and '.' in pkg and not pkg.startswith('/'):
@@ -149,9 +138,9 @@ def get_installed_packages():
     except Exception:
         pass
 
-    # Strategy 6: Extract active running process names via ps -A
+    # Strategy 5: Extract running process names via ps -A
     try:
-        res = subprocess.run(['ps', '-A'], capture_output=True, text=True, timeout=5)
+        res = subprocess.run('ps -A', shell=True, capture_output=True, text=True, timeout=5)
         for line in res.stdout.strip().split('\n'):
             parts = line.strip().split()
             if parts:
@@ -752,7 +741,7 @@ def interactive_menu():
             pkgs = get_roblox_packages()
             print(f"\n--- [ ALL DETECTED INSTALLED PACKAGES ({len(pkgs)}) ] ---")
             if not pkgs:
-                print("  [!] No packages automatically detected via sandbox permissions.")
+                print("  [!] No packages automatically detected.")
             else:
                 for idx, p in enumerate(pkgs, 1):
                     sel = "SELECTED" if p in config.get('selected_packages', []) else "---"
