@@ -4,7 +4,7 @@ Reiya Core Global - Terminal / Termux Edition
 Single standalone CLI script combining all core functions of Reiya Roblox Account Manager:
 - VPhone & Emulator App discovery (su shell execution, dumpsys, pm, cmd, ps, direct name input)
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
-- MULTI-PACKAGE SELECTION (Select multiple packages at once e.g. 1,2 or ALL)
+- DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Full system shell integration (`shell=True` for Termux & VPhone Android pathing: am, pm, monkey, wm, screencap)
 - Package-targeted Intent launching (bypasses "Open With" dialogs completely)
@@ -30,8 +30,8 @@ import urllib.parse
 import mimetypes
 
 # Script version & timestamp
-BUILD_VERSION = "v2.7.0-ROBLOX-CLONE-MULTI"
-BUILD_TIME = "2026-08-13 22:02:00 UTC"
+BUILD_VERSION = "v2.8.0-DIRECT-NUMBER-MULTI"
+BUILD_TIME = "2026-08-13 22:03:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -787,7 +787,7 @@ def interactive_menu():
                     print(f"  {idx}. {p:<35} {sel}")
 
             print("\nSelection Options:")
-            print("  - Enter numbers (e.g. 1,2) to select/toggle multiple packages")
+            print("  - Enter numbers (e.g. 1,2) to select multiple packages")
             print("  - Type 'ALL' to select ALL detected Roblox packages")
             print("  - Type 'CLEAR' to deselect all packages")
             print("  - Type 'M' to enter custom package name manually")
@@ -808,20 +808,16 @@ def interactive_menu():
                     config['selected_packages'] = list(sel_set)
                     save_config()
             elif indices:
-                sel_set = set(config.get('selected_packages', []))
+                new_sel = set()
                 for item in indices.split(','):
                     item = item.strip()
                     if '.' in item:
-                        sel_set.add(item)
+                        new_sel.add(item)
                     elif item.isdigit():
                         i = int(item) - 1
                         if 0 <= i < len(roblox_pkgs):
-                            target = roblox_pkgs[i]
-                            if target in sel_set:
-                                sel_set.remove(target)
-                            else:
-                                sel_set.add(target)
-                config['selected_packages'] = list(sel_set)
+                            new_sel.add(roblox_pkgs[i])
+                config['selected_packages'] = list(new_sel)
                 save_config()
 
             print("\n--- [ CURRENT SELECTED PACKAGES ] ---")
