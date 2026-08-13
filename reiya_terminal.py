@@ -218,40 +218,88 @@ def is_app_running(package):
 def is_app_in_game(package):
     """
     Hardware-level accurate detection of whether Roblox package is in-game vs on Home Screen.
-    Checks WindowManager surface & Activity lifecycle state flags.
+    Combines dumpsys activity top inspection, specific ActivityNativeMain window state, and UI signals.
     """
-    # 1. Primary Hardware Check: WindowManager surface & visibility state
-    for cmd in [f"su -c 'dumpsys window windows | grep -A 20 -i \"{package}\"'", f"dumpsys window windows | grep -A 20 -i \"{package}\""]:
+    HOME_SIGNALS = [
+        'for you', 'charts', 'recommended for', 'moments',
+        'reactrootview', 'reactviewgroup', 'reactframelayout',
+        'splashactivity', 'startupactivity', 'homeactivity', 'hometab',
+        'loginactivity', 'welcomeactivity', 'titleactivity',
+        'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell',
+    ]
+
+    GAME_SIGNALS = [
+        'renderview', 'nativegl', 'gamecanvas', 'raknet',
+        'robloxplace', 'placeview', 'engineview', 'surfaceview -',
+    ]
+
+    # Step 1: Inspect dumpsys activity top task block
+    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
+        try:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            content = res.stdout
+            if not content.strip():
+                continue
+
+            # Extract lines belonging to target package
+            lines = content.split('\n')
+            pkg_lines = []
+            capturing = False
+            for l in lines:
+                if ('TASK ' in l or 'ACTIVITY ' in l) and package in l:
+                    capturing = True
+                    pkg_lines.append(l)
+                elif capturing:
+                    if ('TASK ' in l or 'ACTIVITY ' in l) and package not in l:
+                        break
+                    pkg_lines.append(l)
+
+            if not pkg_lines:
+                pkg_lines = [l for l in lines if package in l]
+
+            if pkg_lines:
+                full_block = '\n'.join(pkg_lines).lower()
+
+                # If Activity state is STOPPED (mStopped=true), Roblox is on Home Screen / Lobby!
+                if 'mstopped=true' in full_block:
+                    return False
+
+                # Strip Activity declaration header line for view hierarchy checks
+                view_hierarchy = pkg_lines[1:] if len(pkg_lines) > 1 else pkg_lines
+                block_text = '\n'.join(view_hierarchy).lower()
+
+                # Check for Home-screen UI text & React Native UI signals
+                if any(sig in block_text for sig in HOME_SIGNALS):
+                    return False
+
+                # Check for confirmed in-game 3D rendering surfaces
+                if any(sig in block_text for sig in GAME_SIGNALS):
+                    return True
+
+                # Check for Activity RESUMED state without stopped
+                if 'mresumed=true' in full_block and 'mstopped=false' in full_block:
+                    return True
+
+        except Exception:
+            pass
+
+    # Step 2: Inspect ActivityNativeMain Window State directly
+    for cmd in [f"su -c 'dumpsys window windows | grep -A 15 -i \"{package}/com.roblox.client.ActivityNativeMain\"'", f"dumpsys window windows | grep -A 15 -i \"{package}/com.roblox.client.ActivityNativeMain\""]:
         try:
             res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
             win_text = res.stdout.lower()
 
             if win_text:
-                if 'mhassurface=false' in win_text or 'isvisible=false' in win_text or 'isonscreen=false' in win_text or 'mdrawstate=no_surface' in win_text:
+                if 'mhassurface=false' in win_text or 'isvisible=false' in win_text or 'mdrawstate=no_surface' in win_text:
                     return False
-                if 'mhassurface=true' in win_text and ('isonscreen=true' in win_text or 'isvisible=true' in win_text or 'has_drawn' in win_text or 'ready_to_show' in win_text):
+                if 'mhassurface=true' in win_text and ('isvisible=true' in win_text or 'isonscreen=true' in win_text):
                     return True
+
         except Exception:
             pass
 
-    # 2. Secondary Check: Activity lifecycle state (mStopped=true / mResumed=false)
-    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
-        try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            content = res.stdout.lower()
-            if not content.strip():
-                continue
-
-            pkg_lines = [line for line in content.split('\n') if package.lower() in line]
-            if pkg_lines:
-                block_text = '\n'.join(pkg_lines)
-                if 'mstopped=true' in block_text or 'mresumed=false' in block_text:
-                    return False
-                if 'mresumed=true' in block_text and 'mstopped=false' in block_text:
-                    return True
-        except Exception:
-            pass
-
+    # Default fallback: return False (trigger safe Home Page rejoin)
     return False
 
 

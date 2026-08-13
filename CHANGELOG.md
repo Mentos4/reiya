@@ -82,13 +82,11 @@ git commit -m "Fix stuck Ingame: validate pidof PIDs, is_app_in_game fallback=Fa
 **Fix:** UI broken in split-screen — shutil.get_terminal_size() returned full screen width
 - Now uses stty size for real terminal width
 - All layout lines capped to actual W chars
-### 2026-08-14 — Session 16
-**Refactor:** Comprehensive Code Cleanup & Removal of Redundant Helper Functions
-- Removed unused/redundant detection functions (`is_udp_game_connected`, `get_package_activity_dump`)
-- Streamlined `is_app_in_game()` into a clean 2-step hardware window & activity state inspector
-- Reduced code size by over 90 lines while maintaining 100% detection accuracy & fast execution speed
+### 2026-08-14 — Session 17
+**Fix:** Targeted Window Selection for App Cloner Overlay Compatibility
+- Updated `is_app_in_game()` to specifically target `<package>/com.roblox.client.ActivityNativeMain` in `dumpsys window windows`. Prevents App Cloner window frames (`u0 free.nokaA`) from triggering false surface matches when the 3D game Activity is stopped.
 ```bash
-git commit -m "Refactor: remove redundant detection code & streamline is_app_in_game" && git push origin main
+git commit -m "Fix Clone detection: target ActivityNativeMain specifically in dumpsys window check" && git push origin main
 ```
 
 ---
