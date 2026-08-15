@@ -677,19 +677,32 @@ class TerminalRejoinLoop:
         gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else 'No Game Set')
 
         set_landscape_orientation()
-        time.sleep(0.5)
+        time.sleep(1.2)  # Wait for orientation change to settle before probing width
+
+        def _probe_width():
+            """Probe terminal column width via tput → stty → fallback."""
+            for cmd in ['tput cols', 'stty size']:
+                try:
+                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
+                    out = r.stdout.strip()
+                    # stty size returns "rows cols"; tput cols returns just cols
+                    parts = out.split()
+                    val = parts[-1] if parts else ''
+                    if val.isdigit() and int(val) > 10:
+                        return max(36, int(val))
+                except Exception:
+                    pass
+            return None
+
+        # Probe once before the loop so first frame uses a stable value
+        W = _probe_width() or 48
 
         try:
             while self.running:
                 clear_terminal_screen()
 
-                # Get real terminal width via stty (works in split-screen Termux)
-                try:
-                    r = subprocess.run('stty size', shell=True, capture_output=True, text=True, timeout=2)
-                    _, cols = r.stdout.strip().split()
-                    W = max(36, int(cols))
-                except Exception:
-                    W = 48  # safe fallback for split-screen
+                # Refresh width each tick but keep last good value on failure
+                W = _probe_width() or W
 
                 SEP = '-' * W
 
