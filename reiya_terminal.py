@@ -333,22 +333,16 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         url = f'roblox://placeId={game_id}'
         web_url = f'https://www.roblox.com/games/{game_id}'
 
-    # Build --windowingMode 5 --bounds l,t,r,b flag for freeform window placement
-    bf = ""
-    if bounds and freeform:
-        l, t, r, b = bounds
-        bf = f"--windowingMode 5 --bounds {l},{t},{r},{b} "
-
     # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
     # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
     intents = [
-        f"su -c 'am start {bf}-f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start {bf}-f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start {bf}-f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
         f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
         f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"am start {bf}-f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
-        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'"
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
+        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
     ]
 
     for cmd in intents:
@@ -392,29 +386,23 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
         l, t, r, b = bounds
         print(f"  -> {pkg} => bounds ({l},{t},{r},{b})")
 
-        # First try to reposition the already-running window via am task resize
-        # by matching the task stack containing this package
+        # Try to reposition the already-running window via am stack resize
         try:
             res = subprocess.run(
                 "su -c 'am stack list'", shell=True, capture_output=True, text=True, timeout=4
             )
-            stack_id = None
             for line in res.stdout.split('\n'):
                 if pkg in line:
                     m = re.search(r'Stack id=(\d+)', line)
                     if m:
-                        stack_id = m.group(1)
+                        subprocess.run(
+                            f"su -c 'am stack resize {m.group(1)} {l} {t} {r} {b}'",
+                            shell=True, capture_output=True, timeout=3
+                        )
                         break
-            if stack_id:
-                subprocess.run(
-                    f"su -c 'am stack resize {stack_id} {l} {t} {r} {b}'",
-                    shell=True, capture_output=True, timeout=3
-                )
         except Exception:
             pass
 
-        # Always also (re)launch with explicit bounds so the position is committed
-        launch_game(pkg, game_id, bounds=bounds, freeform=True)
         time.sleep(0.8)
 
 def force_stop_app(package):
@@ -733,13 +721,10 @@ class TerminalRejoinLoop:
             return s[:max_w - 2] + '..' if max_w > 2 else s[:max_w]
 
         def _get_width():
-            """Reliable terminal-width probe: stty → shutil → hardcoded fallback."""
-            # stty works inside Termux split-screen and reports the pane width
+            """Reliable terminal-width probe for Termux split-screen panes."""
+            # os.get_terminal_size queries the actual tty fd — works correctly in split panes
             try:
-                r = subprocess.run('stty size', shell=True, capture_output=True, text=True, timeout=2)
-                parts = r.stdout.strip().split()
-                if len(parts) == 2 and parts[1].isdigit():
-                    return max(36, int(parts[1]))
+                return max(36, os.get_terminal_size().columns)
             except Exception:
                 pass
             try:
