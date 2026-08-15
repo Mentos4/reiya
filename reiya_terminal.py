@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.5-REI-REJOIN"
-BUILD_TIME = "2026-08-15 13:00:00 UTC"
+BUILD_VERSION = "v6.7.6-REI-REJOIN"
+BUILD_TIME = "2026-08-15 14:00:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -357,14 +357,13 @@ def launch_game(package, game_id, bounds=None, freeform=True):
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """
-    Tile Roblox windows on the RIGHT 50% of the screen (Termux stays left).
-    For each package:
-      1. Try am stack resize on its existing stack (non-disruptive).
-      2. If that fails, force-stop and relaunch with --windowingMode 5 --bounds.
+    Tile Roblox windows on the RIGHT 50% of the screen stacked vertically.
+    Termux stays on the left. Each app is force-stopped, then relaunched with
+    --windowingMode 5 --bounds so Android places it exactly. A 4s settle wait
+    between each launch prevents windows from conflicting/overlapping.
     """
     set_landscape_orientation()
 
-    # Enable freeform window support — required for --windowingMode 5 --bounds
     for cmd in [
         "su -c 'settings put global enable_freeform_support 1'",
         "su -c 'settings put global force_resizable_activities 1'",
@@ -385,68 +384,48 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
 
     w, h = get_screen_size()
     total = len(packages)
-    print(f"[+] Auto-sorting {total} window(s) on {w}x{h} landscape screen...")
+    print(f"[+] Screen: {w}x{h} | Sorting {total} window(s)...")
 
-    # Fetch stack list once
-    stack_output = ""
-    try:
-        res = subprocess.run("su -c 'am stack list'", shell=True, capture_output=True, text=True, timeout=5)
-        stack_output = res.stdout
-    except Exception:
-        pass
+    if not game_id:
+        print("[!] No game ID set — cannot relaunch for positioning. Set a game first (Option 3).")
+        return
 
     for idx, pkg in enumerate(packages):
         l, t, r, b = calculate_window_bounds(idx, total, w, h, mode=mode)
-        print(f"  -> [{idx+1}] {pkg} => ({l},{t},{r},{b})")
+        print(f"  -> [{idx+1}] {pkg}  bounds=({l},{t},{r},{b})")
 
-        repositioned = False
+        gid = str(game_id).strip()
+        if '?privateServerLinkCode=' in gid:
+            pid, lc = gid.split('?privateServerLinkCode=', 1)
+            url = f'roblox://placeId={pid}&linkCode={lc}'
+        elif gid.startswith('http'):
+            m2 = re.search(r'/games/(\d+)', gid)
+            pid = m2.group(1) if m2 else gid
+            ps = re.search(r'privateServerLinkCode=([^&]+)', gid)
+            url = f'roblox://placeId={pid}&linkCode={ps.group(1)}' if ps else f'roblox://placeId={pid}'
+        else:
+            url = f'roblox://placeId={gid}'
 
-        # Step 1: resize existing stack without disrupting the running app
-        for line in stack_output.split('\n'):
-            if pkg in line:
-                m = re.search(r'Stack id=(\d+)', line)
-                if m:
-                    try:
-                        res = subprocess.run(
-                            f"su -c 'am stack resize {m.group(1)} {l} {t} {r} {b}'",
-                            shell=True, capture_output=True, text=True, timeout=3
-                        )
-                        if res.returncode == 0:
-                            repositioned = True
-                    except Exception:
-                        pass
-                break
+        # Force-stop so the relaunch starts fresh in the correct position
+        force_stop_app(pkg)
+        time.sleep(2)
 
-        # Step 2: force-stop and relaunch with explicit freeform bounds
-        if not repositioned and game_id:
-            gid = str(game_id).strip()
-            if '?privateServerLinkCode=' in gid:
-                pid, lc = gid.split('?privateServerLinkCode=', 1)
-                url = f'roblox://placeId={pid}&linkCode={lc}'
-            elif gid.startswith('http'):
-                m2 = re.search(r'/games/(\d+)', gid)
-                pid = m2.group(1) if m2 else gid
-                ps = re.search(r'privateServerLinkCode=([^&]+)', gid)
-                url = f'roblox://placeId={pid}&linkCode={ps.group(1)}' if ps else f'roblox://placeId={pid}'
-            else:
-                url = f'roblox://placeId={gid}'
+        # Launch with freeform bounds — try component name first, then package
+        for cmd in [
+            f"su -c 'am start --windowingMode 5 --bounds {l},{t},{r},{b} -f 0x10000000 -n {pkg}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+            f"su -c 'am start --windowingMode 5 --bounds {l},{t},{r},{b} -f 0x10000000 -p {pkg} -a android.intent.action.VIEW -d \"{url}\"'",
+            f"su -c 'am start --windowingMode 5 --bounds {l},{t},{r},{b} -p {pkg} -a android.intent.action.VIEW -d \"{url}\"'",
+        ]:
+            try:
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
+                if res.returncode == 0 and 'error' not in res.stdout.lower():
+                    print(f"     OK")
+                    break
+            except Exception:
+                pass
 
-            force_stop_app(pkg)
-            time.sleep(1.5)
-
-            for cmd in [
-                f"su -c 'am start --windowingMode 5 --bounds {l},{t},{r},{b} -f 0x10000000 -n {pkg}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-                f"su -c 'am start --windowingMode 5 --bounds {l},{t},{r},{b} -f 0x10000000 -p {pkg} -a android.intent.action.VIEW -d \"{url}\"'",
-                f"su -c 'am start --windowingMode 5 --bounds {l},{t},{r},{b} -p {pkg} -a android.intent.action.VIEW -d \"{url}\"'",
-            ]:
-                try:
-                    res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
-                    if res.returncode == 0 and 'error' not in res.stdout.lower():
-                        break
-                except Exception:
-                    pass
-
-        time.sleep(0.8)
+        # Wait for this window to fully open and settle before positioning the next
+        time.sleep(4)
 
     print("[+] Auto-sort complete.")
 
