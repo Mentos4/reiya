@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.2-REI-REJOIN"
-BUILD_TIME = "2026-08-14 02:24:00 UTC"
+BUILD_VERSION = "v6.7.3-REI-REJOIN"
+BUILD_TIME = "2026-08-15 00:00:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -333,16 +333,22 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         url = f'roblox://placeId={game_id}'
         web_url = f'https://www.roblox.com/games/{game_id}'
 
+    # Build --windowingMode 5 --bounds l,t,r,b flag for freeform window placement
+    bf = ""
+    if bounds and freeform:
+        l, t, r, b = bounds
+        bf = f"--windowingMode 5 --bounds {l},{t},{r},{b} "
+
     # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
     # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
     intents = [
+        f"su -c 'am start {bf}-f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start {bf}-f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start {bf}-f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
         f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
         f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
-        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
+        f"am start {bf}-f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
+        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'"
     ]
 
     for cmd in intents:
@@ -356,8 +362,19 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     return False
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
-    """Auto-arrange/tile running Roblox app windows on screen."""
+    """Auto-arrange/tile running Roblox app windows on screen using freeform window mode."""
     set_landscape_orientation()
+
+    # Enable Android freeform window support (required for --windowingMode 5 --bounds)
+    for cmd in [
+        "su -c 'settings put global enable_freeform_support 1'",
+        "su -c 'settings put global force_resizable_activities 1'",
+    ]:
+        try:
+            subprocess.run(cmd, shell=True, capture_output=True, timeout=2)
+        except Exception:
+            pass
+
     if packages is None:
         packages = config.get('selected_packages', [])
     if not packages:
@@ -372,9 +389,33 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
 
     for idx, pkg in enumerate(packages):
         bounds = calculate_window_bounds(idx, total, w, h, mode=mode)
-        print(f"  -> Positioning {pkg} bounds: {bounds}")
+        l, t, r, b = bounds
+        print(f"  -> {pkg} => bounds ({l},{t},{r},{b})")
+
+        # First try to reposition the already-running window via am task resize
+        # by matching the task stack containing this package
+        try:
+            res = subprocess.run(
+                "su -c 'am stack list'", shell=True, capture_output=True, text=True, timeout=4
+            )
+            stack_id = None
+            for line in res.stdout.split('\n'):
+                if pkg in line:
+                    m = re.search(r'Stack id=(\d+)', line)
+                    if m:
+                        stack_id = m.group(1)
+                        break
+            if stack_id:
+                subprocess.run(
+                    f"su -c 'am stack resize {stack_id} {l} {t} {r} {b}'",
+                    shell=True, capture_output=True, timeout=3
+                )
+        except Exception:
+            pass
+
+        # Always also (re)launch with explicit bounds so the position is committed
         launch_game(pkg, game_id, bounds=bounds, freeform=True)
-        time.sleep(1)
+        time.sleep(0.8)
 
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
@@ -662,7 +703,9 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Live-updating terminal dashboard. Fixed compact layout, safe for narrow terminals."""
+        """Live-updating terminal dashboard. Responsive to any terminal width."""
+        import shutil as _shutil
+
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -676,6 +719,34 @@ class TerminalRejoinLoop:
 
         gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else 'No Game Set')
 
+        def vlen(s):
+            """Visible length of a string — ANSI codes stripped."""
+            return len(re.sub(r'\033\[[0-9;]*m', '', s))
+
+        def vpad(colored, width):
+            """Pad colored string to exact visible width; never truncates."""
+            return colored + ' ' * max(0, width - vlen(colored))
+
+        def trunc(s, max_w):
+            if len(s) <= max_w:
+                return s
+            return s[:max_w - 2] + '..' if max_w > 2 else s[:max_w]
+
+        def _get_width():
+            """Reliable terminal-width probe: stty → shutil → hardcoded fallback."""
+            # stty works inside Termux split-screen and reports the pane width
+            try:
+                r = subprocess.run('stty size', shell=True, capture_output=True, text=True, timeout=2)
+                parts = r.stdout.strip().split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    return max(36, int(parts[1]))
+            except Exception:
+                pass
+            try:
+                return max(36, _shutil.get_terminal_size(fallback=(48, 24)).columns)
+            except Exception:
+                return 48
+
         set_landscape_orientation()
         time.sleep(0.5)
 
@@ -683,92 +754,76 @@ class TerminalRejoinLoop:
             while self.running:
                 clear_terminal_screen()
 
-                # Get real terminal width via stty (works in split-screen Termux)
-                try:
-                    r = subprocess.run('stty size', shell=True, capture_output=True, text=True, timeout=2)
-                    _, cols = r.stdout.strip().split()
-                    W = max(36, int(cols))
-                except Exception:
-                    W = 48  # safe fallback for split-screen
-
+                W   = _get_width()
                 SEP = '-' * W
 
-                w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
-                s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
+                w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')           else f"{RED}Disable{RESET}"
+                s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)           else f"{RED}Disable{RESET}"
                 h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
-                c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
+                c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')               else f"{RED}Disable{RESET}"
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                def strip(s):
-                    return re.sub(r'\033\[[0-9;]*m', '', s)
-
-                def rpad(colored, target_vis_len):
-                    """Pad a colored string so its visible width = target_vis_len."""
-                    vis = len(strip(colored))
-                    return colored + ' ' * max(0, target_vis_len - vis)
-
-                # ── Header ────────────────────────────────────────
+                # ── Header ────────────────────────────────────────────────────
                 title = "REI  REJOIN"
                 pad   = max(0, (W - len(title)) // 2)
                 print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
                 print(f"{BOLD}{CYAN}{' ' * pad}{title}{RESET}")
                 print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
-                # Info line — truncate to W
-                info = f" By seisen_ | discord.gg/5G3cStpbcx"
-                print(info[:W])
+                print(f" By seisen_ | discord.gg/5G3cStpbcx"[:W])
                 print(SEP)
 
-                # ── Settings (2 per row, half-width each) ─────────
+                # ── Settings (2 columns per row, even split) ──────────────────
                 half = W // 2
-                l1 = f"WEBHOOK: {w_st}"
-                r1 = f"SORT: {s_st}"
-                l2 = f"HOME: {h_st}"
-                r2 = f"CACHE: {c_st}"
-                print(rpad(l1, half) + r1)
-                print(rpad(l2, half) + r2)
+                print(vpad(f"WEBHOOK: {w_st}", half) + f"AUTO SORT: {s_st}")
+                print(vpad(f"AUTO BYPASS: {h_st}", half) + f"AUTO CHANGE: {c_st}")
                 print(SEP)
 
-                # ── Stats ──────────────────────────────────────────
-                stat_line = f" CPU:{cpu}%  RAM:{used_ram:.1f}/{total_ram:.1f}GB"
-                print(stat_line[:W])
+                # ── Stats bar ─────────────────────────────────────────────────
+                stat = f"| Cpu usage: {cpu:.1f} %  | Ram usage: {used_ram:.2f} / {total_ram:.2f} GB |"
+                print(stat[:W])
                 print(SEP)
 
-                # ── Table ──────────────────────────────────────────
-                # Fixed column visible widths; adjusted for W
-                cn = 2                          # No
-                cu = min(9,  max(5, W//6))      # User
-                cp = min(11, max(7, W//5))      # Package
-                cs = min(9,  max(6, W//6))      # Status
-                cg = max(4, W - cn - cu - cp - cs - 4)  # Game (4 pipes)
+                # ── Table ─────────────────────────────────────────────────────
+                # Column widths that adapt to W but keep No and Status fixed
+                cn = 2                                   # No
+                cu = min(10, max(6,  W // 6))            # Username
+                cs = 6                                   # Status (Ingame / Rejoin / HomePg)
+                # Package and Game share what remains after the 5 pipe chars
+                rem = W - cn - cu - cs - 5
+                cp  = min(14, max(7, rem // 2))          # Package
+                cg  = max(4, rem - cp)                   # Game
 
-                gname_t = gname[:cg] if len(gname) <= cg else gname[:cg-2] + '..'
-
-                hdr = f"{'No':<{cn}}|{'User':<{cu}}|{'Package':<{cp}}|{'Status':<{cs}}|{'Game'}"
+                hdr = (f"{'No':<{cn}}|{'Username':<{cu}}|"
+                       f"{'Package':<{cp}}|{'Status':<{cs}}|Game")
                 print(f"{BOLD}{hdr[:W]}{RESET}")
                 print(SEP)
 
                 statuses = self.get_status()
                 for idx, p in enumerate(pkgs, 1):
-                    info_d  = statuses.get(p, {})
-                    st      = info_d.get('status', 'Launching')
-                    uname   = f"wu***{idx:02d}"
+                    info_d = statuses.get(p, {})
+                    st     = info_d.get('status', 'Launching')
+                    uname  = f"wu***{idx:02d}"
 
-                    if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
-                    elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
-                    else:                                        st_c = st[:cs]
+                    if   st == 'Ingame':                          st_c = f"{GREEN}Ingame{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):   st_c = f"{RED}Rejoin{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):      st_c = f"{YELLOW}HomePg{RESET}"
+                    elif st == 'Launching':                       st_c = f"{CYAN}Launch{RESET}"
+                    else:                                         st_c = st[:cs]
 
-                    pkg_t = p[:cp] if len(p) <= cp else p[:cp-1] + '.'
+                    pkg_t  = trunc(p, cp)
+                    game_t = trunc(gname, cg)
 
-                    row = (f"{idx:<{cn}}|{uname:<{cu}}|{pkg_t:<{cp}}"
-                           f"|{rpad(st_c, cs)}|{gname_t}")
+                    row = (f"{idx:<{cn}}|"
+                           f"{uname:<{cu}}|"
+                           f"{pkg_t:<{cp}}|"
+                           f"{vpad(st_c, cs)}|"
+                           f"{game_t}")
                     print(row)
 
                 print(SEP)
-                print(f"{BOLD}[Enter] Main Menu{RESET}")
+                print(f"{BOLD}[Enter] Main Menu  [Ctrl+C] Stop{RESET}")
 
                 if os.name == 'posix':
                     rlist, _, _ = select.select([sys.stdin], [], [], 2.0)
