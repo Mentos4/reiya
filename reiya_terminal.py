@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
     'game_id': '',
     'game_name': '',
     'package_games': {},
+    'package_game_names': {},
     'webhook_url': '',
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
@@ -355,6 +356,33 @@ def launch_game(package, game_id, bounds=None, freeform=True):
 
     return False
 
+def _resolve_package_game_id(pkg, cfg):
+    """Resolve active Game ID or Private Server Link for a specific package."""
+    method = cfg.get('game_method', 'all')
+    if method == 'each':
+        pkg_games = cfg.get('package_games', {})
+        return pkg_games.get(pkg, cfg.get('game_id', ''))
+    return cfg.get('game_id', '')
+
+def _resolve_package_game_name(pkg, cfg):
+    """Resolve display name of the configured game for a specific package."""
+    method = cfg.get('game_method', 'all')
+    if method == 'each':
+        pkg_names = cfg.get('package_game_names', {})
+        if pkg in pkg_names and pkg_names[pkg]:
+            return pkg_names[pkg]
+        gid = cfg.get('package_games', {}).get(pkg, '')
+        if gid:
+            for gname, pid in PRESET_GAMES:
+                if pid == gid:
+                    return gname
+            return f"Place:{gid[:12]}"
+    gname = cfg.get('game_name')
+    if gname:
+        return gname
+    gid = cfg.get('game_id')
+    return f"Place:{gid[:12]}" if gid else 'No Game Set'
+
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
     set_landscape_orientation()
@@ -363,9 +391,6 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     if not packages:
         packages = get_roblox_packages()
 
-    if not game_id:
-        game_id = config.get('game_id', '')
-
     w, h = get_screen_size()
     total = len(packages)
     print(f"[+] Auto-sorting {total} window(s) on screen ({w}x{h}, landscape)...")
@@ -373,7 +398,8 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     for idx, pkg in enumerate(packages):
         bounds = calculate_window_bounds(idx, total, w, h, mode=mode)
         print(f"  -> Positioning {pkg} bounds: {bounds}")
-        launch_game(pkg, game_id, bounds=bounds, freeform=True)
+        pkg_gid = game_id or _resolve_package_game_id(pkg, config)
+        launch_game(pkg, pkg_gid, bounds=bounds, freeform=True)
         time.sleep(1)
 
 def force_stop_app(package):
@@ -614,11 +640,10 @@ class TerminalRejoinLoop:
         return dict(self.status)
 
     def _get_game_id(self, pkg, cfg):
-        method = cfg.get('game_method', 'all')
-        if method == 'each':
-            pkg_games = cfg.get('package_games', {})
-            return pkg_games.get(pkg, cfg.get('game_id', ''))
-        return cfg.get('game_id', '')
+        return _resolve_package_game_id(pkg, cfg)
+
+    def _get_game_name(self, pkg, cfg):
+        return _resolve_package_game_name(pkg, cfg)
 
     def start(self, cfg):
         if self.running:
@@ -768,6 +793,8 @@ class TerminalRejoinLoop:
                     else:                                        st_c = st[:cs]
 
                     pkg_t = p[:cp] if len(p) <= cp else p[:cp-1] + '.'
+                    pkg_gname = _resolve_package_game_name(p, cfg)
+                    gname_t = pkg_gname[:cg] if len(pkg_gname) <= cg else pkg_gname[:cg-2] + '..'
 
                     row = (f"{idx:<{cn}}|{uname:<{cu}}|{pkg_t:<{cp}}"
                            f"|{rpad(st_c, cs)}|{gname_t}")
@@ -908,6 +935,7 @@ def show_status():
     w, h = get_screen_size()
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
     print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
+    print(f"Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
 
     roblox_pkgs = get_roblox_packages()
     print(f"\nDetected Roblox & Executor Packages ({len(roblox_pkgs)}):")
@@ -916,7 +944,8 @@ def show_status():
         status_str = "RUNNING" if running else "STOPPED"
         ram = get_process_ram(pkg) if running else 0
         selected = "*" if pkg in config.get('selected_packages', []) else " "
-        print(f" [{selected}] {pkg:<35} [{status_str:<7}] RAM: {ram}MB")
+        pkg_gname = _resolve_package_game_name(pkg, config)
+        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18} RAM: {ram}MB")
     print("=" * 60)
 
 def interactive_menu():
@@ -998,25 +1027,81 @@ def interactive_menu():
             input("\nPress Enter to return to menu...")
 
         elif choice == '3':
-            print("\nPreset Games:")
-            for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
-                print(f"  {idx}. {gname} (ID: {gid})")
-            print("  C. Custom Place ID or Private Server Link")
-            gchoice = input("\nChoice: ").strip()
-            if gchoice.upper() == 'C':
-                gid = input("Enter Place ID / Link: ").strip()
-                if gid:
-                    config['game_id'] = gid
-                    config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
+            print("\n--- [ CONFIGURE GAME SETUP ] ---")
+            print(f"Current Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
+            print(f"Global Game Setting: {config.get('game_name', 'None')} ({config.get('game_id', 'N/A')})")
+            print("\nSetup Options:")
+            print("  1. Apply Same Game to ALL Packages")
+            print("  2. Assign Custom Game PER Package (Roblox 1 -> Game A, Roblox 2 -> Game B)")
+            gmode = input("\nSelect Mode (1 or 2, default 1): ").strip()
+
+            if gmode == '2':
+                config['game_method'] = 'each'
+                pkgs = config.get('selected_packages', [])
+                if not pkgs:
+                    pkgs = get_roblox_packages()
+                if not pkgs:
+                    print("  [!] No Roblox packages detected or selected. Please select packages in Option 2 first!")
+                else:
+                    if 'package_games' not in config: config['package_games'] = {}
+                    if 'package_game_names' not in config: config['package_game_names'] = {}
+
+                    print(f"\n[+] Configuring individual games for {len(pkgs)} package(s):")
+                    for p_idx, pkg in enumerate(pkgs, 1):
+                        curr_game = _resolve_package_game_name(pkg, config)
+                        print(f"\n--------------------------------------------------")
+                        print(f"[{p_idx}/{len(pkgs)}] Package: {pkg}")
+                        print(f"Current Game: {curr_game}")
+                        print("Select Game for this package:")
+                        for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
+                            print(f"  {idx}. {gname} (ID: {gid})")
+                        print("  C. Custom Place ID or Private Server Link")
+                        print("  S. Skip (keep current setting)")
+
+                        gchoice = input(f"Choice for {pkg}: ").strip()
+                        if gchoice.upper() == 'C':
+                            gid = input("  Enter Place ID / Link: ").strip()
+                            if gid:
+                                config['package_games'][pkg] = gid
+                                gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
+                                config['package_game_names'][pkg] = gname
+                        elif gchoice.upper() == 'S' or not gchoice:
+                            continue
+                        else:
+                            try:
+                                p_idx_sel = int(gchoice) - 1
+                                if 0 <= p_idx_sel < len(PRESET_GAMES):
+                                    gname, gid = PRESET_GAMES[p_idx_sel]
+                                    config['package_games'][pkg] = gid
+                                    config['package_game_names'][pkg] = gname
+                            except ValueError:
+                                pass
+                save_config()
+                print("\n[+] Per-Package Game Configurations Saved:")
+                for pkg in (config.get('selected_packages') or get_roblox_packages()):
+                    print(f"  ✓ {pkg:<30} -> {_resolve_package_game_name(pkg, config)}")
+
             else:
-                try:
-                    idx = int(gchoice) - 1
-                    if 0 <= idx < len(PRESET_GAMES):
-                        config['game_name'], config['game_id'] = PRESET_GAMES[idx]
-                except ValueError:
-                    pass
-            save_config()
-            print(f"\n[+] Active Game ID / Link Set: {config.get('game_id')}")
+                config['game_method'] = 'all'
+                print("\nPreset Games (Applies to ALL packages):")
+                for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
+                    print(f"  {idx}. {gname} (ID: {gid})")
+                print("  C. Custom Place ID or Private Server Link")
+                gchoice = input("\nChoice: ").strip()
+                if gchoice.upper() == 'C':
+                    gid = input("Enter Place ID / Link: ").strip()
+                    if gid:
+                        config['game_id'] = gid
+                        config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
+                else:
+                    try:
+                        idx = int(gchoice) - 1
+                        if 0 <= idx < len(PRESET_GAMES):
+                            config['game_name'], config['game_id'] = PRESET_GAMES[idx]
+                    except ValueError:
+                        pass
+                save_config()
+                print(f"\n[+] Active Game ID / Link Set for ALL packages: {config.get('game_name')} ({config.get('game_id')})")
             input("\nPress Enter to return to menu...")
 
         elif choice == '4':
@@ -1115,13 +1200,17 @@ def interactive_menu():
             pkgs = config.get('selected_packages', [])
             if not pkgs:
                 pkgs = get_roblox_packages()
-            gid = config.get('game_id', '')
-            if not pkgs or not gid:
-                print("[!] Please configure selected packages and game ID first.")
+            if not pkgs:
+                print("[!] Please select packages first.")
             else:
                 for idx, p in enumerate(pkgs):
+                    gid = _resolve_package_game_id(p, config)
+                    gname = _resolve_package_game_name(p, config)
+                    if not gid:
+                        print(f"[!] No Game ID configured for {p}. Skipping.")
+                        continue
                     bounds = calculate_window_bounds(idx, len(pkgs), mode=config.get('window_mode', 'left_stack'))
-                    print(f"Launching {p} with Game ID {gid} at {bounds}...")
+                    print(f"Launching {p} into '{gname}' (ID: {gid}) at bounds {bounds}...")
                     launch_game(p, gid, bounds=bounds, freeform=True)
             input("\nPress Enter to return to menu...")
 
