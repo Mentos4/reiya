@@ -37,7 +37,7 @@ rm -f ~/reiya_terminal.py && curl -sL "https://raw.githubusercontent.com/Mentos4
 - Do NOT use `0x14000000` (`CLEAR_TASK`) as it forces process termination on some Android builds.
 
 ### 4. Terminal Dashboard UI (`render_live_dashboard`) (~L652)
-- Must use `stty size` to retrieve the REAL terminal width (`W`). `shutil.get_terminal_size()` returns full screen width, breaking split-screen layouts.
+- `W` is a **fixed constant (48)**, deliberately NOT probed via `tput`/`stty`/`shutil.get_terminal_size()`. Those reported the wrong width around screen rotation and varied by device, which caused recurring wrap/misalignment glitches (a line printed exactly `cols`-wide defers its wrap, sticking the next print's first character onto the same row). Do NOT reintroduce dynamic width detection here — if the layout needs to be wider/narrower, change the constant, don't probe for it.
 - Header, settings (2 per line), stats, and table must fit within `W` columns (minimum 36).
 - Use `rpad(colored_str, visible_len)` helper for ANSI-escaped string alignment.
 

@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.8-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:17:44 UTC"
+BUILD_VERSION = "v6.7.9-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:18:52 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -704,23 +704,12 @@ class TerminalRejoinLoop:
 
         gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else 'No Game Set')
 
-        # Probe terminal width BEFORE set_landscape_orientation — rotation invalidates
-        # stty/tput until the OS updates TIOCGWINSZ, which is why first-run UI breaks.
+        # Fixed layout width — deliberately NOT probed from the terminal (tput/stty
+        # reports the wrong size around screen rotation and varies across devices,
+        # which was the cause of the recurring wrap/misalignment glitches). A
+        # constant width renders identically everywhere; only very narrow terminals
+        # will soft-wrap it, which is a display limit, not a layout bug.
         W = 48
-        for cmd in ['tput cols', 'stty size']:
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
-                parts = r.stdout.strip().split()
-                val = parts[-1] if parts else ''
-                if val.isdigit() and int(val) > 10:
-                    # Reserve one trailing column: a line that exactly fills the
-                    # terminal's width defers its wrap, so the next print's first
-                    # character sticks to the same row instead of starting a new
-                    # line (the "stray character at the edge" layout glitch).
-                    W = max(36, int(val) - 1)
-                    break
-            except Exception:
-                pass
 
         set_landscape_orientation()
         time.sleep(0.5)
