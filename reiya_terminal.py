@@ -43,13 +43,13 @@ BUILD_TIME = "2026-08-18 16:52:00 UTC"
 # ==============================================================================
 
 PRESET_GAMES = [
-    ('Blox Fruits',                '2753915549'),
-    ('Sailor Piece',               '16232032796'),
-    ('King Legacy',                '5032219830'),
-    ('Bee Swarm Simulator',        '1537690962'),
-    ('Pet Simulator 99',           '8737899170'),
-    ('Attack on Titan Revolution', '13822889351'),
-    ('Grow a Garden 2',            '126884695'),
+    ('The Forge',          '76558904092080'),
+    ('Anime Origin',       '129932912185311'),
+    ('Anime Expedition',   '84515722934860'),
+    ('Run a Restaurant',   '77843161404023'),
+    ('World Zero',         '2727067538'),
+    ('Blue Heater 2',      '16893821047'),
+    ('Grow a Garden 2',    '126884695'),
 ]
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'config.json')
@@ -127,6 +127,22 @@ def clear_terminal_screen():
             os.system('cls')
     except Exception:
         print("\033[H\033[2J\033[3J", end="")
+
+def flush_input_buffer():
+    """Discard any stray/buffered keystrokes before a prompt so an accidental
+    double-tap or auto-repeated key on-screen (common on Termux/Android
+    keyboards) can't silently answer the NEXT input() call for the user."""
+    try:
+        if os.name == 'posix':
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+def prompt(text):
+    """input() wrapper that drains any queued stray input first."""
+    flush_input_buffer()
+    return input(text)
 
 def get_installed_packages():
     """
@@ -710,7 +726,11 @@ class TerminalRejoinLoop:
                 parts = r.stdout.strip().split()
                 val = parts[-1] if parts else ''
                 if val.isdigit() and int(val) > 10:
-                    W = max(36, int(val))
+                    # Reserve one trailing column: a line that exactly fills the
+                    # terminal's width defers its wrap, so the next print's first
+                    # character sticks to the same row instead of starting a new
+                    # line (the "stray character at the edge" layout glitch).
+                    W = max(36, int(val) - 1)
                     break
             except Exception:
                 pass
@@ -967,11 +987,11 @@ def interactive_menu():
         print("11. Test Launch Selected Package Now")
         print("12. Send Manual Discord Webhook Test")
         print("0. Exit CLI")
-        choice = input("\nSelect option: ").strip()
+        choice = prompt("\nSelect option: ").strip()
 
         if choice == '1':
             show_status()
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
         elif choice == '2':
             roblox_pkgs = get_roblox_packages()
 
@@ -990,7 +1010,7 @@ def interactive_menu():
             print("  - Type 'CLEAR' to deselect all packages")
             print("  - Type 'M' to enter custom package name manually")
             print("  - Press Enter to keep current selection")
-            indices = input("\nChoice: ").strip()
+            indices = prompt("\nChoice: ").strip()
 
             if indices.upper() == 'ALL':
                 config['selected_packages'] = list(roblox_pkgs)
@@ -999,7 +1019,7 @@ def interactive_menu():
                 config['selected_packages'] = []
                 save_config()
             elif indices.upper() == 'M':
-                custom_pkg = input("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
+                custom_pkg = prompt("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
                 if custom_pkg:
                     sel_set = set(config.get('selected_packages', []))
                     sel_set.add(custom_pkg)
@@ -1024,7 +1044,7 @@ def interactive_menu():
                     print(f"  ✓ {p}")
             else:
                 print("  (None selected)")
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '3':
             print("\n--- [ CONFIGURE GAME SETUP ] ---")
@@ -1033,7 +1053,7 @@ def interactive_menu():
             print("\nSetup Options:")
             print("  1. Apply Same Game to ALL Packages")
             print("  2. Assign Custom Game PER Package (Roblox 1 -> Game A, Roblox 2 -> Game B)")
-            gmode = input("\nSelect Mode (1 or 2, default 1): ").strip()
+            gmode = prompt("\nSelect Mode (1 or 2, default 1): ").strip()
 
             if gmode == '2':
                 config['game_method'] = 'each'
@@ -1058,9 +1078,9 @@ def interactive_menu():
                         print("  C. Custom Place ID or Private Server Link")
                         print("  S. Skip (keep current setting)")
 
-                        gchoice = input(f"Choice for {pkg}: ").strip()
+                        gchoice = prompt(f"Choice for {pkg}: ").strip()
                         if gchoice.upper() == 'C':
-                            gid = input("  Enter Place ID / Link: ").strip()
+                            gid = prompt("  Enter Place ID / Link: ").strip()
                             if gid:
                                 config['package_games'][pkg] = gid
                                 gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
@@ -1087,9 +1107,9 @@ def interactive_menu():
                 for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
                     print(f"  {idx}. {gname} (ID: {gid})")
                 print("  C. Custom Place ID or Private Server Link")
-                gchoice = input("\nChoice: ").strip()
+                gchoice = prompt("\nChoice: ").strip()
                 if gchoice.upper() == 'C':
-                    gid = input("Enter Place ID / Link: ").strip()
+                    gid = prompt("Enter Place ID / Link: ").strip()
                     if gid:
                         config['game_id'] = gid
                         config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
@@ -1102,45 +1122,45 @@ def interactive_menu():
                         pass
                 save_config()
                 print(f"\n[+] Active Game ID / Link Set for ALL packages: {config.get('game_name')} ({config.get('game_id')})")
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '4':
             print(f"\nCurrent Webhook: {config.get('webhook_url', 'None')}")
-            wurl = input("Enter Discord Webhook URL (leave empty to keep current): ").strip()
+            wurl = prompt("Enter Discord Webhook URL (leave empty to keep current): ").strip()
             if wurl:
                 config['webhook_url'] = wurl
-            wenable = input("Enable Webhook updates? (y/n): ").strip().lower() == 'y'
+            wenable = prompt("Enable Webhook updates? (y/n): ").strip().lower() == 'y'
             config['webhook_enabled'] = wenable
-            wint = input("Webhook interval in seconds [default 60]: ").strip()
+            wint = prompt("Webhook interval in seconds [default 60]: ").strip()
             if wint.isdigit():
                 config['webhook_interval'] = int(wint)
             save_config()
             print(f"\n[+] Webhook Enabled: {config.get('webhook_enabled')} | Interval: {config.get('webhook_interval')}s")
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '5':
             print("\nTiming Settings:")
-            check_in = input(f"Check Interval seconds [{config.get('check_interval', 10)}]: ").strip()
+            check_in = prompt(f"Check Interval seconds [{config.get('check_interval', 10)}]: ").strip()
             if check_in.isdigit(): config['check_interval'] = int(check_in)
 
-            off_w = input(f"Offline Wait seconds [{config.get('offline_wait', 15)}]: ").strip()
+            off_w = prompt(f"Offline Wait seconds [{config.get('offline_wait', 15)}]: ").strip()
             if off_w.isdigit(): config['offline_wait'] = int(off_w)
 
-            ret_c = input(f"Max Retries [{config.get('retry_count', 3)}]: ").strip()
+            ret_c = prompt(f"Max Retries [{config.get('retry_count', 3)}]: ").strip()
             if ret_c.isdigit(): config['retry_count'] = int(ret_c)
 
-            seq = input(f"Sequential Join? (y/n) [{config.get('sequential_join', False)}]: ").strip().lower()
+            seq = prompt(f"Sequential Join? (y/n) [{config.get('sequential_join', False)}]: ").strip().lower()
             if seq in ['y', 'n']: config['sequential_join'] = (seq == 'y')
 
-            clr = input(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
+            clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
-            hm = input(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
+            hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
             if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
 
             save_config()
             print("\n[+] Timing & Home Screen settings updated.")
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
             print("\n--- [ AUTO-SORT / WINDOW TILING LAYOUT ] ---")
@@ -1149,7 +1169,7 @@ def interactive_menu():
             print("\n1. Enable/Disable Auto-Sort")
             print("2. Set Mode: Left Vertical Stack (Matching side-by-side layout)")
             print("3. Set Mode: Grid Layout (Even N x M grid across screen)")
-            lch = input("Select option: ").strip()
+            lch = prompt("Select option: ").strip()
             if lch == '1':
                 config['auto_sort'] = not config.get('auto_sort', True)
                 print(f"[+] Auto-Sort set to: {config['auto_sort']}")
@@ -1160,7 +1180,7 @@ def interactive_menu():
                 config['window_mode'] = 'grid'
                 print("[+] Window mode set to: Grid Layout")
             save_config()
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '7':
             path = config.get('autoexecute_path', '/sdcard/Delta/Autoexecute')
@@ -1170,18 +1190,18 @@ def interactive_menu():
                 print(f" - {f}")
             print("\n1. Add New Script File")
             print("2. Back")
-            ach = input("Select option: ").strip()
+            ach = prompt("Select option: ").strip()
             if ach == '1':
-                fname = input("Filename (e.g. script.lua): ").strip()
+                fname = prompt("Filename (e.g. script.lua): ").strip()
                 print("Enter script content (end with EOF on a line by itself):")
                 lines = []
                 while True:
-                    line = input()
+                    line = prompt()
                     if line.strip() == 'EOF':
                         break
                     lines.append(line)
                 add_autoexecute_script(path, fname, '\n'.join(lines))
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '8':
             rejoin_engine.start(config)
@@ -1190,11 +1210,11 @@ def interactive_menu():
         elif choice == '9':
             rejoin_engine.stop()
             print("\n[+] Auto Rejoin Engine stopped.")
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '10':
             auto_sort_windows(mode=config.get('window_mode', 'left_stack'))
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '11':
             pkgs = config.get('selected_packages', [])
@@ -1212,7 +1232,7 @@ def interactive_menu():
                     bounds = calculate_window_bounds(idx, len(pkgs), mode=config.get('window_mode', 'left_stack'))
                     print(f"Launching {p} into '{gname}' (ID: {gid}) at bounds {bounds}...")
                     launch_game(p, gid, bounds=bounds, freeform=True)
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '12':
             wurl = config.get('webhook_url')
@@ -1221,7 +1241,7 @@ def interactive_menu():
             else:
                 print("Sending test webhook...")
                 send_discord_webhook(wurl, rejoin_engine.get_status(), time.time())
-            input("\nPress Enter to return to menu...")
+            prompt("\nPress Enter to return to menu...")
 
         elif choice == '0':
             if rejoin_engine.running:
