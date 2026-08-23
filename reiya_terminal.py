@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.2-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:32:25 UTC"
+BUILD_VERSION = "v6.8.3-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:47:56 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -713,6 +713,15 @@ class TerminalRejoinLoop:
         def strip(s):
             return re.sub(r'\033\[[0-9;]*m', '', s)
 
+        def out(s=""):
+            """print() relies on the terminal translating '\\n' to CRLF (moving
+            the cursor back to column 0). On a pty/terminal where that
+            translation isn't happening, '\\n' only moves down a row and each
+            line starts wherever the previous one's cursor ended up, producing
+            a diagonal staircase effect. Writing '\\r\\n' explicitly makes the
+            column-0 return independent of the terminal's line-ending mode."""
+            sys.stdout.write(str(s) + "\r\n")
+
         def detect_width(fallback):
             """Probe the real terminal width fresh each call. Reserves one
             trailing column: a line that exactly fills the terminal defers its
@@ -796,23 +805,23 @@ class TerminalRejoinLoop:
                 # ── Header ────────────────────────────────────────
                 title = "REI REJOIN"
                 pad = max(0, (TOTAL_W - len(f">>> {title} <<<")) // 2)
-                print(f"{BOLD}{CYAN}{' ' * pad}>>> {title} <<<{RESET}")
-                print(f"{BLUE}Discord: discord.gg/5G3cStpbcx{RESET}")
-                print(f"{BLUE}By seisen_{RESET}")
-                print(f"{CYAN}GAME MODE: {game_mode}{RESET}")
-                print(f"WEBHOOK: {w_st}")
-                print(f"AUTO SORT: {s_st}")
-                print(f"HOME REJOIN: {h_st}")
-                print(f"CLEAR CACHE: {c_st}")
-                print(SEP)
+                out(f"{BOLD}{CYAN}{' ' * pad}>>> {title} <<<{RESET}")
+                out(f"{BLUE}Discord: discord.gg/5G3cStpbcx{RESET}")
+                out(f"{BLUE}By seisen_{RESET}")
+                out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
+                out(f"WEBHOOK: {w_st}")
+                out(f"AUTO SORT: {s_st}")
+                out(f"HOME REJOIN: {h_st}")
+                out(f"CLEAR CACHE: {c_st}")
+                out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                print(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {used_ram:.2f} / {total_ram:.2f} GB", ram_w)]))
-                print(SEP)
+                out(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {used_ram:.2f} / {total_ram:.2f} GB", ram_w)]))
+                out(SEP)
 
                 # ── Table ──────────────────────────────────────────
-                print(f"{BOLD}{table_row([label for label, _ in COLS])}{RESET}")
-                print(TABLE_SEP)
+                out(f"{BOLD}{table_row([label for label, _ in COLS])}{RESET}")
+                out(TABLE_SEP)
 
                 statuses = self.get_status()
                 for idx, p in enumerate(pkgs, 1):
@@ -832,10 +841,11 @@ class TerminalRejoinLoop:
                     pkg_gname = _resolve_package_game_name(p, cfg)
                     gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
 
-                    print(table_row([idx, uname, pkg_t, st_c, gname_t]))
+                    out(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
-                print(SEP)
-                print(f"{BOLD}[Enter] Main Menu{RESET}")
+                out(SEP)
+                out(f"{BOLD}[Enter] Main Menu{RESET}")
+                sys.stdout.flush()
 
                 if os.name == 'posix':
                     rlist, _, _ = select.select([sys.stdin], [], [], 5.0)
