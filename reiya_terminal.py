@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.1-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:30:14 UTC"
+BUILD_VERSION = "v6.8.2-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:32:25 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -694,10 +694,10 @@ class TerminalRejoinLoop:
         """Live-updating terminal dashboard. Fixed pipe-bordered table layout —
         one setting per line and one cell per column, so nothing depends on
         packing two colored strings onto a shared line (that packing was the
-        source of the earlier misalignment). Column widths are derived from
-        cfg['dashboard_width'] (Option 6.4) rather than probed from the
-        terminal, so the layout is exactly as wide as the user says their
-        device can show — no detection, no surprises on rotation."""
+        source of the earlier misalignment). The terminal width is re-measured
+        on every refresh (not just once at startup), so rotating the device
+        mid-session realigns the layout on the very next redraw instead of
+        leaving it broken until the app is restarted."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -713,47 +713,66 @@ class TerminalRejoinLoop:
         def strip(s):
             return re.sub(r'\033\[[0-9;]*m', '', s)
 
-        # ── Table columns scaled from cfg['dashboard_width'] (user-set, Option 6.4) ──
-        # For N pipe-bordered columns, total width = sum(width) + 3*N + 1, so the
-        # content budget available to split across columns is target - (3*N + 1).
-        target_w = max(30, int(cfg.get('dashboard_width', 40) or 40))
-        N = 5
-        budget = max(20, target_w - (3 * N + 1))
-        no_w, user_w, status_w = 2, 7, 6
-        remaining = max(8, budget - no_w - user_w - status_w)
-        pkg_w  = max(4, remaining * 2 // 5)
-        game_w = max(4, remaining - pkg_w)
-        # Short header labels so they never overflow a narrow column on their own.
-        COLS = [("No", no_w), ("User", user_w), ("Pkg", pkg_w), ("Stat", status_w), ("Game", game_w)]
-        TOTAL_W = sum(w + 3 for _, w in COLS) + 1  # " val " + trailing "|" per col, + leading "|"
+        def detect_width(fallback):
+            """Probe the real terminal width fresh each call. Reserves one
+            trailing column: a line that exactly fills the terminal defers its
+            wrap, sticking the next print's first char onto the same row."""
+            for cmd in ['stty size', 'tput cols']:
+                try:
+                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1)
+                    parts = r.stdout.strip().split()
+                    val = parts[-1] if parts else ''
+                    if val.isdigit() and int(val) > 10:
+                        return max(30, int(val) - 1)
+                except Exception:
+                    pass
+            return fallback
 
-        def cell(val, width):
-            """' val ' padded so the VISIBLE length (ANSI codes excluded) is width+2,
-            matching TABLE_SEP's '-' * (width+2) segments exactly. Truncates as a
-            safety net so a too-long value can never push the column (and every
-            column after it) out of alignment."""
-            s = str(val)
-            vis = len(strip(s))
-            if vis > width:
-                plain = strip(s)
-                s = (plain[:max(1, width - 1)] + '.') if width >= 1 else ''
-                vis = len(s)
-            return f" {s}{' ' * max(0, width - vis)} "
+        def build_layout(target_w):
+            """Derive column widths + row-building helpers for one frame from
+            a target total width. For N pipe-bordered columns, total width =
+            sum(width) + 3*N + 1, so the content budget to split across
+            columns is target - (3*N + 1)."""
+            N = 5
+            budget = max(20, target_w - (3 * N + 1))
+            no_w, user_w, status_w = 2, 7, 6
+            remaining = max(8, budget - no_w - user_w - status_w)
+            pkg_w  = max(4, remaining * 2 // 5)
+            game_w = max(4, remaining - pkg_w)
+            # Short header labels so they never overflow a narrow column on their own.
+            cols = [("No", no_w), ("User", user_w), ("Pkg", pkg_w), ("Stat", status_w), ("Game", game_w)]
+            total_w = sum(w + 3 for _, w in cols) + 1  # " val " + trailing "|" per col, + leading "|"
 
-        def pipe_row(cells_and_widths):
-            return "|" + "|".join(cell(v, w) for v, w in cells_and_widths) + "|"
+            def cell(val, width):
+                """' val ' padded so the VISIBLE length (ANSI codes excluded) is
+                width+2, matching the separator's '-' * (width+2) segments
+                exactly. Truncates as a safety net so a too-long value can
+                never push the column (and every column after it) out of
+                alignment."""
+                s = str(val)
+                vis = len(strip(s))
+                if vis > width:
+                    plain = strip(s)
+                    s = (plain[:max(1, width - 1)] + '.') if width >= 1 else ''
+                    vis = len(s)
+                return f" {s}{' ' * max(0, width - vis)} "
 
-        def table_row(values):
-            return pipe_row(zip(values, (w for _, w in COLS)))
+            def pipe_row(cells_and_widths):
+                return "|" + "|".join(cell(v, w) for v, w in cells_and_widths) + "|"
 
-        SEP = "-" * TOTAL_W
-        TABLE_SEP = "|" + "|".join("-" * (w + 2) for _, w in COLS) + "|"
+            def table_row(values):
+                return pipe_row(zip(values, (w for _, w in cols)))
 
-        # Two stat columns sized to sum to TOTAL_W using the same pipe_row math:
-        # for N cells, overhead is 3*N+1 (each cell = width+2 chars, plus N+1 pipes).
-        stat_w = TOTAL_W - (3 * 2 + 1)
-        cpu_w  = stat_w // 2
-        ram_w  = stat_w - cpu_w
+            sep = "-" * total_w
+            table_sep = "|" + "|".join("-" * (w + 2) for _, w in cols) + "|"
+
+            # Two stat columns sized to sum to total_w: for N cells, overhead
+            # is 3*N+1 (each cell is width+2 chars, plus N+1 pipes).
+            stat_w = total_w - (3 * 2 + 1)
+            cpu_w  = stat_w // 2
+            ram_w  = stat_w - cpu_w
+
+            return cols, total_w, cell, pipe_row, table_row, sep, table_sep, cpu_w, ram_w
 
         set_landscape_orientation()
         time.sleep(0.5)
@@ -761,6 +780,9 @@ class TerminalRejoinLoop:
         try:
             while self.running:
                 clear_terminal_screen()
+
+                target_w = detect_width(cfg.get('dashboard_width', 40))
+                COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
@@ -816,12 +838,12 @@ class TerminalRejoinLoop:
                 print(f"{BOLD}[Enter] Main Menu{RESET}")
 
                 if os.name == 'posix':
-                    rlist, _, _ = select.select([sys.stdin], [], [], 2.0)
+                    rlist, _, _ = select.select([sys.stdin], [], [], 5.0)
                     if rlist:
                         sys.stdin.readline()
                         break
                 else:
-                    time.sleep(2.0)
+                    time.sleep(5.0)
 
         except (KeyboardInterrupt, Exception):
             pass
