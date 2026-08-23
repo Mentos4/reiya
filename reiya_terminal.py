@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.9-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:18:52 UTC"
+BUILD_VERSION = "v6.8.0-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:25:20 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -690,11 +690,17 @@ class TerminalRejoinLoop:
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
-        """Live-updating terminal dashboard. Fixed compact layout, safe for narrow terminals."""
+        """Live-updating terminal dashboard. Fixed pipe-bordered table layout —
+        one setting per line and one cell per column, so nothing depends on
+        packing two colored strings onto a shared line (that packing was the
+        source of the earlier misalignment). Column widths are fixed constants,
+        never probed from the terminal, so the layout renders identically
+        regardless of device/resolution/orientation."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
         CYAN   = "\033[96m"
+        BLUE   = "\033[94m"
         BOLD   = "\033[1m"
         RESET  = "\033[0m"
 
@@ -702,14 +708,33 @@ class TerminalRejoinLoop:
         if not pkgs:
             pkgs = get_roblox_packages()
 
-        gname = cfg.get('game_name') or (f"Place:{cfg.get('game_id')}" if cfg.get('game_id') else 'No Game Set')
+        def strip(s):
+            return re.sub(r'\033\[[0-9;]*m', '', s)
 
-        # Fixed layout width — deliberately NOT probed from the terminal (tput/stty
-        # reports the wrong size around screen rotation and varies across devices,
-        # which was the cause of the recurring wrap/misalignment glitches). A
-        # constant width renders identically everywhere; only very narrow terminals
-        # will soft-wrap it, which is a display limit, not a layout bug.
-        W = 48
+        # ── Fixed table columns (label, width) — tune these constants only. ──
+        COLS = [("No", 3), ("Username", 14), ("Package", 14), ("Status", 10), ("Game", 22)]
+        TOTAL_W = sum(w + 3 for _, w in COLS) + 1  # " val " + trailing "|" per col, + leading "|"
+
+        def cell(val, width):
+            """' val ' padded so the VISIBLE length (ANSI codes excluded) is width+2,
+            matching TABLE_SEP's '-' * (width+2) segments exactly."""
+            vis = len(strip(str(val)))
+            return f" {val}{' ' * max(0, width - vis)} "
+
+        def pipe_row(cells_and_widths):
+            return "|" + "|".join(cell(v, w) for v, w in cells_and_widths) + "|"
+
+        def table_row(values):
+            return pipe_row(zip(values, (w for _, w in COLS)))
+
+        SEP = "-" * TOTAL_W
+        TABLE_SEP = "|" + "|".join("-" * (w + 2) for _, w in COLS) + "|"
+
+        # Two stat columns sized to sum to TOTAL_W using the same pipe_row math:
+        # for N cells, overhead is 3*N+1 (each cell = width+2 chars, plus N+1 pipes).
+        stat_w = TOTAL_W - (3 * 2 + 1)
+        cpu_w  = stat_w // 2
+        ram_w  = stat_w - cpu_w
 
         set_landscape_orientation()
         time.sleep(0.5)
@@ -718,63 +743,35 @@ class TerminalRejoinLoop:
             while self.running:
                 clear_terminal_screen()
 
-                SEP = '-' * W
-
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
                 h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
+                game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
 
-                def strip(s):
-                    return re.sub(r'\033\[[0-9;]*m', '', s)
-
-                def rpad(colored, target_vis_len):
-                    """Pad a colored string so its visible width = target_vis_len."""
-                    vis = len(strip(colored))
-                    return colored + ' ' * max(0, target_vis_len - vis)
-
                 # ── Header ────────────────────────────────────────
-                title = "REI  REJOIN"
-                pad   = max(0, (W - len(title)) // 2)
-                print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
-                print(f"{BOLD}{CYAN}{' ' * pad}{title}{RESET}")
-                print(f"{BOLD}{CYAN}{'=' * W}{RESET}")
-                # Info line — truncate to W
-                info = f" By seisen_ | discord.gg/5G3cStpbcx"
-                print(info[:W])
-                print(SEP)
-
-                # ── Settings (2 per row, half-width each) ─────────
-                half = W // 2
-                l1 = f"WEBHOOK: {w_st}"
-                r1 = f"SORT: {s_st}"
-                l2 = f"HOME: {h_st}"
-                r2 = f"CACHE: {c_st}"
-                print(rpad(l1, half) + r1)
-                print(rpad(l2, half) + r2)
+                title = "REI REJOIN"
+                pad = max(0, (TOTAL_W - len(f">>> {title} <<<")) // 2)
+                print(f"{BOLD}{CYAN}{' ' * pad}>>> {title} <<<{RESET}")
+                print(f"{BLUE}Discord: discord.gg/5G3cStpbcx{RESET}")
+                print(f"{BLUE}By seisen_{RESET}")
+                print(f"{CYAN}GAME MODE: {game_mode}{RESET}")
+                print(f"WEBHOOK: {w_st}")
+                print(f"AUTO SORT: {s_st}")
+                print(f"HOME REJOIN: {h_st}")
+                print(f"CLEAR CACHE: {c_st}")
                 print(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                stat_line = f" CPU:{cpu}%  RAM:{used_ram:.1f}/{total_ram:.1f}GB"
-                print(stat_line[:W])
+                print(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {used_ram:.2f} / {total_ram:.2f} GB", ram_w)]))
                 print(SEP)
 
                 # ── Table ──────────────────────────────────────────
-                # Fixed column visible widths; adjusted for W
-                cn = 2                          # No
-                cu = min(9,  max(5, W//6))      # User
-                cp = min(11, max(7, W//5))      # Package
-                cs = min(9,  max(6, W//6))      # Status
-                cg = max(4, W - cn - cu - cp - cs - 4)  # Game (4 pipes)
-
-                gname_t = gname[:cg] if len(gname) <= cg else gname[:cg-2] + '..'
-
-                hdr = f"{'No':<{cn}}|{'User':<{cu}}|{'Package':<{cp}}|{'Status':<{cs}}|{'Game'}"
-                print(f"{BOLD}{hdr[:W]}{RESET}")
-                print(SEP)
+                print(f"{BOLD}{table_row([label for label, _ in COLS])}{RESET}")
+                print(TABLE_SEP)
 
                 statuses = self.get_status()
                 for idx, p in enumerate(pkgs, 1):
@@ -786,15 +783,15 @@ class TerminalRejoinLoop:
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
                     elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
-                    else:                                        st_c = st[:cs]
+                    else:                                        st_c = st
 
-                    pkg_t = p[:cp] if len(p) <= cp else p[:cp-1] + '.'
+                    pkg_w = COLS[2][1]
+                    pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
+                    game_w = COLS[4][1]
                     pkg_gname = _resolve_package_game_name(p, cfg)
-                    gname_t = pkg_gname[:cg] if len(pkg_gname) <= cg else pkg_gname[:cg-2] + '..'
+                    gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
 
-                    row = (f"{idx:<{cn}}|{uname:<{cu}}|{pkg_t:<{cp}}"
-                           f"|{rpad(st_c, cs)}|{gname_t}")
-                    print(row)
+                    print(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
                 print(SEP)
                 print(f"{BOLD}[Enter] Main Menu{RESET}")

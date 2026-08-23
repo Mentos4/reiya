@@ -36,10 +36,10 @@ rm -f ~/reiya_terminal.py && curl -sL "https://raw.githubusercontent.com/Mentos4
 - Uses `am start -f 0x10000000` (`FLAG_ACTIVITY_NEW_TASK`).
 - Do NOT use `0x14000000` (`CLEAR_TASK`) as it forces process termination on some Android builds.
 
-### 4. Terminal Dashboard UI (`render_live_dashboard`) (~L652)
-- `W` is a **fixed constant (48)**, deliberately NOT probed via `tput`/`stty`/`shutil.get_terminal_size()`. Those reported the wrong width around screen rotation and varied by device, which caused recurring wrap/misalignment glitches (a line printed exactly `cols`-wide defers its wrap, sticking the next print's first character onto the same row). Do NOT reintroduce dynamic width detection here — if the layout needs to be wider/narrower, change the constant, don't probe for it.
-- Header, settings (2 per line), stats, and table must fit within `W` columns (minimum 36).
-- Use `rpad(colored_str, visible_len)` helper for ANSI-escaped string alignment.
+### 4. Terminal Dashboard UI (`render_live_dashboard`) (~L692)
+- Pipe-bordered table layout (`| col | col |`), one setting per line — NOT two colored strings packed onto one shared line. The old half-width-per-line packing (`rpad` + string concatenation) was fragile with ANSI codes and was the source of recurring misalignment; don't reintroduce it.
+- `COLS = [(label, width), ...]` are **fixed constants** — column widths and `TOTAL_W` are never probed via `tput`/`stty`/`shutil.get_terminal_size()`. Terminal-size detection reported the wrong width around screen rotation and varied by device, causing wrap glitches (a line printed exactly `cols`-wide defers its wrap, sticking the next print's first character onto the same row). If the layout needs to be wider/narrower, edit the `COLS` constants — don't probe for size.
+- `cell(val, width)` pads to `width+2` visible chars (ANSI codes excluded via `strip()`) to exactly match `TABLE_SEP`'s `'-' * (width+2)` segments. `pipe_row(cells_and_widths)` composes one bordered row from `(value, width)` pairs — for N cells the total overhead is `3*N+1` chars (each cell is `width+2`, plus `N+1` pipes). Keep any new bordered row (e.g. the CPU/RAM stats line) consistent with this math or the pipes will drift out of alignment with the table below it.
 
 ---
 
