@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.0-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:25:20 UTC"
+BUILD_VERSION = "v6.8.1-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:30:14 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -77,6 +77,7 @@ DEFAULT_CONFIG = {
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
     'home_rejoin_enabled': True,
+    'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
 # Global config state
@@ -693,9 +694,10 @@ class TerminalRejoinLoop:
         """Live-updating terminal dashboard. Fixed pipe-bordered table layout —
         one setting per line and one cell per column, so nothing depends on
         packing two colored strings onto a shared line (that packing was the
-        source of the earlier misalignment). Column widths are fixed constants,
-        never probed from the terminal, so the layout renders identically
-        regardless of device/resolution/orientation."""
+        source of the earlier misalignment). Column widths are derived from
+        cfg['dashboard_width'] (Option 6.4) rather than probed from the
+        terminal, so the layout is exactly as wide as the user says their
+        device can show — no detection, no surprises on rotation."""
         GREEN  = "\033[92m"
         RED    = "\033[91m"
         YELLOW = "\033[93m"
@@ -711,15 +713,32 @@ class TerminalRejoinLoop:
         def strip(s):
             return re.sub(r'\033\[[0-9;]*m', '', s)
 
-        # ── Fixed table columns (label, width) — tune these constants only. ──
-        COLS = [("No", 3), ("Username", 14), ("Package", 14), ("Status", 10), ("Game", 22)]
+        # ── Table columns scaled from cfg['dashboard_width'] (user-set, Option 6.4) ──
+        # For N pipe-bordered columns, total width = sum(width) + 3*N + 1, so the
+        # content budget available to split across columns is target - (3*N + 1).
+        target_w = max(30, int(cfg.get('dashboard_width', 40) or 40))
+        N = 5
+        budget = max(20, target_w - (3 * N + 1))
+        no_w, user_w, status_w = 2, 7, 6
+        remaining = max(8, budget - no_w - user_w - status_w)
+        pkg_w  = max(4, remaining * 2 // 5)
+        game_w = max(4, remaining - pkg_w)
+        # Short header labels so they never overflow a narrow column on their own.
+        COLS = [("No", no_w), ("User", user_w), ("Pkg", pkg_w), ("Stat", status_w), ("Game", game_w)]
         TOTAL_W = sum(w + 3 for _, w in COLS) + 1  # " val " + trailing "|" per col, + leading "|"
 
         def cell(val, width):
             """' val ' padded so the VISIBLE length (ANSI codes excluded) is width+2,
-            matching TABLE_SEP's '-' * (width+2) segments exactly."""
-            vis = len(strip(str(val)))
-            return f" {val}{' ' * max(0, width - vis)} "
+            matching TABLE_SEP's '-' * (width+2) segments exactly. Truncates as a
+            safety net so a too-long value can never push the column (and every
+            column after it) out of alignment."""
+            s = str(val)
+            vis = len(strip(s))
+            if vis > width:
+                plain = strip(s)
+                s = (plain[:max(1, width - 1)] + '.') if width >= 1 else ''
+                vis = len(s)
+            return f" {s}{' ' * max(0, width - vis)} "
 
         def pipe_row(cells_and_widths):
             return "|" + "|".join(cell(v, w) for v, w in cells_and_widths) + "|"
@@ -1153,9 +1172,11 @@ def interactive_menu():
             print("\n--- [ AUTO-SORT / WINDOW TILING LAYOUT ] ---")
             print(f"Current Auto-Sort Enabled: {config.get('auto_sort', True)}")
             print(f"Current Layout Mode: {config.get('window_mode', 'left_stack')}")
+            print(f"Current Dashboard Table Width: {config.get('dashboard_width', 40)} columns")
             print("\n1. Enable/Disable Auto-Sort")
             print("2. Set Mode: Left Vertical Stack (Matching side-by-side layout)")
             print("3. Set Mode: Grid Layout (Even N x M grid across screen)")
+            print("4. Set Dashboard Table Width (fix the live rejoin dashboard's layout)")
             lch = prompt("Select option: ").strip()
             if lch == '1':
                 config['auto_sort'] = not config.get('auto_sort', True)
@@ -1166,6 +1187,18 @@ def interactive_menu():
             elif lch == '3':
                 config['window_mode'] = 'grid'
                 print("[+] Window mode set to: Grid Layout")
+            elif lch == '4':
+                print("\nThe live dashboard (Option 8) draws a fixed-width table. If your")
+                print("device rotates or the terminal is narrower than the table, it will")
+                print("wrap and look broken. Run 'stty size' in Termux (second number = columns)")
+                print("to find your real width, then set a table width a few columns")
+                print("narrower than that (e.g. columns=50 -> try 44).")
+                wch = prompt(f"Dashboard table width in columns [{config.get('dashboard_width', 40)}]: ").strip()
+                if wch.isdigit() and int(wch) >= 30:
+                    config['dashboard_width'] = int(wch)
+                    print(f"[+] Dashboard table width set to: {config['dashboard_width']} columns")
+                elif wch:
+                    print("[!] Ignored — enter a number of 30 or higher.")
             save_config()
             prompt("\nPress Enter to return to menu...")
 
