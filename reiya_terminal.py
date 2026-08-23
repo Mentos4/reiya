@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.6-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:02:51 UTC"
+BUILD_VERSION = "v6.7.7-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:11:42 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -128,20 +128,7 @@ def clear_terminal_screen():
     except Exception:
         print("\033[H\033[2J\033[3J", end="")
 
-def flush_input_buffer():
-    """Discard any stray/buffered keystrokes before a prompt so an accidental
-    double-tap or auto-repeated key on-screen (common on Termux/Android
-    keyboards) can't silently answer the NEXT input() call for the user."""
-    try:
-        if os.name == 'posix':
-            import termios
-            termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except Exception:
-        pass
-
 def prompt(text):
-    """input() wrapper that drains any queued stray input first."""
-    flush_input_buffer()
     return input(text)
 
 def get_installed_packages():
@@ -1078,24 +1065,26 @@ def interactive_menu():
                         print("  C. Custom Place ID or Private Server Link")
                         print("  S. Skip (keep current setting)")
 
-                        gchoice = prompt(f"Choice for {pkg}: ").strip()
-                        if gchoice.upper() == 'C':
-                            gid = prompt("  Enter Place ID / Link: ").strip()
-                            if gid:
+                        while True:
+                            gchoice = prompt(f"Choice for {pkg}: ").strip()
+                            if gchoice.upper() == 'C':
+                                gid = prompt("  Enter Place ID / Link: ").strip()
+                                if not gid:
+                                    print("  [!] No Place ID / Link entered. Try again.")
+                                    continue
                                 config['package_games'][pkg] = gid
                                 gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
                                 config['package_game_names'][pkg] = gname
-                        elif gchoice.upper() == 'S' or not gchoice:
-                            continue
-                        else:
-                            try:
-                                p_idx_sel = int(gchoice) - 1
-                                if 0 <= p_idx_sel < len(PRESET_GAMES):
-                                    gname, gid = PRESET_GAMES[p_idx_sel]
-                                    config['package_games'][pkg] = gid
-                                    config['package_game_names'][pkg] = gname
-                            except ValueError:
-                                pass
+                                break
+                            elif gchoice.upper() == 'S' or not gchoice:
+                                break
+                            elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
+                                gname, gid = PRESET_GAMES[int(gchoice) - 1]
+                                config['package_games'][pkg] = gid
+                                config['package_game_names'][pkg] = gname
+                                break
+                            else:
+                                print(f"  [!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)}, C, or S.")
                 save_config()
                 print("\n[+] Per-Package Game Configurations Saved:")
                 for pkg in (config.get('selected_packages') or get_roblox_packages()):
@@ -1107,19 +1096,21 @@ def interactive_menu():
                 for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
                     print(f"  {idx}. {gname} (ID: {gid})")
                 print("  C. Custom Place ID or Private Server Link")
-                gchoice = prompt("\nChoice: ").strip()
-                if gchoice.upper() == 'C':
-                    gid = prompt("Enter Place ID / Link: ").strip()
-                    if gid:
+                while True:
+                    gchoice = prompt("\nChoice: ").strip()
+                    if gchoice.upper() == 'C':
+                        gid = prompt("Enter Place ID / Link: ").strip()
+                        if not gid:
+                            print("[!] No Place ID / Link entered. Try again.")
+                            continue
                         config['game_id'] = gid
                         config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
-                else:
-                    try:
-                        idx = int(gchoice) - 1
-                        if 0 <= idx < len(PRESET_GAMES):
-                            config['game_name'], config['game_id'] = PRESET_GAMES[idx]
-                    except ValueError:
-                        pass
+                        break
+                    elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
+                        config['game_name'], config['game_id'] = PRESET_GAMES[int(gchoice) - 1]
+                        break
+                    else:
+                        print(f"[!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)} or C.")
                 save_config()
                 print(f"\n[+] Active Game ID / Link Set for ALL packages: {config.get('game_name')} ({config.get('game_id')})")
             prompt("\nPress Enter to return to menu...")
