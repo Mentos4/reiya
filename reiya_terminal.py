@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.7.7-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:11:42 UTC"
+BUILD_VERSION = "v6.7.8-REI-REJOIN"
+BUILD_TIME = "2026-08-23 19:17:44 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -980,139 +980,149 @@ def interactive_menu():
             show_status()
             prompt("\nPress Enter to return to menu...")
         elif choice == '2':
-            roblox_pkgs = get_roblox_packages()
+            while True:
+                roblox_pkgs = get_roblox_packages()
 
-            print(f"\n--- [ DETECTED ROBLOX & CLONE APPS ({len(roblox_pkgs)}) ] ---")
-            if not roblox_pkgs:
-                print("  [!] No standard Roblox/Executor packages detected.")
-                print("  -> Use option 'M' below to type a custom package name!")
-            else:
-                for idx, p in enumerate(roblox_pkgs, 1):
-                    sel = "✓ SELECTED" if p in config.get('selected_packages', []) else "  [   ]"
-                    print(f"  {idx}. {p:<35} {sel}")
+                print(f"\n--- [ DETECTED ROBLOX & CLONE APPS ({len(roblox_pkgs)}) ] ---")
+                if not roblox_pkgs:
+                    print("  [!] No standard Roblox/Executor packages detected.")
+                    print("  -> Use option 'M' below to type a custom package name!")
+                else:
+                    for idx, p in enumerate(roblox_pkgs, 1):
+                        sel = "✓ SELECTED" if p in config.get('selected_packages', []) else "  [   ]"
+                        print(f"  {idx}. {p:<35} {sel}")
 
-            print("\nSelection Options:")
-            print("  - Enter numbers (e.g. 1,2) to select multiple packages")
-            print("  - Type 'ALL' to select ALL detected Roblox packages")
-            print("  - Type 'CLEAR' to deselect all packages")
-            print("  - Type 'M' to enter custom package name manually")
-            print("  - Press Enter to keep current selection")
-            indices = prompt("\nChoice: ").strip()
+                print("\nSelection Options:")
+                print("  - Enter numbers (e.g. 1,2) to ADD packages to your selection")
+                print("  - Type 'ALL' to select ALL detected Roblox packages")
+                print("  - Type 'CLEAR' to deselect all packages")
+                print("  - Type 'M' to enter custom package name manually")
+                print("  - Press Enter to keep current selection")
+                indices = prompt("\nChoice: ").strip()
 
-            if indices.upper() == 'ALL':
-                config['selected_packages'] = list(roblox_pkgs)
-                save_config()
-            elif indices.upper() == 'CLEAR':
-                config['selected_packages'] = []
-                save_config()
-            elif indices.upper() == 'M':
-                custom_pkg = prompt("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
-                if custom_pkg:
+                if indices.upper() == 'ALL':
+                    config['selected_packages'] = list(roblox_pkgs)
+                    save_config()
+                elif indices.upper() == 'CLEAR':
+                    config['selected_packages'] = []
+                    save_config()
+                elif indices.upper() == 'M':
+                    custom_pkg = prompt("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
+                    if custom_pkg:
+                        sel_set = set(config.get('selected_packages', []))
+                        sel_set.add(custom_pkg)
+                        config['selected_packages'] = list(sel_set)
+                        save_config()
+                elif indices:
                     sel_set = set(config.get('selected_packages', []))
-                    sel_set.add(custom_pkg)
+                    for item in indices.split(','):
+                        item = item.strip()
+                        if '.' in item:
+                            sel_set.add(item)
+                        elif item.isdigit():
+                            i = int(item) - 1
+                            if 0 <= i < len(roblox_pkgs):
+                                sel_set.add(roblox_pkgs[i])
                     config['selected_packages'] = list(sel_set)
                     save_config()
-            elif indices:
-                new_sel = set()
-                for item in indices.split(','):
-                    item = item.strip()
-                    if '.' in item:
-                        new_sel.add(item)
-                    elif item.isdigit():
-                        i = int(item) - 1
-                        if 0 <= i < len(roblox_pkgs):
-                            new_sel.add(roblox_pkgs[i])
-                config['selected_packages'] = list(new_sel)
-                save_config()
 
-            print("\n--- [ CURRENT SELECTED PACKAGES ] ---")
-            if config.get('selected_packages'):
-                for p in config.get('selected_packages'):
-                    print(f"  ✓ {p}")
-            else:
-                print("  (None selected)")
+                print("\n--- [ CURRENT SELECTED PACKAGES ] ---")
+                if config.get('selected_packages'):
+                    for p in config.get('selected_packages'):
+                        print(f"  ✓ {p}")
+                else:
+                    print("  (None selected)")
+
+                again = prompt("\nAdd/change another package now? (y/n, default n): ").strip().lower()
+                if again != 'y':
+                    break
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '3':
-            print("\n--- [ CONFIGURE GAME SETUP ] ---")
-            print(f"Current Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
-            print(f"Global Game Setting: {config.get('game_name', 'None')} ({config.get('game_id', 'N/A')})")
-            print("\nSetup Options:")
-            print("  1. Apply Same Game to ALL Packages")
-            print("  2. Assign Custom Game PER Package (Roblox 1 -> Game A, Roblox 2 -> Game B)")
-            gmode = prompt("\nSelect Mode (1 or 2, default 1): ").strip()
+            while True:
+                print("\n--- [ CONFIGURE GAME SETUP ] ---")
+                print(f"Current Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
+                print(f"Global Game Setting: {config.get('game_name', 'None')} ({config.get('game_id', 'N/A')})")
+                print("\nSetup Options:")
+                print("  1. Apply Same Game to ALL Packages")
+                print("  2. Assign Custom Game PER Package (Roblox 1 -> Game A, Roblox 2 -> Game B)")
+                gmode = prompt("\nSelect Mode (1 or 2, default 1): ").strip()
 
-            if gmode == '2':
-                config['game_method'] = 'each'
-                pkgs = config.get('selected_packages', [])
-                if not pkgs:
-                    pkgs = get_roblox_packages()
-                if not pkgs:
-                    print("  [!] No Roblox packages detected or selected. Please select packages in Option 2 first!")
-                else:
-                    if 'package_games' not in config: config['package_games'] = {}
-                    if 'package_game_names' not in config: config['package_game_names'] = {}
-
-                    print(f"\n[+] Configuring individual games for {len(pkgs)} package(s):")
-                    for p_idx, pkg in enumerate(pkgs, 1):
-                        curr_game = _resolve_package_game_name(pkg, config)
-                        print(f"\n--------------------------------------------------")
-                        print(f"[{p_idx}/{len(pkgs)}] Package: {pkg}")
-                        print(f"Current Game: {curr_game}")
-                        print("Select Game for this package:")
-                        for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
-                            print(f"  {idx}. {gname} (ID: {gid})")
-                        print("  C. Custom Place ID or Private Server Link")
-                        print("  S. Skip (keep current setting)")
-
-                        while True:
-                            gchoice = prompt(f"Choice for {pkg}: ").strip()
-                            if gchoice.upper() == 'C':
-                                gid = prompt("  Enter Place ID / Link: ").strip()
-                                if not gid:
-                                    print("  [!] No Place ID / Link entered. Try again.")
-                                    continue
-                                config['package_games'][pkg] = gid
-                                gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
-                                config['package_game_names'][pkg] = gname
-                                break
-                            elif gchoice.upper() == 'S' or not gchoice:
-                                break
-                            elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
-                                gname, gid = PRESET_GAMES[int(gchoice) - 1]
-                                config['package_games'][pkg] = gid
-                                config['package_game_names'][pkg] = gname
-                                break
-                            else:
-                                print(f"  [!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)}, C, or S.")
-                save_config()
-                print("\n[+] Per-Package Game Configurations Saved:")
-                for pkg in (config.get('selected_packages') or get_roblox_packages()):
-                    print(f"  ✓ {pkg:<30} -> {_resolve_package_game_name(pkg, config)}")
-
-            else:
-                config['game_method'] = 'all'
-                print("\nPreset Games (Applies to ALL packages):")
-                for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
-                    print(f"  {idx}. {gname} (ID: {gid})")
-                print("  C. Custom Place ID or Private Server Link")
-                while True:
-                    gchoice = prompt("\nChoice: ").strip()
-                    if gchoice.upper() == 'C':
-                        gid = prompt("Enter Place ID / Link: ").strip()
-                        if not gid:
-                            print("[!] No Place ID / Link entered. Try again.")
-                            continue
-                        config['game_id'] = gid
-                        config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
-                        break
-                    elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
-                        config['game_name'], config['game_id'] = PRESET_GAMES[int(gchoice) - 1]
-                        break
+                if gmode == '2':
+                    config['game_method'] = 'each'
+                    pkgs = config.get('selected_packages', [])
+                    if not pkgs:
+                        pkgs = get_roblox_packages()
+                    if not pkgs:
+                        print("  [!] No Roblox packages detected or selected. Please select packages in Option 2 first!")
                     else:
-                        print(f"[!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)} or C.")
-                save_config()
-                print(f"\n[+] Active Game ID / Link Set for ALL packages: {config.get('game_name')} ({config.get('game_id')})")
+                        if 'package_games' not in config: config['package_games'] = {}
+                        if 'package_game_names' not in config: config['package_game_names'] = {}
+
+                        print(f"\n[+] Configuring individual games for {len(pkgs)} package(s):")
+                        for p_idx, pkg in enumerate(pkgs, 1):
+                            curr_game = _resolve_package_game_name(pkg, config)
+                            print(f"\n--------------------------------------------------")
+                            print(f"[{p_idx}/{len(pkgs)}] Package: {pkg}")
+                            print(f"Current Game: {curr_game}")
+                            print("Select Game for this package:")
+                            for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
+                                print(f"  {idx}. {gname} (ID: {gid})")
+                            print("  C. Custom Place ID or Private Server Link")
+                            print("  S. Skip (keep current setting)")
+
+                            while True:
+                                gchoice = prompt(f"Choice for {pkg}: ").strip()
+                                if gchoice.upper() == 'C':
+                                    gid = prompt("  Enter Place ID / Link: ").strip()
+                                    if not gid:
+                                        print("  [!] No Place ID / Link entered. Try again.")
+                                        continue
+                                    config['package_games'][pkg] = gid
+                                    gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
+                                    config['package_game_names'][pkg] = gname
+                                    break
+                                elif gchoice.upper() == 'S' or not gchoice:
+                                    break
+                                elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
+                                    gname, gid = PRESET_GAMES[int(gchoice) - 1]
+                                    config['package_games'][pkg] = gid
+                                    config['package_game_names'][pkg] = gname
+                                    break
+                                else:
+                                    print(f"  [!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)}, C, or S.")
+                    save_config()
+                    print("\n[+] Per-Package Game Configurations Saved:")
+                    for pkg in (config.get('selected_packages') or get_roblox_packages()):
+                        print(f"  ✓ {pkg:<30} -> {_resolve_package_game_name(pkg, config)}")
+
+                else:
+                    config['game_method'] = 'all'
+                    print("\nPreset Games (Applies to ALL packages):")
+                    for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
+                        print(f"  {idx}. {gname} (ID: {gid})")
+                    print("  C. Custom Place ID or Private Server Link")
+                    while True:
+                        gchoice = prompt("\nChoice: ").strip()
+                        if gchoice.upper() == 'C':
+                            gid = prompt("Enter Place ID / Link: ").strip()
+                            if not gid:
+                                print("[!] No Place ID / Link entered. Try again.")
+                                continue
+                            config['game_id'] = gid
+                            config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
+                            break
+                        elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
+                            config['game_name'], config['game_id'] = PRESET_GAMES[int(gchoice) - 1]
+                            break
+                        else:
+                            print(f"[!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)} or C.")
+                    save_config()
+                    print(f"\n[+] Active Game ID / Link Set for ALL packages: {config.get('game_name')} ({config.get('game_id')})")
+
+                again = prompt("\nConfigure another game/package now? (y/n, default n): ").strip().lower()
+                if again != 'y':
+                    break
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '4':
