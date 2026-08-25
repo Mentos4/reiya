@@ -634,8 +634,16 @@ class TerminalRejoinLoop:
         self.webhook_thread = None
 
     def log(self, msg):
+        """Writes explicit \\r\\n like render_live_dashboard's out() — this
+        runs on the background _loop thread, which keeps emitting log lines
+        after the user leaves the dashboard (Option 8 only stops the display,
+        not the engine — Option 9 does that). A bare print()'s '\\n' doesn't
+        always get translated to CRLF on Termux ptys, so without this the
+        background thread's output staircases and corrupts every menu screen
+        drawn afterward, making the CLI look frozen/unresponsive."""
         ts = time.strftime('%H:%M:%S')
-        print(f"[{ts}] {msg}")
+        sys.stdout.write(f"[{ts}] {msg}\r\n")
+        sys.stdout.flush()
 
     def set_status(self, pkg, status_str):
         self.status[pkg] = {'status': status_str, 'time': time.time()}
@@ -1258,6 +1266,9 @@ def interactive_menu():
         elif choice == '8':
             rejoin_engine.start(config)
             rejoin_engine.render_live_dashboard(config)
+            if rejoin_engine.running:
+                print("\n[i] Auto Rejoin is still running in the background.")
+                print("    Use Option 9 to stop it, or Option 8 to reopen the dashboard.")
 
         elif choice == '9':
             rejoin_engine.stop()
