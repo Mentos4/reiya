@@ -33,7 +33,6 @@ import urllib.request
 import urllib.parse
 import mimetypes
 import select
-import signal
 
 # Script version & timestamp
 BUILD_VERSION = "v6.8.3-REI-REJOIN"
@@ -106,68 +105,24 @@ def save_config():
 # ==============================================================================
 
 def run_cmd(cmd, timeout=5):
-    """subprocess.run(..., timeout=N) only kills the immediate shell child on
-    timeout — 'su -c ...' and whatever it spawns (dumpsys/pidof/am) survive as
-    orphaned processes underneath it. The auto-rejoin loop calls commands like
-    this every few seconds, per package, for as long as the engine runs; any
-    timeout (a slow/hung su prompt, a busy device) leaked a whole process tree
-    instead of being cleaned up, and those orphans could pile up over a long
-    session.
-
-    IMPORTANT: this must put the child in a new PROCESS GROUP only — NOT a
-    new SESSION (start_new_session=True / setsid). setsid() detaches the
-    child from the controlling terminal, and some su implementations
-    (Magisk/SuperSU) rely on that terminal/session attachment to grant root.
-    Detaching it made su silently fail, which made dumpsys/pidof come back
-    empty, which made the rejoin loop think every package was stuck on the
-    Home Screen and force-stop + relaunch Roblox on EVERY poll cycle. Using
-    process_group=0 (Python 3.11+) gets a killable group without touching
-    the session; if that's unavailable we run ungrouped and just kill the
-    direct child on timeout, accepting the smaller orphan risk instead of
-    breaking su."""
-    posix = (os.name == 'posix')
-    grouped = False
+    """Thin subprocess.run(shell=True, timeout=N) wrapper, kept deliberately
+    simple. Two earlier attempts at making this "smarter" — start_new_session
+    (setsid) and then process_group=0 — each broke su in a different way on
+    real devices (setsid detached the controlling terminal/session that su
+    needs to grant root; process_group=0 then caused the dashboard to hang
+    before its first frame). Both were chasing a minor problem (orphaned
+    grandchild processes on the rare timeout) by risking a much worse one
+    (su silently failing, or the whole UI stalling). Plain subprocess.run is
+    what reliably worked before any of that, so that's what this stays as —
+    do not reintroduce process-group/session tricks here without testing
+    directly against a real su binary first."""
     try:
-        if posix:
-            try:
-                proc = subprocess.Popen(
-                    cmd, shell=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, process_group=0,
-                )
-                grouped = True
-            except TypeError:
-                proc = subprocess.Popen(
-                    cmd, shell=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True,
-                )
-        else:
-            proc = subprocess.Popen(
-                cmd, shell=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True,
-            )
-    except Exception:
-        return subprocess.CompletedProcess(cmd, -1, '', '')
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return subprocess.CompletedProcess(cmd, proc.returncode, stdout or '', stderr or '')
+        res = subprocess.run(
+            cmd, shell=True,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return res
     except subprocess.TimeoutExpired:
-        try:
-            if grouped:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                proc.kill()
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        try:
-            proc.communicate(timeout=2)
-        except Exception:
-            pass
         return subprocess.CompletedProcess(cmd, -1, '', '')
     except Exception:
         return subprocess.CompletedProcess(cmd, -1, '', '')
