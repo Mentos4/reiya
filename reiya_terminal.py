@@ -515,6 +515,48 @@ def clear_app_cache(package):
 
 _prev_idle = None
 _prev_total = None
+_proc_read_mode = {}   # path -> 'direct' | 'su' | 'unavailable', decided once per path
+_proc_su_cache = {}    # path -> (content, timestamp) — last successful su read
+
+SU_READ_MIN_INTERVAL = 20  # seconds between su re-reads of the same /proc path
+
+def _read_proc_file(path, timeout=2):
+    """Reads a /proc file, remembering which method actually works so we
+    don't keep re-trying a failing one. The dashboard calls this every ~5s
+    for as long as it's open — if a path needs su and su ALSO fails (or
+    isn't granted), retrying su every single frame forever was itself the
+    likely cause of the dashboard appearing to hang/not show up: repeated
+    su invocations can trigger root-manager prompts or delays that steal
+    focus from Termux. Once a path is confirmed 'unavailable' we stop
+    invoking su for it entirely instead of retrying forever, and even when
+    su DOES work we throttle re-invoking it to once every
+    SU_READ_MIN_INTERVAL seconds (reusing the last reading in between)
+    rather than shelling out to su on every single dashboard frame."""
+    mode = _proc_read_mode.get(path)
+
+    if mode != 'su':
+        try:
+            with open(path) as f:
+                content = f.read()
+            _proc_read_mode[path] = 'direct'
+            return content
+        except Exception:
+            pass
+
+    if mode != 'unavailable':
+        cached = _proc_su_cache.get(path)
+        if cached and (time.time() - cached[1]) < SU_READ_MIN_INTERVAL:
+            return cached[0]
+        res = run_cmd(f"su -c 'cat {path}'", timeout=timeout)
+        if res.stdout:
+            _proc_read_mode[path] = 'su'
+            _proc_su_cache[path] = (res.stdout, time.time())
+            return res.stdout
+        if cached:
+            return cached[0]
+
+    _proc_read_mode[path] = 'unavailable'
+    return None
 
 def get_cpu_usage():
     """Reads /proc/stat's aggregate 'cpu' line and diffs it against the
@@ -522,20 +564,13 @@ def get_cpu_usage():
     PermissionError on many Android 8+ devices — /proc/stat is restricted
     to root for non-privileged apps (Termux included) by SELinux/hidepid —
     which silently swallowed the exception and made CPU sit frozen at
-    0.0% forever. Falls back to reading it via su when the direct open
-    fails."""
+    0.0% forever."""
     global _prev_idle, _prev_total
     try:
-        line = None
-        try:
-            with open('/proc/stat') as f:
-                line = f.readline()
-        except Exception:
-            res = run_cmd("su -c 'cat /proc/stat'", timeout=3)
-            line = res.stdout.split('\n', 1)[0] if res.stdout else None
-
-        if not line:
+        content = _read_proc_file('/proc/stat')
+        if not content:
             return 0.0
+        line = content.split('\n', 1)[0]
 
         fields = line.split()
         idle = int(fields[4])
@@ -553,16 +588,12 @@ def get_cpu_usage():
         return 0.0
 
 def get_ram_usage():
-    """Same PermissionError trap as get_cpu_usage() — falls back to su if
-    /proc/meminfo can't be opened directly on this device."""
+    """Same PermissionError trap as get_cpu_usage() — falls back to su (once
+    per session, see _read_proc_file) if /proc/meminfo can't be opened
+    directly on this device."""
     try:
         meminfo = {}
-        try:
-            with open('/proc/meminfo') as f:
-                content = f.read()
-        except Exception:
-            res = run_cmd("su -c 'cat /proc/meminfo'", timeout=3)
-            content = res.stdout or ''
+        content = _read_proc_file('/proc/meminfo') or ''
 
         for line in content.split('\n'):
             parts = line.split()
