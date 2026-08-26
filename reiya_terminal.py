@@ -33,6 +33,7 @@ import urllib.request
 import urllib.parse
 import mimetypes
 import select
+import signal
 
 # Script version & timestamp
 BUILD_VERSION = "v6.8.3-REI-REJOIN"
@@ -104,6 +105,49 @@ def save_config():
 # 1. ORIENTATION, APP LAUNCHER, WINDOW TILING & PACKAGE MANAGEMENT
 # ==============================================================================
 
+def run_cmd(cmd, timeout=5):
+    """subprocess.run(..., timeout=N) only kills the immediate shell child on
+    timeout — 'su -c ...' and whatever it spawns (dumpsys/pidof/am) survive as
+    orphaned processes underneath it. The auto-rejoin loop calls commands like
+    this every few seconds, per package, for as long as the engine runs; any
+    timeout (a slow/hung su prompt, a busy device) leaked a whole process tree
+    instead of being cleaned up. Over a long session those orphans pile up
+    until Termux hits its process/memory limit and gets killed outright —
+    this is the main suspect behind the auto-rejoin loop crashing the
+    terminal. Running each command in its own session (start_new_session)
+    lets us kill the WHOLE process group via os.killpg on timeout instead of
+    leaking it."""
+    posix = (os.name == 'posix')
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=posix,
+        )
+    except Exception:
+        return subprocess.CompletedProcess(cmd, -1, '', '')
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout or '', stderr or '')
+    except subprocess.TimeoutExpired:
+        try:
+            if posix:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            proc.communicate(timeout=2)
+        except Exception:
+            pass
+        return subprocess.CompletedProcess(cmd, -1, '', '')
+    except Exception:
+        return subprocess.CompletedProcess(cmd, -1, '', '')
+
 def set_landscape_orientation():
     """Force Android screen orientation to Landscape (Horizontal mode)."""
     cmds = [
@@ -115,7 +159,7 @@ def set_landscape_orientation():
     ]
     for c in cmds:
         try:
-            subprocess.run(c, shell=True, capture_output=True, timeout=2)
+            run_cmd(c, timeout=2)
         except Exception:
             pass
 
@@ -211,7 +255,7 @@ def is_app_running(package):
     """Check if the app process is alive. Only returns True if a real numeric PID is found."""
     for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
+            res = run_cmd(cmd, timeout=3)
             out = res.stdout.strip()
             # Must be non-empty AND all parts must be numeric (actual PIDs)
             if out and all(part.isdigit() for part in out.split()):
@@ -249,7 +293,7 @@ def get_activity_top_dump():
     Termux/VPhone devices."""
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
+            res = run_cmd(cmd, timeout=4)
             if res.stdout.strip():
                 return res.stdout
         except Exception:
@@ -302,7 +346,7 @@ def is_app_in_game(package, content=None):
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
     try:
-        res = subprocess.run('wm size', shell=True, capture_output=True, text=True, timeout=3)
+        res = run_cmd('wm size', timeout=3)
         match = re.search(r'(\d+)x(\d+)', res.stdout)
         if match:
             w, h = int(match.group(1)), int(match.group(2))
@@ -369,7 +413,7 @@ def launch_game(package, game_id, bounds=None, freeform=True):
 
     for cmd in intents:
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=6)
+            res = run_cmd(cmd, timeout=6)
             if res.returncode == 0 and "Error" not in res.stdout:
                 return True
         except Exception:
@@ -426,7 +470,7 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
     try:
-        subprocess.run(f"su -c 'am force-stop {package}'", shell=True, timeout=5)
+        run_cmd(f"su -c 'am force-stop {package}'", timeout=5)
         return True
     except Exception as e:
         print(f"[!] Force stop error: {e}")
@@ -435,7 +479,7 @@ def force_stop_app(package):
 def clear_app_cache(package):
     """Clear app data/cache using pm clear."""
     try:
-        subprocess.run(f"su -c 'pm clear {package}'", shell=True, timeout=10)
+        run_cmd(f"su -c 'pm clear {package}'", timeout=10)
         return True
     except Exception as e:
         print(f"[!] Clear cache error: {e}")
@@ -484,10 +528,7 @@ def get_ram_usage():
 
 def get_process_ram(package):
     try:
-        result = subprocess.run(
-            f"su -c 'dumpsys meminfo {package} -c'",
-            shell=True, capture_output=True, text=True, timeout=5
-        )
+        result = run_cmd(f"su -c 'dumpsys meminfo {package} -c'", timeout=5)
         for line in result.stdout.split('\n'):
             if 'TOTAL' in line:
                 parts = line.split(',')
@@ -499,10 +540,7 @@ def get_process_ram(package):
 
 def get_device_name():
     try:
-        result = subprocess.run(
-            'getprop ro.product.model',
-            shell=True, capture_output=True, text=True, timeout=3
-        )
+        result = run_cmd('getprop ro.product.model', timeout=3)
         return result.stdout.strip() or 'Unknown'
     except Exception:
         return 'Unknown'
@@ -515,7 +553,7 @@ def format_uptime(seconds):
 
 def take_screenshot(output_path='/sdcard/roblox_mgr_shot.png'):
     try:
-        subprocess.run(f"su -c 'screencap -p {output_path}'", shell=True, timeout=8)
+        run_cmd(f"su -c 'screencap -p {output_path}'", timeout=8)
         if os.path.exists(output_path):
             return output_path
     except Exception:
@@ -765,7 +803,7 @@ class TerminalRejoinLoop:
                 pass
             for cmd in ['stty size', 'tput cols']:
                 try:
-                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1)
+                    r = run_cmd(cmd, timeout=1)
                     parts = r.stdout.strip().split()
                     val = parts[-1] if parts else ''
                     if val.isdigit() and int(val) > 10:
@@ -923,55 +961,62 @@ class TerminalRejoinLoop:
         time.sleep(8)
 
         while self.running:
-            # Fetched once per cycle and reused for every package below —
-            # dumpsys activity top is system-wide and identical per package,
-            # so calling it per-package multiplied a heavy su+dumpsys call by
-            # the package count on every poll.
-            activity_dump = get_activity_top_dump()
+            try:
+                # Fetched once per cycle and reused for every package below —
+                # dumpsys activity top is system-wide and identical per package,
+                # so calling it per-package multiplied a heavy su+dumpsys call by
+                # the package count on every poll.
+                activity_dump = get_activity_top_dump()
 
-            for i, pkg in enumerate(packages):
-                if not self.running:
-                    break
+                for i, pkg in enumerate(packages):
+                    if not self.running:
+                        break
 
-                gid = self._get_game_id(pkg, cfg)
-                now = time.time()
+                    gid = self._get_game_id(pkg, cfg)
+                    now = time.time()
 
-                running = is_app_running(pkg)
+                    running = is_app_running(pkg)
 
-                if not running:
-                    # ★ PROCESS DEAD → REJOIN
-                    self.log(f"[{pkg}] Process dead → Rejoining")
-                    self.set_status(pkg, 'Rejoining')
-                    if auto_clear:
-                        clear_app_cache(pkg)
-                        time.sleep(1)
-                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                    self.last_launch[pkg] = now
-                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                    if not running:
+                        # ★ PROCESS DEAD → REJOIN
+                        self.log(f"[{pkg}] Process dead → Rejoining")
+                        self.set_status(pkg, 'Rejoining')
+                        if auto_clear:
+                            clear_app_cache(pkg)
+                            time.sleep(1)
+                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                        self.last_launch[pkg] = now
+                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
-                else:
-                    # ★ PROCESS ALIVE → check if in-game or on Home Screen
-                    in_game = is_app_in_game(pkg, content=activity_dump)
-                    if in_game:
-                        self.set_status(pkg, 'Ingame')
                     else:
-                        # NOT in-game — check if still within launch grace period (20s)
-                        time_since_launch = now - self.last_launch.get(pkg, 0)
-                        if time_since_launch < LAUNCH_GRACE:
-                            self.set_status(pkg, 'Launching')
+                        # ★ PROCESS ALIVE → check if in-game or on Home Screen
+                        in_game = is_app_in_game(pkg, content=activity_dump)
+                        if in_game:
+                            self.set_status(pkg, 'Ingame')
                         else:
-                            # HOME SCREEN detected (past 20s grace period)
-                            self.set_status(pkg, 'Home Page')
-                            if home_rejoin_enabled:
-                                self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
-                                self.set_status(pkg, 'Rejoining')
-                                force_stop_app(pkg)
-                                time.sleep(2)
-                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                self.last_launch[pkg] = time.time()
-                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            # NOT in-game — check if still within launch grace period (20s)
+                            time_since_launch = now - self.last_launch.get(pkg, 0)
+                            if time_since_launch < LAUNCH_GRACE:
+                                self.set_status(pkg, 'Launching')
                             else:
-                                self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
+                                # HOME SCREEN detected (past 20s grace period)
+                                self.set_status(pkg, 'Home Page')
+                                if home_rejoin_enabled:
+                                    self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
+                                    self.set_status(pkg, 'Rejoining')
+                                    force_stop_app(pkg)
+                                    time.sleep(2)
+                                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                                    self.last_launch[pkg] = time.time()
+                                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                                else:
+                                    self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
+            except Exception as e:
+                # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
+                # must not silently kill this daemon thread — that would
+                # leave self.running stuck True forever with no rejoin
+                # actually happening and no visible sign anything died.
+                self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
             time.sleep(check_interval)
 
