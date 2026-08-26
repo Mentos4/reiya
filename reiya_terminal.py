@@ -517,10 +517,27 @@ _prev_idle = None
 _prev_total = None
 
 def get_cpu_usage():
+    """Reads /proc/stat's aggregate 'cpu' line and diffs it against the
+    previous read to get a % since last call. Direct open() fails with
+    PermissionError on many Android 8+ devices — /proc/stat is restricted
+    to root for non-privileged apps (Termux included) by SELinux/hidepid —
+    which silently swallowed the exception and made CPU sit frozen at
+    0.0% forever. Falls back to reading it via su when the direct open
+    fails."""
     global _prev_idle, _prev_total
     try:
-        with open('/proc/stat') as f:
-            fields = f.readline().split()
+        line = None
+        try:
+            with open('/proc/stat') as f:
+                line = f.readline()
+        except Exception:
+            res = run_cmd("su -c 'cat /proc/stat'", timeout=3)
+            line = res.stdout.split('\n', 1)[0] if res.stdout else None
+
+        if not line:
+            return 0.0
+
+        fields = line.split()
         idle = int(fields[4])
         total = sum(int(x) for x in fields[1:8])
         if _prev_idle is None:
@@ -536,13 +553,21 @@ def get_cpu_usage():
         return 0.0
 
 def get_ram_usage():
+    """Same PermissionError trap as get_cpu_usage() — falls back to su if
+    /proc/meminfo can't be opened directly on this device."""
     try:
         meminfo = {}
-        with open('/proc/meminfo') as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2:
-                    meminfo[parts[0].rstrip(':')] = int(parts[1])
+        try:
+            with open('/proc/meminfo') as f:
+                content = f.read()
+        except Exception:
+            res = run_cmd("su -c 'cat /proc/meminfo'", timeout=3)
+            content = res.stdout or ''
+
+        for line in content.split('\n'):
+            parts = line.split()
+            if len(parts) >= 2:
+                meminfo[parts[0].rstrip(':')] = int(parts[1])
         total_kb = meminfo.get('MemTotal', 0)
         avail_kb = meminfo.get('MemAvailable', 0)
         used_kb = total_kb - avail_kb
