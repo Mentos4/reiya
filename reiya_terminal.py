@@ -470,10 +470,12 @@ def clear_app_cache(package):
 
 _prev_idle = None
 _prev_total = None
+_prev_stat_content = None
+_last_cpu_pct = 0.0
 _proc_read_mode = {}   # path -> 'direct' | 'su' | 'unavailable', decided once per path
 _proc_su_cache = {}    # path -> (content, timestamp) — last successful su read
 
-SU_READ_MIN_INTERVAL = 20  # seconds between su re-reads of the same /proc path
+SU_READ_MIN_INTERVAL = 5  # seconds between su re-reads of the same /proc path — matches the dashboard's 5s redraw cadence so stats actually refresh on screen instead of appearing frozen for multiple frames
 
 def _read_proc_file(path, timeout=2):
     """Reads a /proc file, remembering which method actually works so we
@@ -519,28 +521,39 @@ def get_cpu_usage():
     PermissionError on many Android 8+ devices — /proc/stat is restricted
     to root for non-privileged apps (Termux included) by SELinux/hidepid —
     which silently swallowed the exception and made CPU sit frozen at
-    0.0% forever."""
-    global _prev_idle, _prev_total
+    0.0% forever.
+
+    _read_proc_file() throttles su-based reads and reuses the last content
+    string in between (see SU_READ_MIN_INTERVAL). Diffing against that same
+    unchanged content would produce a 0 delta and report 0% on every one of
+    those repeated calls, so this only recomputes the percentage when the
+    underlying content actually changed, holding the last real reading
+    otherwise instead of flickering to 0%."""
+    global _prev_idle, _prev_total, _prev_stat_content, _last_cpu_pct
     try:
         content = _read_proc_file('/proc/stat')
         if not content:
-            return 0.0
-        line = content.split('\n', 1)[0]
+            return _last_cpu_pct
+        if content == _prev_stat_content:
+            return _last_cpu_pct
+        _prev_stat_content = content
 
+        line = content.split('\n', 1)[0]
         fields = line.split()
         idle = int(fields[4])
         total = sum(int(x) for x in fields[1:8])
         if _prev_idle is None:
             _prev_idle, _prev_total = idle, total
-            return 0.0
+            return _last_cpu_pct
         idle_diff = idle - _prev_idle
         total_diff = total - _prev_total
         _prev_idle, _prev_total = idle, total
         if total_diff == 0:
-            return 0.0
-        return round((1.0 - idle_diff / total_diff) * 100, 1)
+            return _last_cpu_pct
+        _last_cpu_pct = round((1.0 - idle_diff / total_diff) * 100, 1)
+        return _last_cpu_pct
     except Exception:
-        return 0.0
+        return _last_cpu_pct
 
 def get_ram_usage():
     """Same PermissionError trap as get_cpu_usage() — falls back to su (once
@@ -892,9 +905,6 @@ class TerminalRejoinLoop:
             ram_w  = stat_w - cpu_w
 
             return cols, total_w, cell, pipe_row, table_row, sep, table_sep, cpu_w, ram_w
-
-        set_landscape_orientation()
-        time.sleep(0.5)
 
         try:
             while self.running:
