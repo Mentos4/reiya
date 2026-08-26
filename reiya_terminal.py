@@ -239,10 +239,30 @@ def get_package_activity_dump(package, content):
 
     return pkg_lines
 
-def is_app_in_game(package):
+def get_activity_top_dump():
+    """Fetch 'dumpsys activity top' once. This is a system-wide dump (same
+    content regardless of which package you're checking), so callers
+    monitoring multiple packages should fetch it ONCE per poll cycle and
+    reuse it for every package — calling it per-package multiplies an
+    already-heavy su+dumpsys invocation by the package count, which was a
+    major source of the CPU/battery load causing slowdowns on constrained
+    Termux/VPhone devices."""
+    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
+        try:
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
+            if res.stdout.strip():
+                return res.stdout
+        except Exception:
+            pass
+    return ''
+
+def is_app_in_game(package, content=None):
     """
     Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
     Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
+    `content` may be passed in (a dump already fetched via get_activity_top_dump())
+    to avoid re-running the heavy dumpsys command per package; if omitted, it is
+    fetched here for backwards compatibility.
     """
     HOME_SIGNALS = [
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
@@ -256,26 +276,23 @@ def is_app_in_game(package):
         'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
     ]
 
-    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
-        try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-            content = res.stdout
-            if content.strip():
-                pkg_lines = get_package_activity_dump(package, content)
-                if not pkg_lines:
-                    pkg_lines = [line for line in content.split('\n') if package in line]
-                if pkg_lines:
-                    block_text = '\n'.join(pkg_lines).lower()
-                    # 1. Check for explicit Home Screen / React UI signals FIRST
-                    if any(sig in block_text for sig in HOME_SIGNALS):
-                        return False
-                    # 2. Check for explicit 3D Game rendering signals
-                    if any(sig in block_text for sig in GAME_SIGNALS):
-                        return True
-                    # 3. Default fallback if ambiguous
-                    return False
-        except Exception:
-            pass
+    if content is None:
+        content = get_activity_top_dump()
+
+    if content.strip():
+        pkg_lines = get_package_activity_dump(package, content)
+        if not pkg_lines:
+            pkg_lines = [line for line in content.split('\n') if package in line]
+        if pkg_lines:
+            block_text = '\n'.join(pkg_lines).lower()
+            # 1. Check for explicit Home Screen / React UI signals FIRST
+            if any(sig in block_text for sig in HOME_SIGNALS):
+                return False
+            # 2. Check for explicit 3D Game rendering signals
+            if any(sig in block_text for sig in GAME_SIGNALS):
+                return True
+            # 3. Default fallback if ambiguous
+            return False
 
     # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
     return False
@@ -906,6 +923,12 @@ class TerminalRejoinLoop:
         time.sleep(8)
 
         while self.running:
+            # Fetched once per cycle and reused for every package below —
+            # dumpsys activity top is system-wide and identical per package,
+            # so calling it per-package multiplied a heavy su+dumpsys call by
+            # the package count on every poll.
+            activity_dump = get_activity_top_dump()
+
             for i, pkg in enumerate(packages):
                 if not self.running:
                     break
@@ -928,7 +951,7 @@ class TerminalRejoinLoop:
 
                 else:
                     # ★ PROCESS ALIVE → check if in-game or on Home Screen
-                    in_game = is_app_in_game(pkg)
+                    in_game = is_app_in_game(pkg, content=activity_dump)
                     if in_game:
                         self.set_status(pkg, 'Ingame')
                     else:
