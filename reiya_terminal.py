@@ -558,7 +558,15 @@ def get_cpu_usage():
 def get_ram_usage():
     """Same PermissionError trap as get_cpu_usage() — falls back to su (once
     per session, see _read_proc_file) if /proc/meminfo can't be opened
-    directly on this device."""
+    directly on this device.
+
+    Some older Android kernels don't expose 'MemAvailable' in /proc/meminfo
+    at all. meminfo.get(..., 0) silently defaulted that to 0, which made
+    used_kb = total_kb - 0 = total_kb on every single read — i.e. "used"
+    pinned to the exact same value as "total" forever, reading as frozen
+    RAM rather than a permission/throttle issue like CPU had. Fall back to
+    the pre-3.14-kernel approximation (MemFree + Buffers + Cached) so usage
+    actually reflects live state on those devices too."""
     try:
         meminfo = {}
         content = _read_proc_file('/proc/meminfo') or ''
@@ -568,8 +576,11 @@ def get_ram_usage():
             if len(parts) >= 2:
                 meminfo[parts[0].rstrip(':')] = int(parts[1])
         total_kb = meminfo.get('MemTotal', 0)
-        avail_kb = meminfo.get('MemAvailable', 0)
-        used_kb = total_kb - avail_kb
+        if 'MemAvailable' in meminfo:
+            avail_kb = meminfo['MemAvailable']
+        else:
+            avail_kb = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0)
+        used_kb = max(0, total_kb - avail_kb)
         return used_kb / 1024 / 1024, total_kb / 1024 / 1024  # GB
     except Exception:
         return 0.0, 0.0
