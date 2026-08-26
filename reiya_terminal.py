@@ -111,19 +111,43 @@ def run_cmd(cmd, timeout=5):
     orphaned processes underneath it. The auto-rejoin loop calls commands like
     this every few seconds, per package, for as long as the engine runs; any
     timeout (a slow/hung su prompt, a busy device) leaked a whole process tree
-    instead of being cleaned up. Over a long session those orphans pile up
-    until Termux hits its process/memory limit and gets killed outright —
-    this is the main suspect behind the auto-rejoin loop crashing the
-    terminal. Running each command in its own session (start_new_session)
-    lets us kill the WHOLE process group via os.killpg on timeout instead of
-    leaking it."""
+    instead of being cleaned up, and those orphans could pile up over a long
+    session.
+
+    IMPORTANT: this must put the child in a new PROCESS GROUP only — NOT a
+    new SESSION (start_new_session=True / setsid). setsid() detaches the
+    child from the controlling terminal, and some su implementations
+    (Magisk/SuperSU) rely on that terminal/session attachment to grant root.
+    Detaching it made su silently fail, which made dumpsys/pidof come back
+    empty, which made the rejoin loop think every package was stuck on the
+    Home Screen and force-stop + relaunch Roblox on EVERY poll cycle. Using
+    process_group=0 (Python 3.11+) gets a killable group without touching
+    the session; if that's unavailable we run ungrouped and just kill the
+    direct child on timeout, accepting the smaller orphan risk instead of
+    breaking su."""
     posix = (os.name == 'posix')
+    grouped = False
     try:
-        proc = subprocess.Popen(
-            cmd, shell=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=posix,
-        )
+        if posix:
+            try:
+                proc = subprocess.Popen(
+                    cmd, shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, process_group=0,
+                )
+                grouped = True
+            except TypeError:
+                proc = subprocess.Popen(
+                    cmd, shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True,
+                )
+        else:
+            proc = subprocess.Popen(
+                cmd, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
     except Exception:
         return subprocess.CompletedProcess(cmd, -1, '', '')
     try:
@@ -131,7 +155,7 @@ def run_cmd(cmd, timeout=5):
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout or '', stderr or '')
     except subprocess.TimeoutExpired:
         try:
-            if posix:
+            if grouped:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             else:
                 proc.kill()
