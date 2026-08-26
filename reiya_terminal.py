@@ -733,7 +733,19 @@ class TerminalRejoinLoop:
         def detect_width(fallback):
             """Probe the real terminal width fresh each call. Reserves one
             trailing column: a line that exactly fills the terminal defers its
-            wrap, sticking the next print's first char onto the same row."""
+            wrap, sticking the next print's first char onto the same row.
+            Uses os.get_terminal_size() (a plain ioctl syscall) instead of
+            shelling out to 'stty size'/'tput cols' — forking a shell every
+            5s to re-probe width was expensive enough on constrained
+            Termux/VPhone devices to cause noticeable slowdowns/crashes while
+            the dashboard was open. Falls back to the subprocess probe only
+            if the syscall isn't available (e.g. stdout isn't a real tty)."""
+            try:
+                val = os.get_terminal_size().columns
+                if val > 10:
+                    return max(30, val - 1)
+            except Exception:
+                pass
             for cmd in ['stty size', 'tput cols']:
                 try:
                     r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1)
