@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.3-REI-REJOIN"
-BUILD_TIME = "2026-08-23 19:47:56 UTC"
+BUILD_VERSION = "v6.8.4-REI-REJOIN"
+BUILD_TIME = "2026-08-29 13:56:04 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -576,14 +576,28 @@ def get_ram_usage():
             if len(parts) >= 2:
                 meminfo[parts[0].rstrip(':')] = int(parts[1])
         total_kb = meminfo.get('MemTotal', 0)
-        if 'MemAvailable' in meminfo:
-            avail_kb = meminfo['MemAvailable']
-        else:
-            avail_kb = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0)
-        used_kb = max(0, total_kb - avail_kb)
+        # Treat a missing or zero MemAvailable as unusable. A few Android
+        # kernels expose the key but report 0, which otherwise pins usage to
+        # total RAM. The fallback tracks reclaimable cache as well.
+        avail_kb = meminfo.get('MemAvailable', 0)
+        if avail_kb <= 0:
+            avail_kb = (
+                meminfo.get('MemFree', 0)
+                + meminfo.get('Buffers', 0)
+                + meminfo.get('Cached', 0)
+                + meminfo.get('SReclaimable', 0)
+                - meminfo.get('Shmem', 0)
+            )
+        if total_kb <= 0:
+            return 0.0, 0.0
+        used_kb = max(0, min(total_kb, total_kb - avail_kb))
         return used_kb / 1024 / 1024, total_kb / 1024 / 1024  # GB
     except Exception:
         return 0.0, 0.0
+
+def format_ram_usage(used_gb, total_gb):
+    """Display whole MB so normal Android memory changes stay visible."""
+    return f"{used_gb * 1024:.0f} / {total_gb * 1024:.0f} MB"
 
 def get_process_ram(package):
     try:
@@ -650,7 +664,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         f'**Device:** {device}\n'
         f'**Uptime:** {uptime}\n'
         f'**CPU:** {cpu}% / 100%\n'
-        f'**RAM:** {used_ram:.2f} / {total_ram:.2f} GB\n'
+        f'**RAM:** {format_ram_usage(used_ram, total_ram)}\n'
     )
     if app_lines:
         description += f'\n**Application Details:**\n{app_lines}'
@@ -947,7 +961,7 @@ class TerminalRejoinLoop:
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                out(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {used_ram:.2f} / {total_ram:.2f} GB", ram_w)]))
+                out(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {format_ram_usage(used_ram, total_ram)}", ram_w)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
@@ -1122,7 +1136,7 @@ def show_status():
     used_ram, total_ram = get_ram_usage()
     w, h = get_screen_size()
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
-    print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
+    print(f"CPU: {cpu}% | RAM: {format_ram_usage(used_ram, total_ram)}")
     print(f"Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
 
     roblox_pkgs = get_roblox_packages()
