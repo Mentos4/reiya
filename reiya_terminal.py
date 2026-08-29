@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.5-REI-REJOIN"
-BUILD_TIME = "2026-08-29 18:10:07 UTC"
+BUILD_VERSION = "v6.8.6-REI-REJOIN"
+BUILD_TIME = "2026-08-29 18:36:01 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -553,42 +553,32 @@ def get_cpu_usage():
         return _last_cpu_pct
 
 def get_ram_usage():
-    """Same PermissionError trap as get_cpu_usage() — falls back to su (once
-    per session, see _read_proc_file) if /proc/meminfo can't be opened
-    directly on this device.
+    """Return physical RAM occupied right now, in GB.
 
-    Some older Android kernels don't expose 'MemAvailable' in /proc/meminfo
-    at all. meminfo.get(..., 0) silently defaulted that to 0, which made
-    used_kb = total_kb - 0 = total_kb on every single read — i.e. "used"
-    pinned to the exact same value as "total" forever, reading as frozen
-    RAM rather than a permission/throttle issue like CPU had. Fall back to
-    the pre-3.14-kernel approximation (MemFree + Buffers + Cached) so usage
-    actually reflects live state on those devices too."""
+    ``MemAvailable`` is a kernel estimate of memory that could be reclaimed.
+    Android often keeps that estimate nearly constant while apps allocate RAM,
+    so it made the dashboard look frozen. ``MemFree`` is the live physical
+    free-page counter; total minus it reflects memory currently occupied by
+    apps, cache, and the system and changes as Android uses RAM.
+    """
     try:
         meminfo = {}
         content = _read_proc_file('/proc/meminfo') or ''
-
         for line in content.split('\n'):
             parts = line.split()
             if len(parts) >= 2:
                 meminfo[parts[0].rstrip(':')] = int(parts[1])
+
         total_kb = meminfo.get('MemTotal', 0)
-        # Treat a missing or zero MemAvailable as unusable. A few Android
-        # kernels expose the key but report 0, which otherwise pins usage to
-        # total RAM. The fallback tracks reclaimable cache as well.
-        avail_kb = meminfo.get('MemAvailable', 0)
-        if avail_kb <= 0:
-            avail_kb = (
-                meminfo.get('MemFree', 0)
-                + meminfo.get('Buffers', 0)
-                + meminfo.get('Cached', 0)
-                + meminfo.get('SReclaimable', 0)
-                - meminfo.get('Shmem', 0)
-            )
+        free_kb = meminfo.get('MemFree', 0)
         if total_kb <= 0:
             return 0.0, 0.0
-        used_kb = max(0, min(total_kb, total_kb - avail_kb))
-        return used_kb / 1024 / 1024, total_kb / 1024 / 1024  # GB
+        # MemFree is the direct live counter. If a non-standard kernel omits
+        # it, retain the available-memory estimate rather than reporting 0.
+        if free_kb <= 0 and 'MemFree' not in meminfo:
+            free_kb = meminfo.get('MemAvailable', 0)
+        used_kb = max(0, min(total_kb, total_kb - free_kb))
+        return used_kb / 1024 / 1024, total_kb / 1024 / 1024
     except Exception:
         return 0.0, 0.0
 
