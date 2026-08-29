@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.4-REI-REJOIN"
-BUILD_TIME = "2026-08-29 13:56:04 UTC"
+BUILD_VERSION = "v6.8.5-REI-REJOIN"
+BUILD_TIME = "2026-08-29 18:10:07 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -143,14 +143,11 @@ def set_landscape_orientation():
             pass
 
 def clear_terminal_screen():
-    """Clear terminal screen completely preventing duplicate overlapping headers."""
-    try:
-        if os.name == 'posix':
-            os.system('clear')
-        else:
-            os.system('cls')
-    except Exception:
-        print("\033[H\033[2J\033[3J", end="")
+    """Redraw from the top without spawning ``clear``/``cls`` every frame."""
+    # Direct ANSI control codes work in Termux and avoid a shell subprocess
+    # stealing the terminal while the live dashboard is refreshing.
+    sys.stdout.write("\033[H\033[2J\033[3J")
+    sys.stdout.flush()
 
 def prompt(text):
     return input(text)
@@ -475,7 +472,7 @@ _last_cpu_pct = 0.0
 _proc_read_mode = {}   # path -> 'direct' | 'su' | 'unavailable', decided once per path
 _proc_su_cache = {}    # path -> (content, timestamp) — last successful su read
 
-SU_READ_MIN_INTERVAL = 5  # seconds between su re-reads of the same /proc path — matches the dashboard's 5s redraw cadence so stats actually refresh on screen instead of appearing frozen for multiple frames
+SU_READ_MIN_INTERVAL = 1  # Keep the fallback cache brief; each 5s dashboard redraw requests a fresh /proc sample.
 
 def _read_proc_file(path, timeout=2):
     """Reads a /proc file, remembering which method actually works so we
@@ -961,7 +958,10 @@ class TerminalRejoinLoop:
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                out(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {format_ram_usage(used_ram, total_ram)}", ram_w)]))
+                # A single full-width stat row prevents narrow Termux terminals from
+                # truncating the beginning of "Ram usage" or hiding the refresh time.
+                sampled_at = time.strftime('%H:%M:%S')
+                out(pipe_row([(f"CPU {cpu}% | RAM {format_ram_usage(used_ram, total_ram)} | {sampled_at}", TOTAL_W - 3)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
