@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.6-REI-REJOIN"
-BUILD_TIME = "2026-08-29 18:36:01 UTC"
+BUILD_VERSION = "v6.8.7-REI-REJOIN"
+BUILD_TIME = "2026-08-29 18:39:50 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -587,16 +587,25 @@ def format_ram_usage(used_gb, total_gb):
     return f"{used_gb * 1024:.0f} / {total_gb * 1024:.0f} MB"
 
 def get_process_ram(package):
-    try:
-        result = run_cmd(f"su -c 'dumpsys meminfo {package} -c'", timeout=5)
-        for line in result.stdout.split('\n'):
-            if 'TOTAL' in line:
-                parts = line.split(',')
-                if len(parts) > 1:
-                    return int(parts[1].strip()) // 1024  # MB
+    """Return a package's live PSS in MB from Android's memory service."""
+    if not re.fullmatch(r'[A-Za-z0-9_.]+', package or ''):
         return 0
-    except Exception:
-        return 0
+    # PSS is the process memory attributable to this app. Unlike system-wide
+    # free/available RAM, it rises when the selected Roblox instance allocates.
+    for command in (f'dumpsys meminfo {package}', f"su -c 'dumpsys meminfo {package}'"):
+        result = run_cmd(command, timeout=4)
+        output = result.stdout or ''
+        match = re.search(r'TOTAL\s+PSS:\s*([0-9,]+)', output, re.IGNORECASE)
+        if not match:
+            # Android versions with the compact table use a final TOTAL row.
+            match = re.search(r'^\s*TOTAL\s+([0-9,]+)', output, re.MULTILINE)
+        if match:
+            return int(match.group(1).replace(',', '')) // 1024
+    return 0
+
+def get_selected_apps_ram(packages):
+    """Sum live PSS for selected Roblox packages, in MB."""
+    return sum(get_process_ram(package) for package in packages)
 
 def get_device_name():
     try:
@@ -932,7 +941,9 @@ class TerminalRejoinLoop:
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
                 cpu = get_cpu_usage()
-                used_ram, total_ram = get_ram_usage()
+                # Dashboard RAM tracks selected Roblox processes (PSS), not a
+                # system-wide availability estimate that Android holds steady.
+                apps_ram = get_selected_apps_ram(pkgs)
 
                 # ── Header ────────────────────────────────────────
                 title = "REI REJOIN"
@@ -951,7 +962,7 @@ class TerminalRejoinLoop:
                 # A single full-width stat row prevents narrow Termux terminals from
                 # truncating the beginning of "Ram usage" or hiding the refresh time.
                 sampled_at = time.strftime('%H:%M:%S')
-                out(pipe_row([(f"CPU {cpu}% | RAM {format_ram_usage(used_ram, total_ram)} | {sampled_at}", TOTAL_W - 3)]))
+                out(pipe_row([(f"CPU {cpu}% | APP RAM {apps_ram} MB | {sampled_at}", TOTAL_W - 3)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
