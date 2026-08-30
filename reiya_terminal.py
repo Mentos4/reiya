@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.8-REI-REJOIN"
-BUILD_TIME = "2026-08-30 18:59:15 UTC"
+BUILD_VERSION = "v6.8.9-REI-REJOIN"
+BUILD_TIME = "2026-08-30 19:01:32 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -860,7 +860,23 @@ class TerminalRejoinLoop:
 
             return cols, total_w, cell, pipe_row, table_row, sep, table_sep
 
+        input_fd = None
+        saved_terminal_mode = None
+        termios_module = None
         try:
+            # Termux's buffered TextIO stdin can miss readiness notifications
+            # after the dashboard has been redrawn. Read the TTY directly in
+            # cbreak mode so one Enter key always exits this screen.
+            if os.name == 'posix':
+                import termios
+                import tty
+                candidate_fd = sys.stdin.fileno()
+                if os.isatty(candidate_fd):
+                    saved_terminal_mode = termios.tcgetattr(candidate_fd)
+                    tty.setcbreak(candidate_fd)
+                    input_fd = candidate_fd
+                    termios_module = termios
+
             while self.running:
                 clear_terminal_screen()
 
@@ -921,7 +937,12 @@ class TerminalRejoinLoop:
                 out(f"{BOLD}[Enter] Main Menu{RESET}")
                 sys.stdout.flush()
 
-                if os.name == 'posix':
+                if input_fd is not None:
+                    rlist, _, _ = select.select([input_fd], [], [], 5.0)
+                    if rlist and os.read(input_fd, 1) in (b'\r', b'\n'):
+                        break
+                elif os.name == 'posix':
+                    # Non-TTY fallback, for redirected input only.
                     rlist, _, _ = select.select([sys.stdin], [], [], 5.0)
                     if rlist:
                         sys.stdin.readline()
@@ -931,6 +952,12 @@ class TerminalRejoinLoop:
 
         except (KeyboardInterrupt, Exception):
             pass
+        finally:
+            if input_fd is not None and saved_terminal_mode is not None:
+                try:
+                    termios_module.tcsetattr(input_fd, termios_module.TCSADRAIN, saved_terminal_mode)
+                except Exception:
+                    pass
 
     def _loop(self, packages, cfg):
         check_interval      = float(cfg.get('check_interval', 8))
