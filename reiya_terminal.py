@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.9-REI-REJOIN"
-BUILD_TIME = "2026-08-30 19:01:32 UTC"
+BUILD_VERSION = "v6.8.10-REI-REJOIN"
+BUILD_TIME = "2026-08-30 19:04:08 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -934,18 +934,20 @@ class TerminalRejoinLoop:
                     out(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
                 out(SEP)
-                out(f"{BOLD}[Enter] Main Menu{RESET}")
+                out(f"{BOLD}[Enter] Stop Auto Rejoin & Main Menu{RESET}")
                 sys.stdout.flush()
 
                 if input_fd is not None:
                     rlist, _, _ = select.select([input_fd], [], [], 5.0)
                     if rlist and os.read(input_fd, 1) in (b'\r', b'\n'):
+                        self.stop()
                         break
                 elif os.name == 'posix':
                     # Non-TTY fallback, for redirected input only.
                     rlist, _, _ = select.select([sys.stdin], [], [], 5.0)
                     if rlist:
                         sys.stdin.readline()
+                        self.stop()
                         break
                 else:
                     time.sleep(5.0)
@@ -1118,7 +1120,6 @@ def interactive_menu():
         print("6. Auto-Sort / Tile Windows Layout Configuration")
         print("7. Autoexecute Script Manager")
         print("8. START Auto Rejoin Loop & Live Dashboard")
-        print("9. STOP Auto Rejoin Loop")
         print("10. Auto-Sort / Tile Open Windows NOW")
         print("11. Test Launch Selected Package Now")
         print("12. Send Manual Discord Webhook Test")
@@ -1370,15 +1371,6 @@ def interactive_menu():
         elif choice == '8':
             rejoin_engine.start(config)
             rejoin_engine.render_live_dashboard(config)
-            if rejoin_engine.running:
-                print("\n[i] Auto Rejoin is still running in the background.")
-                print("    Use Option 9 to stop it, or Option 8 to reopen the dashboard.")
-
-        elif choice == '9':
-            rejoin_engine.stop()
-            print("\n[+] Auto Rejoin Engine stopped.")
-            prompt("\nPress Enter to return to menu...")
-
         elif choice == '10':
             auto_sort_windows(mode=config.get('window_mode', 'left_stack'))
             prompt("\nPress Enter to return to menu...")
