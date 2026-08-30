@@ -14,7 +14,7 @@ Single standalone CLI script combining all core functions of REI REJOIN Roblox A
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
-- System monitoring (CPU, RAM, Uptime, Screenshots)
+- System monitoring (CPU, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
 - Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear, Auto-Sort)
 - Autoexecute script management
@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.7-REI-REJOIN"
-BUILD_TIME = "2026-08-29 18:39:50 UTC"
+BUILD_VERSION = "v6.8.8-REI-REJOIN"
+BUILD_TIME = "2026-08-30 18:59:15 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -552,61 +552,6 @@ def get_cpu_usage():
     except Exception:
         return _last_cpu_pct
 
-def get_ram_usage():
-    """Return physical RAM occupied right now, in GB.
-
-    ``MemAvailable`` is a kernel estimate of memory that could be reclaimed.
-    Android often keeps that estimate nearly constant while apps allocate RAM,
-    so it made the dashboard look frozen. ``MemFree`` is the live physical
-    free-page counter; total minus it reflects memory currently occupied by
-    apps, cache, and the system and changes as Android uses RAM.
-    """
-    try:
-        meminfo = {}
-        content = _read_proc_file('/proc/meminfo') or ''
-        for line in content.split('\n'):
-            parts = line.split()
-            if len(parts) >= 2:
-                meminfo[parts[0].rstrip(':')] = int(parts[1])
-
-        total_kb = meminfo.get('MemTotal', 0)
-        free_kb = meminfo.get('MemFree', 0)
-        if total_kb <= 0:
-            return 0.0, 0.0
-        # MemFree is the direct live counter. If a non-standard kernel omits
-        # it, retain the available-memory estimate rather than reporting 0.
-        if free_kb <= 0 and 'MemFree' not in meminfo:
-            free_kb = meminfo.get('MemAvailable', 0)
-        used_kb = max(0, min(total_kb, total_kb - free_kb))
-        return used_kb / 1024 / 1024, total_kb / 1024 / 1024
-    except Exception:
-        return 0.0, 0.0
-
-def format_ram_usage(used_gb, total_gb):
-    """Display whole MB so normal Android memory changes stay visible."""
-    return f"{used_gb * 1024:.0f} / {total_gb * 1024:.0f} MB"
-
-def get_process_ram(package):
-    """Return a package's live PSS in MB from Android's memory service."""
-    if not re.fullmatch(r'[A-Za-z0-9_.]+', package or ''):
-        return 0
-    # PSS is the process memory attributable to this app. Unlike system-wide
-    # free/available RAM, it rises when the selected Roblox instance allocates.
-    for command in (f'dumpsys meminfo {package}', f"su -c 'dumpsys meminfo {package}'"):
-        result = run_cmd(command, timeout=4)
-        output = result.stdout or ''
-        match = re.search(r'TOTAL\s+PSS:\s*([0-9,]+)', output, re.IGNORECASE)
-        if not match:
-            # Android versions with the compact table use a final TOTAL row.
-            match = re.search(r'^\s*TOTAL\s+([0-9,]+)', output, re.MULTILINE)
-        if match:
-            return int(match.group(1).replace(',', '')) // 1024
-    return 0
-
-def get_selected_apps_ram(packages):
-    """Sum live PSS for selected Roblox packages, in MB."""
-    return sum(get_process_ram(package) for package in packages)
-
 def get_device_name():
     try:
         result = run_cmd('getprop ro.product.model', timeout=3)
@@ -638,7 +583,6 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         return
 
     cpu = get_cpu_usage()
-    used_ram, total_ram = get_ram_usage()
     device = get_device_name()
     uptime_sec = time.time() - (start_time or time.time())
     uptime = format_uptime(uptime_sec)
@@ -648,11 +592,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         parts = []
         for i, (pkg, info) in enumerate(statuses.items(), 1):
             status = info.get('status', 'Unknown')
-            ram = get_process_ram(pkg)
-            parts.append(
-                f'**{i}.** {status} | `{pkg}`\n'
-                f'    RAM: {ram} MB'
-            )
+            parts.append(f'**{i}.** {status} | `{pkg}`')
         if parts:
             app_lines = '\n'.join(parts)
 
@@ -660,7 +600,6 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         f'**Device:** {device}\n'
         f'**Uptime:** {uptime}\n'
         f'**CPU:** {cpu}% / 100%\n'
-        f'**RAM:** {format_ram_usage(used_ram, total_ram)}\n'
     )
     if app_lines:
         description += f'\n**Application Details:**\n{app_lines}'
@@ -919,20 +858,14 @@ class TerminalRejoinLoop:
             sep = "-" * total_w
             table_sep = "|" + "|".join("-" * (w + 2) for _, w in cols) + "|"
 
-            # Two stat columns sized to sum to total_w: for N cells, overhead
-            # is 3*N+1 (each cell is width+2 chars, plus N+1 pipes).
-            stat_w = total_w - (3 * 2 + 1)
-            cpu_w  = stat_w // 2
-            ram_w  = stat_w - cpu_w
-
-            return cols, total_w, cell, pipe_row, table_row, sep, table_sep, cpu_w, ram_w
+            return cols, total_w, cell, pipe_row, table_row, sep, table_sep
 
         try:
             while self.running:
                 clear_terminal_screen()
 
                 target_w = detect_width(cfg.get('dashboard_width', 40))
-                COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
+                COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP = build_layout(target_w)
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
@@ -941,9 +874,6 @@ class TerminalRejoinLoop:
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
                 cpu = get_cpu_usage()
-                # Dashboard RAM tracks selected Roblox processes (PSS), not a
-                # system-wide availability estimate that Android holds steady.
-                apps_ram = get_selected_apps_ram(pkgs)
 
                 # ── Header ────────────────────────────────────────
                 title = "REI REJOIN"
@@ -959,10 +889,8 @@ class TerminalRejoinLoop:
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                # A single full-width stat row prevents narrow Termux terminals from
-                # truncating the beginning of "Ram usage" or hiding the refresh time.
                 sampled_at = time.strftime('%H:%M:%S')
-                out(pipe_row([(f"CPU {cpu}% | APP RAM {apps_ram} MB | {sampled_at}", TOTAL_W - 3)]))
+                out(pipe_row([(f"CPU {cpu}% | {sampled_at}", TOTAL_W - 3)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
@@ -1134,10 +1062,9 @@ def show_status():
     print("\n--- [ SYSTEM & APP STATUS ] ---")
     device = get_device_name()
     cpu = get_cpu_usage()
-    used_ram, total_ram = get_ram_usage()
     w, h = get_screen_size()
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
-    print(f"CPU: {cpu}% | RAM: {format_ram_usage(used_ram, total_ram)}")
+    print(f"CPU: {cpu}%")
     print(f"Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
 
     roblox_pkgs = get_roblox_packages()
@@ -1145,10 +1072,9 @@ def show_status():
     for pkg in roblox_pkgs:
         running = is_app_running(pkg)
         status_str = "RUNNING" if running else "STOPPED"
-        ram = get_process_ram(pkg) if running else 0
         selected = "*" if pkg in config.get('selected_packages', []) else " "
         pkg_gname = _resolve_package_game_name(pkg, config)
-        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18} RAM: {ram}MB")
+        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18}")
     print("=" * 60)
 
 def interactive_menu():
