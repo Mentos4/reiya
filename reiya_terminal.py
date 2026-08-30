@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.11-REI-REJOIN"
-BUILD_TIME = "2026-08-30 19:12:37 UTC"
+BUILD_VERSION = "v6.8.12-REI-REJOIN"
+BUILD_TIME = "2026-08-30 19:17:11 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -553,11 +553,12 @@ def get_cpu_usage():
         return _last_cpu_pct
 
 def get_ram_usage():
-    """Returns RAM utilization from /proc/meminfo as (percent, used, total) MiB.
+    """Returns live physical RAM usage as (percent, used, total) MiB.
 
-    MemAvailable includes reclaimable cache and is Android's closest practical
-    measure of memory that applications can still use. Older kernels without it
-    fall back to MemFree plus reclaimable cache fields.
+    Android can keep MemAvailable nearly unchanged after an app closes because
+    released pages become reclaimable cache. MemFree is the live free-page
+    counter, so total minus it reflects physical RAM currently occupied by the
+    system, cache, and applications at each dashboard refresh.
     """
     try:
         content = _read_proc_file('/proc/meminfo')
@@ -571,17 +572,13 @@ def get_ram_usage():
                 values[key] = int(parts[0])  # /proc/meminfo values are KiB
 
         total_kib = values.get('MemTotal', 0)
-        available_kib = values.get('MemAvailable')
-        if available_kib is None:
-            available_kib = (values.get('MemFree', 0) + values.get('Buffers', 0) +
-                             values.get('Cached', 0) + values.get('SReclaimable', 0))
+        free_kib = values.get('MemFree', values.get('MemAvailable', 0))
         if total_kib <= 0:
             return 0.0, 0, 0
-        used_kib = max(0, min(total_kib, total_kib - available_kib))
+        used_kib = max(0, min(total_kib, total_kib - free_kib))
         return round(used_kib * 100.0 / total_kib, 1), round(used_kib / 1024), round(total_kib / 1024)
     except Exception:
         return 0.0, 0, 0
-
 def get_device_name():
     try:
         result = run_cmd('getprop ro.product.model', timeout=3)
