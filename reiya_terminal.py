@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.10-REI-REJOIN"
-BUILD_TIME = "2026-08-30 19:04:08 UTC"
+BUILD_VERSION = "v6.8.11-REI-REJOIN"
+BUILD_TIME = "2026-08-30 19:12:37 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -552,6 +552,36 @@ def get_cpu_usage():
     except Exception:
         return _last_cpu_pct
 
+def get_ram_usage():
+    """Returns RAM utilization from /proc/meminfo as (percent, used, total) MiB.
+
+    MemAvailable includes reclaimable cache and is Android's closest practical
+    measure of memory that applications can still use. Older kernels without it
+    fall back to MemFree plus reclaimable cache fields.
+    """
+    try:
+        content = _read_proc_file('/proc/meminfo')
+        if not content:
+            return 0.0, 0, 0
+        values = {}
+        for line in content.splitlines():
+            key, _, value = line.partition(':')
+            parts = value.split()
+            if parts and parts[0].isdigit():
+                values[key] = int(parts[0])  # /proc/meminfo values are KiB
+
+        total_kib = values.get('MemTotal', 0)
+        available_kib = values.get('MemAvailable')
+        if available_kib is None:
+            available_kib = (values.get('MemFree', 0) + values.get('Buffers', 0) +
+                             values.get('Cached', 0) + values.get('SReclaimable', 0))
+        if total_kib <= 0:
+            return 0.0, 0, 0
+        used_kib = max(0, min(total_kib, total_kib - available_kib))
+        return round(used_kib * 100.0 / total_kib, 1), round(used_kib / 1024), round(total_kib / 1024)
+    except Exception:
+        return 0.0, 0, 0
+
 def get_device_name():
     try:
         result = run_cmd('getprop ro.product.model', timeout=3)
@@ -583,6 +613,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         return
 
     cpu = get_cpu_usage()
+    ram_pct, ram_used_mib, ram_total_mib = get_ram_usage()
     device = get_device_name()
     uptime_sec = time.time() - (start_time or time.time())
     uptime = format_uptime(uptime_sec)
@@ -600,6 +631,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         f'**Device:** {device}\n'
         f'**Uptime:** {uptime}\n'
         f'**CPU:** {cpu}% / 100%\n'
+        f'**RAM:** {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB)\n'
     )
     if app_lines:
         description += f'\n**Application Details:**\n{app_lines}'
@@ -890,6 +922,7 @@ class TerminalRejoinLoop:
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
                 cpu = get_cpu_usage()
+                ram_pct, ram_used_mib, ram_total_mib = get_ram_usage()
 
                 # ── Header ────────────────────────────────────────
                 title = "REI REJOIN"
@@ -906,7 +939,7 @@ class TerminalRejoinLoop:
 
                 # ── Stats ──────────────────────────────────────────
                 sampled_at = time.strftime('%H:%M:%S')
-                out(pipe_row([(f"CPU {cpu}% | {sampled_at}", TOTAL_W - 3)]))
+                out(pipe_row([(f"CPU {cpu}% | RAM {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB) | {sampled_at}", TOTAL_W - 3)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
@@ -1091,9 +1124,11 @@ def show_status():
     print("\n--- [ SYSTEM & APP STATUS ] ---")
     device = get_device_name()
     cpu = get_cpu_usage()
+    ram_pct, ram_used_mib, ram_total_mib = get_ram_usage()
     w, h = get_screen_size()
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
     print(f"CPU: {cpu}%")
+    print(f"RAM: {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB)")
     print(f"Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
 
     roblox_pkgs = get_roblox_packages()
