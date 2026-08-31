@@ -32,7 +32,8 @@ import threading
 import urllib.request
 import urllib.parse
 import mimetypes
-import select`r`nimport base64
+import select
+import base64
 
 # Script version & timestamp
 BUILD_VERSION = "v6.8.25-REI-REJOIN"
