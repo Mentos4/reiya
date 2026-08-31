@@ -1165,7 +1165,7 @@ class TerminalRejoinLoop:
 
                     else:
                         # ★ PROCESS ALIVE → check if in-game or on Home Screen
-in_game = is_app_in_game(pkg, content=activity_dump)
+                        in_game = is_app_in_game(pkg, content=activity_dump)
                         leave_event = get_roblox_home_return_event(pkg) if home_rejoin_enabled else ''
                         if leave_event and leave_event != self.home_log_events.get(pkg):
                             self.home_log_events[pkg] = leave_event
