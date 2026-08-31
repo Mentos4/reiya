@@ -838,7 +838,8 @@ class TerminalRejoinLoop:
         self.last_launch = {}
         self.thread = None
         self.start_time = None
-        self.webhook_thread = None`r`n        self.home_log_events = {}
+        self.webhook_thread = None
+        self.home_log_events = {}
 
     def log(self, msg):
         """Writes explicit \\r\\n like render_live_dashboard's out() — this
