@@ -709,7 +709,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     payload = {'embeds': [embed]}
     # Ignore malformed device proxy environment variables for direct Discord delivery.
     webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-screenshot_path = take_screenshot()
+    screenshot_path = take_screenshot()
 
     # curl avoids urllib's malformed-proxy handling on some Termux environments.
     try:
