@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.12-REI-REJOIN"
-BUILD_TIME = "2026-08-30 19:17:11 UTC"
+BUILD_VERSION = "v6.8.15-REI-REJOIN"
+BUILD_TIME = "2026-08-31 19:45:47 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -83,6 +83,37 @@ DEFAULT_CONFIG = {
 # Global config state
 config = DEFAULT_CONFIG.copy()
 
+def _place_id_from_game_value(game_value):
+    """Extract a Roblox place ID from an ID, game URL, or private-server link."""
+    value = str(game_value or '').strip()
+    match = re.search(r'/games/(\d+)|(?:^|[?&])placeId=(\d+)', value)
+    if match:
+        return match.group(1) or match.group(2)
+    numeric_prefix = re.match(r'^(\d+)(?:\?|$)', value)
+    return numeric_prefix.group(1) if numeric_prefix else ''
+
+def lookup_roblox_game_name(game_value):
+    """Fetch a Roblox experience name for the dashboard; fall back to its place ID."""
+    place_id = _place_id_from_game_value(game_value)
+    fallback = f"Game ({place_id[:15]}...)" if len(place_id) > 15 else f"Game ({place_id})"
+    if not place_id:
+        return fallback
+    try:
+        endpoint = 'https://games.roblox.com/v1/games/multiget-place-details?placeIds=' + urllib.parse.quote(place_id)
+        request = urllib.request.Request(endpoint, headers={'User-Agent': 'REI-REJOIN/1.0'})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            details = json.loads(response.read().decode('utf-8'))
+        if isinstance(details, list) and details:
+            name = details[0].get('name') or details[0].get('Name')
+            if name:
+                return str(name)
+    except Exception:
+        pass
+    return fallback
+
+def _is_generated_game_name(name):
+    return bool(re.match(r'^(Game \(|Place:)', str(name or '')))
+
 def load_config():
     global config
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
@@ -91,6 +122,18 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
             config.update(saved)
+            renamed = False
+            if config.get('game_id') and _is_generated_game_name(config.get('game_name')):
+                config['game_name'] = lookup_roblox_game_name(config['game_id'])
+                renamed = True
+            package_games = config.get('package_games', {})
+            package_names = config.setdefault('package_game_names', {})
+            for package, game_value in package_games.items():
+                if _is_generated_game_name(package_names.get(package)):
+                    package_names[package] = lookup_roblox_game_name(game_value)
+                    renamed = True
+            if renamed:
+                save_config()
         except Exception as e:
             print(f"[!] Warning loading config: {e}")
     return config
@@ -1261,7 +1304,7 @@ def interactive_menu():
                                         print("  [!] No Place ID / Link entered. Try again.")
                                         continue
                                     config['package_games'][pkg] = gid
-                                    gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
+                                    gname = lookup_roblox_game_name(gid)
                                     config['package_game_names'][pkg] = gname
                                     break
                                 elif gchoice.upper() == 'S' or not gchoice:
@@ -1284,15 +1327,19 @@ def interactive_menu():
                     for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
                         print(f"  {idx}. {gname} (ID: {gid})")
                     print("  C. Custom Place ID or Private Server Link")
+                    print("  Enter. Keep the current game")
                     while True:
                         gchoice = prompt("\nChoice: ").strip()
+                        if not gchoice:
+                            print("[i] No game choice entered; keeping the current game.")
+                            break
                         if gchoice.upper() == 'C':
                             gid = prompt("Enter Place ID / Link: ").strip()
                             if not gid:
                                 print("[!] No Place ID / Link entered. Try again.")
                                 continue
                             config['game_id'] = gid
-                            config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
+                            config['game_name'] = lookup_roblox_game_name(gid)
                             break
                         elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
                             config['game_name'], config['game_id'] = PRESET_GAMES[int(gchoice) - 1]
