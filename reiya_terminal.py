@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.32-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:07:10 UTC"
+BUILD_VERSION = "v6.8.33-REI-REJOIN"
+BUILD_TIME = "2026-08-31 21:28:41 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -374,6 +374,15 @@ def is_app_in_game(package, content=None):
 
 
 
+def is_roblox_home_ui():
+    """Detect Roblox's visible Home UI when ActivityNativeMain retains its game surface."""
+    xml_path = '/sdcard/rei_rejoin_ui.xml'
+    try:
+        result = run_cmd(f"su -c 'uiautomator dump {xml_path} >/dev/null && cat {xml_path}'", timeout=6)
+        ui_text = result.stdout.lower()
+        return ('for you' in ui_text and 'charts' in ui_text) or ('home' in ui_text and 'search' in ui_text and 'chat' in ui_text)
+    except Exception:
+        return False
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
     try:
@@ -1139,6 +1148,9 @@ class TerminalRejoinLoop:
                     else:
                         # ★ PROCESS ALIVE → check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
+                        # Roblox Home keeps ActivityNativeMain/RBXSurfaceView, so inspect visible UI too.
+                        if in_game and home_rejoin_enabled and is_roblox_home_ui():
+                            in_game = False
                         if in_game:
                             self.set_status(pkg, 'Ingame')
                         else:
