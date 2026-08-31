@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.28-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:55:29 UTC"
+BUILD_VERSION = "v6.8.29-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:58:55 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -623,7 +623,9 @@ def get_ram_usage():
                 values[key] = int(parts[0])  # /proc/meminfo values are KiB
 
         total_kib = values.get('MemTotal', 0)
-        free_kib = values.get('MemAvailable', values.get('MemFree', 0))
+        available_kib = values.get('MemAvailable', 0)
+        # Android can report reclaimable memory above physical MemTotal.
+        free_kib = available_kib if 0 < available_kib < total_kib else values.get('MemFree', 0)
         if total_kib <= 0:
             return 0.0, 0, 0
         used_kib = max(0, min(total_kib, total_kib - free_kib))
