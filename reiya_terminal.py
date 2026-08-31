@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.16-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:09:31 UTC"
+BUILD_VERSION = "v6.8.17-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:12:51 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -643,21 +643,33 @@ def format_uptime(seconds):
     s = int(seconds % 60)
     return f"{h:02d}h:{m:02d}m:{s:02d}s"
 
-def take_screenshot(output_path='/sdcard/roblox_mgr_shot.png'):
-    try:
-        run_cmd(f"su -c 'screencap -p {output_path}'", timeout=8)
-        if os.path.exists(output_path):
-            return output_path
-    except Exception:
-        pass
+def take_screenshot(output_path=None):
+    """Capture through screencap stdout so the Termux process owns the PNG file."""
+    output_path = output_path or os.path.join(os.path.expanduser('~'), '.rei_rejoin_screenshot.png')
+    for command in ("su -c 'screencap -p'", 'screencap -p'):
+        try:
+            result = subprocess.run(command, shell=True, capture_output=True, timeout=8)
+            if result.returncode == 0 and result.stdout.startswith(b'\x89PNG\r\n\x1a\n'):
+                with open(output_path, 'wb') as image_file:
+                    image_file.write(result.stdout)
+                return output_path
+        except Exception:
+            pass
     return None
 
+def normalize_webhook_url(webhook_url):
+    """Correct a common pasted `https>` typo and reject malformed webhook URLs."""
+    url = str(webhook_url or '').strip().replace('https>://', 'https://').replace('http>://', 'http://').replace('https>', 'https:').replace('http>', 'http:')
+    parsed = urllib.parse.urlparse(url)
+    return url if parsed.scheme in ('https', 'http') and parsed.netloc else ''
 # ==============================================================================
 # 3. DISCORD WEBHOOK SENDER
 # ==============================================================================
 
 def send_discord_webhook(webhook_url, statuses=None, start_time=None):
+    webhook_url = normalize_webhook_url(webhook_url)
     if not webhook_url:
+        print('[!] Invalid Discord webhook URL. Paste the full https://discord.com/api/webhooks/... URL.')
         return
 
     cpu = get_cpu_usage()
@@ -1366,7 +1378,7 @@ def interactive_menu():
             print(f"\nCurrent Webhook: {config.get('webhook_url', 'None')}")
             wurl = prompt("Enter Discord Webhook URL (leave empty to keep current): ").strip()
             if wurl:
-                config['webhook_url'] = wurl
+                config['webhook_url'] = normalize_webhook_url(wurl)
             wenable = prompt("Enable Webhook updates? (y/n): ").strip().lower() == 'y'
             config['webhook_enabled'] = wenable
             wint = prompt("Webhook interval in seconds [default 60]: ").strip()
