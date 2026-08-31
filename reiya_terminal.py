@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.19-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:26:46 UTC"
+BUILD_VERSION = "v6.8.20-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:27:54 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -709,7 +709,22 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     payload = {'embeds': [embed]}
     # Ignore malformed device proxy environment variables for direct Discord delivery.
     webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    screenshot_path = take_screenshot()
+screenshot_path = take_screenshot()
+
+    # curl avoids urllib's malformed-proxy handling on some Termux environments.
+    try:
+        curl_args = ['curl', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
+                     '-F', 'payload_json=' + json.dumps(payload)]
+        if screenshot_path and os.path.exists(screenshot_path):
+            curl_args += ['-F', 'file=@' + screenshot_path + ';type=image/png']
+        curl_args.append(webhook_url)
+        curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
+        if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
+            print('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
+            return
+        print(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
+    except Exception as e:
+        print(f"[!] curl webhook send error: {e}")
 
     if screenshot_path and os.path.exists(screenshot_path):
         try:
