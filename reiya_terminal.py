@@ -684,12 +684,12 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     uptime_sec = time.time() - (start_time or time.time())
     uptime = format_uptime(uptime_sec)
 
-app_lines = 'No selected Roblox packages are reporting yet.'
+    app_lines = 'No selected Roblox packages are reporting yet.'
     if statuses:
         parts = []
         for i, (pkg, info) in enumerate(statuses.items(), 1):
             status = info.get('status', 'Unknown')
-            marker = '??' if status.lower() in ('ingame', 'running') else '??'
+            marker = '\U0001F7E2' if status.lower() in ('ingame', 'running') else '\U0001F534'
             parts.append(f'**{i}. {marker} {status}**\n+ ?? `{pkg}`')
         if parts:
             app_lines = '\n'.join(parts)
