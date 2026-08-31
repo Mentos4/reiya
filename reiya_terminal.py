@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.35-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:48:54 UTC"
+BUILD_VERSION = "v6.8.36-REI-REJOIN"
+BUILD_TIME = "2026-08-31 21:50:39 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -293,17 +293,13 @@ def is_app_running(package):
     return False
 
 def get_roblox_home_return_event(package):
-    """Return the newest device log event emitted when this clone returns Home."""
+    """Read only the clone-specific Home-return log line, avoiding a full logcat timeout."""
     try:
-        log_text = run_cmd("su -c 'logcat -d -v brief'", timeout=8).stdout
-        package_signal = f'lobby/leave boundary invalidated recovery target package={package}'.lower()
-        for line in reversed(log_text.splitlines()):
-            lowered = line.lower()
-            if package_signal in lowered:
-                return line.strip()
+        signal = f'Lobby/leave boundary invalidated recovery target package={package}'
+        command = f'su -c "logcat -d" | grep -F "{signal}" | tail -n 1'
+        return run_cmd(command, timeout=5).stdout.strip()
     except Exception:
-        pass
-    return ''
+        return ''
 
 def get_package_activity_dump(package, content):
     """
