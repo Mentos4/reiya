@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.25-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:49:03 UTC"
+BUILD_VERSION = "v6.8.26-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:50:55 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -713,6 +713,8 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     # Ignore malformed device proxy environment variables for direct Discord delivery.
     webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     screenshot_path = take_screenshot()
+    if screenshot_path and os.path.exists(screenshot_path):
+        embed['image'] = {'url': 'attachment://screenshot.png'}
 
     # curl avoids urllib's malformed-proxy handling on some Termux environments.
     try:
