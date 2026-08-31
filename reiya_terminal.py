@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.22-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:37:53 UTC"
+BUILD_VERSION = "v6.8.23-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:39:15 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -649,12 +649,12 @@ def take_screenshot(output_path=None):
     try:
         if os.path.exists(output_path):
             os.remove(output_path)
-        result = subprocess.run(f"su -c 'screencap -p' > {output_path}", shell=True, executable=os.environ.get('SHELL'), capture_output=True, text=True, timeout=12)
+        result = subprocess.run(f"su -c 'screencap -p' > {output_path}", shell=True, executable=os.environ.get('SHELL'), timeout=12)
         if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 8:
             with open(output_path, 'rb') as image_file:
                 if image_file.read(8) == b'\x89PNG\r\n\x1a\n':
                     return output_path
-        print(f"[!] Screenshot capture did not produce a PNG (exit {result.returncode}: {result.stderr.strip()}).")
+        print(f"[!] Screenshot capture did not produce a PNG (exit {result.returncode}).")
     except Exception as e:
         print(f'[!] Screenshot capture error: {e}')
     return None
