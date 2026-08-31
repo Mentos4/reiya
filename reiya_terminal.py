@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.34-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:46:36 UTC"
+BUILD_VERSION = "v6.8.35-REI-REJOIN"
+BUILD_TIME = "2026-08-31 21:48:54 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -293,21 +293,18 @@ def is_app_running(package):
     return False
 
 def get_roblox_home_return_event(package):
-    """Return the newest Roblox log event emitted when a game returns to Home."""
+    """Return the newest device log event emitted when this clone returns Home."""
     try:
-        pid_output = run_cmd(f"su -c 'pidof {package}'", timeout=3).stdout.split()
-        if not pid_output:
-            return ''
-        log_text = run_cmd("su -c 'logcat -d -v brief -t 300'", timeout=5).stdout
-        signals = ('returntoluaappinternal: ... app has been initialized, returning from game',
-                   'roblox has entered app mode.', 'lobby/leave boundary invalidated')
+        log_text = run_cmd("su -c 'logcat -d -v brief'", timeout=8).stdout
+        package_signal = f'lobby/leave boundary invalidated recovery target package={package}'.lower()
         for line in reversed(log_text.splitlines()):
             lowered = line.lower()
-            if any(pid in line for pid in pid_output) and any(signal in lowered for signal in signals):
+            if package_signal in lowered:
                 return line.strip()
     except Exception:
         pass
     return ''
+
 def get_package_activity_dump(package, content):
     """
     Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block.
