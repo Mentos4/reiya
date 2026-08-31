@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.18-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:17:13 UTC"
+BUILD_VERSION = "v6.8.19-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:26:46 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -707,6 +707,8 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     }
 
     payload = {'embeds': [embed]}
+    # Ignore malformed device proxy environment variables for direct Discord delivery.
+    webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     screenshot_path = take_screenshot()
 
     if screenshot_path and os.path.exists(screenshot_path):
@@ -739,7 +741,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
                 headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
                 method='POST'
             )
-            urllib.request.urlopen(req, timeout=20)
+            webhook_opener.open(req, timeout=20)
             print("[+] Webhook sent with screenshot.")
             return
         except Exception as e:
@@ -753,7 +755,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
             headers={'Content-Type': 'application/json'},
             method='POST'
         )
-        urllib.request.urlopen(req, timeout=15)
+        webhook_opener.open(req, timeout=15)
         print("[+] Webhook JSON sent.")
     except Exception as e:
         print(f"[!] Webhook JSON send error: {e}")
