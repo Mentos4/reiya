@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.37-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:57:28 UTC"
+BUILD_VERSION = "v6.8.38-REI-REJOIN"
+BUILD_TIME = "2026-08-31 22:10:53 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -292,14 +292,19 @@ def is_app_running(package):
             pass
     return False
 
-def get_roblox_home_return_event(package):
-    """Read only the clone-specific Home-return log line, avoiding a full logcat timeout."""
+def is_roblox_home_page(package):
+    """Return True when the clone's current Player log reports Roblox LuaApp (Home)."""
     try:
-        signal = f'Lobby/leave boundary invalidated recovery target package={package}'
-        command = f'su -c "logcat -d" | grep -F "{signal}" | tail -n 1'
-        return run_cmd(command, timeout=5).stdout.strip()
+        log_dir = f'/data/data/{package}/files/appData/logs'
+        command = (
+            f"su -c 'f=$(ls -t {log_dir}/*_Player_*_last.log 2>/dev/null | head -n 1); "
+            f"test -n \"$f\" && tail -n 180 \"$f\"'"
+        )
+        text = run_cmd(command, timeout=5).stdout
+        stages = re.findall(r'updateSurfaceLuaApp:\s*\(stage:([^\)]+)\)', text, flags=re.IGNORECASE)
+        return bool(stages and stages[-1].strip().lower() == 'luaapp')
     except Exception:
-        return ''
+        return False
 
 def get_package_activity_dump(package, content):
     """
@@ -832,7 +837,6 @@ class TerminalRejoinLoop:
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
-        self.home_log_events = {}
 
     def log(self, msg):
         """Writes explicit \\r\\n like render_live_dashboard's out() — this
@@ -1119,7 +1123,6 @@ class TerminalRejoinLoop:
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
-            self.home_log_events[pkg] = get_roblox_home_return_event(pkg)
             self.last_launch[pkg] = time.time()
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
@@ -1159,21 +1162,17 @@ class TerminalRejoinLoop:
                     else:
                         # ★ PROCESS ALIVE → check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
-                        leave_event = get_roblox_home_return_event(pkg) if home_rejoin_enabled else ''
-                        returned_home = bool(leave_event and leave_event != self.home_log_events.get(pkg))
-                        if returned_home:
-                            self.home_log_events[pkg] = leave_event
-                            self.log(f"[{pkg}] Roblox return-to-Home event detected")
-                            in_game = False
-                        # Roblox Home keeps ActivityNativeMain/RBXSurfaceView, so inspect visible UI too.
-                        if in_game and home_rejoin_enabled and is_roblox_home_ui():
+                        # Direct current-state check: Player logs report stage:LuaApp while Roblox Home is open.
+                        on_home_page = home_rejoin_enabled and is_roblox_home_page(pkg)
+                        if on_home_page:
+                            self.log(f"[{pkg}] Roblox Home page is active (Player log: LuaApp)")
                             in_game = False
                         if in_game:
                             self.set_status(pkg, 'Ingame')
                         else:
                             # NOT in-game — check if still within launch grace period (20s)
                             time_since_launch = now - self.last_launch.get(pkg, 0)
-                            if time_since_launch < LAUNCH_GRACE and not returned_home:
+                            if time_since_launch < LAUNCH_GRACE and not on_home_page:
                                 self.set_status(pkg, 'Launching')
                             else:
                                 # HOME SCREEN detected (past 20s grace period)
