@@ -32,11 +32,11 @@ import threading
 import urllib.request
 import urllib.parse
 import mimetypes
-import select
+import select`r`nimport base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.24-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:46:16 UTC"
+BUILD_VERSION = "v6.8.25-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:49:03 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -644,17 +644,18 @@ def format_uptime(seconds):
     return f"{h:02d}h:{m:02d}m:{s:02d}s"
 
 def take_screenshot(output_path=None):
-    """Capture through the same root-to-Termux redirection that works in Termux."""
+    """Capture as root, then transfer base64 text so Termux owns the final PNG."""
     output_path = output_path or os.path.join(os.path.expanduser('~'), '.rei_rejoin_screenshot.png')
+    root_path = '/sdcard/rei_rejoin_webhook.png'
     try:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        result = subprocess.run(f"su -c 'screencap -p' > {output_path}", shell=True, executable=os.environ.get('SHELL'), timeout=12)
-        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 8:
-            with open(output_path, 'rb') as image_file:
-                if image_file.read(8) == b'\x89PNG\r\n\x1a\n':
-                    return output_path
-        print(f"[!] Screenshot capture did not produce a PNG (exit {result.returncode}).")
+        command = f"su -c 'screencap -p {root_path} && base64 {root_path}'"
+        result = subprocess.run(command, shell=True, capture_output=True, timeout=15)
+        image_data = base64.b64decode(result.stdout, validate=False)
+        if result.returncode == 0 and image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+            with open(output_path, 'wb') as image_file:
+                image_file.write(image_data)
+            return output_path
+        print(f'[!] Screenshot capture did not produce a PNG (exit {result.returncode}).')
     except Exception as e:
         print(f'[!] Screenshot capture error: {e}')
     return None
