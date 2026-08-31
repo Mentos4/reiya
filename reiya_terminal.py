@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.20-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:27:54 UTC"
+BUILD_VERSION = "v6.8.21-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:35:30 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -644,19 +644,20 @@ def format_uptime(seconds):
     return f"{h:02d}h:{m:02d}m:{s:02d}s"
 
 def take_screenshot(output_path=None):
-    """Capture through screencap stdout so the Termux process owns the PNG file."""
+    """Capture through the same root-to-Termux redirection that works in Termux."""
     output_path = output_path or os.path.join(os.path.expanduser('~'), '.rei_rejoin_screenshot.png')
-    for command in ("su -c 'screencap -p'", 'screencap -p'):
-        try:
-            result = subprocess.run(command, shell=True, capture_output=True, timeout=8)
-            if result.returncode == 0 and result.stdout.startswith(b'\x89PNG\r\n\x1a\n'):
-                with open(output_path, 'wb') as image_file:
-                    image_file.write(result.stdout)
-                return output_path
-        except Exception:
-            pass
+    try:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        result = subprocess.run(f"su -c 'screencap -p' > {output_path}", shell=True, timeout=12)
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 8:
+            with open(output_path, 'rb') as image_file:
+                if image_file.read(8) == b'\x89PNG\r\n\x1a\n':
+                    return output_path
+        print('[!] Screenshot capture did not produce a PNG.')
+    except Exception as e:
+        print(f'[!] Screenshot capture error: {e}')
     return None
-
 def normalize_webhook_url(webhook_url):
     """Correct a common pasted `https>` typo and reject malformed webhook URLs."""
     url = str(webhook_url or '').strip().replace('https>://', 'https://').replace('http>://', 'http://').replace('https>', 'https:').replace('http>', 'http:')
