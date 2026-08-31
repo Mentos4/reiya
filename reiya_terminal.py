@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.15-REI-REJOIN"
-BUILD_TIME = "2026-08-31 19:45:47 UTC"
+BUILD_VERSION = "v6.8.16-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:09:31 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -99,18 +99,26 @@ def lookup_roblox_game_name(game_value):
     if not place_id:
         return fallback
     try:
-        endpoint = 'https://games.roblox.com/v1/games/multiget-place-details?placeIds=' + urllib.parse.quote(place_id)
-        request = urllib.request.Request(endpoint, headers={'User-Agent': 'REI-REJOIN/1.0'})
-        with urllib.request.urlopen(request, timeout=8) as response:
-            details = json.loads(response.read().decode('utf-8'))
-        if isinstance(details, list) and details:
-            name = details[0].get('name') or details[0].get('Name')
-            if name:
-                return str(name)
+        headers = {'User-Agent': 'REI-REJOIN/1.0'}
+        universe_request = urllib.request.Request(
+            f'https://apis.roblox.com/universes/v1/places/{urllib.parse.quote(place_id)}/universe',
+            headers=headers
+        )
+        with urllib.request.urlopen(universe_request, timeout=8) as response:
+            universe_id = json.loads(response.read().decode('utf-8')).get('universeId')
+        if not universe_id:
+            return fallback
+        game_request = urllib.request.Request(
+            'https://games.roblox.com/v1/games?universeIds=' + urllib.parse.quote(str(universe_id)),
+            headers=headers
+        )
+        with urllib.request.urlopen(game_request, timeout=8) as response:
+            games = json.loads(response.read().decode('utf-8')).get('data', [])
+        if games and games[0].get('name'):
+            return str(games[0]['name'])
     except Exception:
         pass
     return fallback
-
 def _is_generated_game_name(name):
     return bool(re.match(r'^(Game \(|Place:)', str(name or '')))
 
