@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.26-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:50:55 UTC"
+BUILD_VERSION = "v6.8.27-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:52:57 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -684,44 +684,42 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     uptime_sec = time.time() - (start_time or time.time())
     uptime = format_uptime(uptime_sec)
 
-    app_lines = ''
+app_lines = 'No selected Roblox packages are reporting yet.'
     if statuses:
         parts = []
         for i, (pkg, info) in enumerate(statuses.items(), 1):
             status = info.get('status', 'Unknown')
-            parts.append(f'**{i}.** {status} | `{pkg}`')
+            marker = '??' if status.lower() in ('ingame', 'running') else '??'
+            parts.append(f'**{i}. {marker} {status}**\n+ ?? `{pkg}`')
         if parts:
             app_lines = '\n'.join(parts)
 
-    description = (
-        f'**Device:** {device}\n'
-        f'**Uptime:** {uptime}\n'
-        f'**CPU:** {cpu}% / 100%\n'
-        f'**RAM:** {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB)\n'
-    )
-    if app_lines:
-        description += f'\n**Application Details:**\n{app_lines}'
-
     embed = {
-        'title': 'REI REJOIN Core',
-        'description': description,
-        'color': 0x00CCCC,
+        'author': {'name': 'REI REJOIN'},
+        'description': f'?? **Device name: {device}**',
+        'color': 0x3498DB,
+        'fields': [
+            {'name': '?? Uptime', 'value': uptime, 'inline': True},
+            {'name': '?? Total CPU usage', 'value': f'{cpu}% / 100%', 'inline': True},
+            {'name': '?? Total RAM usage', 'value': f'{ram_used_mib}/{ram_total_mib} MiB ({ram_pct}%)', 'inline': True},
+            {'name': '?? Application Details', 'value': app_lines, 'inline': False},
+        ],
         'footer': {'text': 'Roblox Account Manager CLI'},
     }
-
     payload = {'embeds': [embed]}
     # Ignore malformed device proxy environment variables for direct Discord delivery.
     webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     screenshot_path = take_screenshot()
     if screenshot_path and os.path.exists(screenshot_path):
         embed['image'] = {'url': 'attachment://screenshot.png'}
+        payload['attachments'] = [{'id': 0, 'filename': 'screenshot.png'}]
 
     # curl avoids urllib's malformed-proxy handling on some Termux environments.
     try:
         curl_args = ['curl', '--noproxy', '*', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
                      '-F', 'payload_json=' + json.dumps(payload)]
         if screenshot_path and os.path.exists(screenshot_path):
-            curl_args += ['-F', 'file=@' + screenshot_path + ';type=image/png']
+            curl_args += ['-F', 'files[0]=@' + screenshot_path + ';type=image/png']
         curl_args.append(webhook_url)
         curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
         if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
