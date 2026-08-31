@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.30-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:03:32 UTC"
+BUILD_VERSION = "v6.8.31-REI-REJOIN"
+BUILD_TIME = "2026-08-31 21:04:35 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -697,13 +697,13 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
 
     embed = {
         'author': {'name': 'REI REJOIN'},
-        'description': f'\\U0001F4F1 **Device name: {device}**',
+        'description': f'\U0001F4F1 **Device name: {device}**',
         'color': 0x3498DB,
         'fields': [
-            {'name': '\\U000023F1 Uptime', 'value': uptime, 'inline': True},
-            {'name': '\\U00002699 Total CPU usage', 'value': f'{cpu}% / 100%', 'inline': True},
-            {'name': '\\U0001F4BE Total RAM usage', 'value': f'{ram_used_mib}/{ram_total_mib} MiB ({ram_pct}%)', 'inline': True},
-            {'name': '\\U0001F4CA Application Details', 'value': app_lines, 'inline': False},
+            {'name': '\U000023F1 Uptime', 'value': uptime, 'inline': True},
+            {'name': '\U00002699 Total CPU usage', 'value': f'{cpu}% / 100%', 'inline': True},
+            {'name': '\U0001F4BE Total RAM usage', 'value': f'{ram_used_mib}/{ram_total_mib} MiB ({ram_pct}%)', 'inline': True},
+            {'name': '\U0001F4CA Application Details', 'value': app_lines, 'inline': False},
         ],
         'footer': {'text': 'Roblox Account Manager CLI'},
     }
