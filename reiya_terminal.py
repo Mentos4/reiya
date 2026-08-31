@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.23-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:39:15 UTC"
+BUILD_VERSION = "v6.8.24-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:46:16 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -714,7 +714,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
 
     # curl avoids urllib's malformed-proxy handling on some Termux environments.
     try:
-        curl_args = ['curl', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
+        curl_args = ['curl', '--noproxy', '*', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
                      '-F', 'payload_json=' + json.dumps(payload)]
         if screenshot_path and os.path.exists(screenshot_path):
             curl_args += ['-F', 'file=@' + screenshot_path + ';type=image/png']
