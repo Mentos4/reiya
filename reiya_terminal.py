@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.38-REI-REJOIN"
-BUILD_TIME = "2026-08-31 22:10:53 UTC"
+BUILD_VERSION = "v6.8.39-REI-REJOIN"
+BUILD_TIME = "2026-08-31 22:17:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -292,19 +292,17 @@ def is_app_running(package):
             pass
     return False
 
-def is_roblox_home_page(package):
-    """Return True when the clone's current Player log reports Roblox LuaApp (Home)."""
+def get_roblox_home_page_event(package):
+    """Return the latest Android Home-route event for this Roblox clone."""
     try:
-        log_dir = f'/data/data/{package}/files/appData/logs'
-        command = (
-            f"su -c 'f=$(ls -t {log_dir}/*_Player_*_last.log 2>/dev/null | head -n 1); "
-            f"test -n \"$f\" && tail -n 180 \"$f\"'"
-        )
+        command = "su -c 'logcat -d -v time -s ActivityTaskManager'"
         text = run_cmd(command, timeout=5).stdout
-        stages = re.findall(r'updateSurfaceLuaApp:\s*\(stage:([^\)]+)\)', text, flags=re.IGNORECASE)
-        return bool(stages and stages[-1].strip().lower() == 'luaapp')
+        marker = 'dat=roblox://navigation/home'
+        component = f'cmp={package}/com.roblox.client.ActivityProtocolLaunch'
+        events = [line.strip() for line in text.splitlines() if marker in line and component in line]
+        return events[-1] if events else ''
     except Exception:
-        return False
+        return ''
 
 def get_package_activity_dump(package, content):
     """
@@ -837,6 +835,7 @@ class TerminalRejoinLoop:
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
+        self.home_page_events = {}
 
     def log(self, msg):
         """Writes explicit \\r\\n like render_live_dashboard's out() — this
@@ -1123,6 +1122,7 @@ class TerminalRejoinLoop:
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
+            self.home_page_events[pkg] = get_roblox_home_page_event(pkg)
             self.last_launch[pkg] = time.time()
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
@@ -1162,10 +1162,12 @@ class TerminalRejoinLoop:
                     else:
                         # ★ PROCESS ALIVE → check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
-                        # Direct current-state check: Player logs report stage:LuaApp while Roblox Home is open.
-                        on_home_page = home_rejoin_enabled and is_roblox_home_page(pkg)
+                        # Exact Roblox Home route emitted by Android when the clone opens its Home page.
+                        home_event = get_roblox_home_page_event(pkg) if home_rejoin_enabled else ''
+                        on_home_page = bool(home_event and home_event != self.home_page_events.get(pkg))
                         if on_home_page:
-                            self.log(f"[{pkg}] Roblox Home page is active (Player log: LuaApp)")
+                            self.home_page_events[pkg] = home_event
+                            self.log(f"[{pkg}] Roblox Home page route detected")
                             in_game = False
                         if in_game:
                             self.set_status(pkg, 'Ingame')
