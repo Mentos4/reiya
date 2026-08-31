@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.27-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:52:57 UTC"
+BUILD_VERSION = "v6.8.28-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:55:29 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -607,10 +607,9 @@ def get_cpu_usage():
 def get_ram_usage():
     """Returns live physical RAM usage as (percent, used, total) MiB.
 
-    Android can keep MemAvailable nearly unchanged after an app closes because
-    released pages become reclaimable cache. MemFree is the live free-page
-    counter, so total minus it reflects physical RAM currently occupied by the
-    system, cache, and applications at each dashboard refresh.
+    MemAvailable is Android's reclaimable-memory estimate and changes as apps
+    allocate or release RAM. It is therefore used for the dashboard's live
+    used-RAM value, with MemFree retained only as a fallback.
     """
     try:
         content = _read_proc_file('/proc/meminfo')
@@ -624,7 +623,7 @@ def get_ram_usage():
                 values[key] = int(parts[0])  # /proc/meminfo values are KiB
 
         total_kib = values.get('MemTotal', 0)
-        free_kib = values.get('MemFree', values.get('MemAvailable', 0))
+        free_kib = values.get('MemAvailable', values.get('MemFree', 0))
         if total_kib <= 0:
             return 0.0, 0, 0
         used_kib = max(0, min(total_kib, total_kib - free_kib))
