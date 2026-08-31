@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.36-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:50:39 UTC"
+BUILD_VERSION = "v6.8.37-REI-REJOIN"
+BUILD_TIME = "2026-08-31 21:57:28 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1160,7 +1160,8 @@ class TerminalRejoinLoop:
                         # ★ PROCESS ALIVE → check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
                         leave_event = get_roblox_home_return_event(pkg) if home_rejoin_enabled else ''
-                        if leave_event and leave_event != self.home_log_events.get(pkg):
+                        returned_home = bool(leave_event and leave_event != self.home_log_events.get(pkg))
+                        if returned_home:
                             self.home_log_events[pkg] = leave_event
                             self.log(f"[{pkg}] Roblox return-to-Home event detected")
                             in_game = False
@@ -1172,7 +1173,7 @@ class TerminalRejoinLoop:
                         else:
                             # NOT in-game — check if still within launch grace period (20s)
                             time_since_launch = now - self.last_launch.get(pkg, 0)
-                            if time_since_launch < LAUNCH_GRACE:
+                            if time_since_launch < LAUNCH_GRACE and not returned_home:
                                 self.set_status(pkg, 'Launching')
                             else:
                                 # HOME SCREEN detected (past 20s grace period)
