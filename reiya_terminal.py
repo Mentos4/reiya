@@ -35,8 +35,8 @@ import mimetypes
 import select
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.17-REI-REJOIN"
-BUILD_TIME = "2026-08-31 20:12:51 UTC"
+BUILD_VERSION = "v6.8.18-REI-REJOIN"
+BUILD_TIME = "2026-08-31 20:17:13 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -660,6 +660,9 @@ def take_screenshot(output_path=None):
 def normalize_webhook_url(webhook_url):
     """Correct a common pasted `https>` typo and reject malformed webhook URLs."""
     url = str(webhook_url or '').strip().replace('https>://', 'https://').replace('http>://', 'http://').replace('https>', 'https:').replace('http>', 'http:')
+    markdown_match = re.fullmatch(r'\[(https?://[^\]]+)\]\(https?://[^)]+\)', url)
+    if markdown_match:
+        url = markdown_match.group(1)
     parsed = urllib.parse.urlparse(url)
     return url if parsed.scheme in ('https', 'http') and parsed.netloc else ''
 # ==============================================================================
