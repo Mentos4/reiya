@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.31-REI-REJOIN"
-BUILD_TIME = "2026-08-31 21:04:35 UTC"
+BUILD_VERSION = "v6.8.32-REI-REJOIN"
+BUILD_TIME = "2026-08-31 21:07:10 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -357,7 +357,10 @@ def is_app_in_game(package, content=None):
             pkg_lines = [line for line in content.split('\n') if package in line]
         if pkg_lines:
             block_text = '\n'.join(pkg_lines).lower()
-            # 1. Check for explicit Home Screen / React UI signals FIRST
+            # 1. A stopped/non-resumed Roblox activity only retains a stale surface; rejoin it.
+            if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
+                return False
+            # 2. Check for explicit Home Screen / React UI signals.
             if any(sig in block_text for sig in HOME_SIGNALS):
                 return False
             # 2. Check for explicit 3D Game rendering signals
