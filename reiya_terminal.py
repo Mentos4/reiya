@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.50-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:30:00 UTC"
+BUILD_VERSION = "v6.8.51-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:35:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -419,73 +419,62 @@ def get_activity_top_dump():
             pass
     return ''
 
-def is_roblox_on_home_page(package, content=None):
+def is_app_in_game(package, content=None):
     """
-    Determine whether Roblox or a clone is sitting on the Home Screen vs In-Game.
-    Primary check queries visible screen UI hierarchy (uiautomator dump).
-    Fallback checks query Player logs, logcat, and dumpsys.
+    Check if package is active in a 3D Game Place vs sitting on the Home Screen.
+    Uses lightweight 'dumpsys activity top' fetched once per poll cycle.
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
-    # Check 1: UI Automator XML Dump (Inspects visible screen text for Home UI elements)
-    # Visible on screen in Noka, Delta, Arceus, and standard Roblox Home Screen:
-    # "For you", "Charts", "Recommended For You", "Set up your account", "Add Friends"
-    for xml_file in ['/data/local/tmp/rei_ui.xml', '/sdcard/rei_ui.xml']:
-        try:
-            cmd = f"su -c 'uiautomator dump {xml_file} >/dev/null 2>&1 && cat {xml_file} 2>/dev/null'"
-            res = run_cmd(cmd, timeout=5)
-            ui_text = (res.stdout or '').lower()
-            if ui_text:
-                is_home = (
-                    ('for you' in ui_text and 'charts' in ui_text) or
-                    ('recommended for' in ui_text) or
-                    ('set up your account' in ui_text) or
-                    ('add friends' in ui_text and 'share qr' in ui_text) or
-                    ('home' in ui_text and 'chat' in ui_text and 'more' in ui_text)
-                )
-                if is_home:
-                    return True
-        except Exception:
-            pass
+    HOME_SIGNALS = [
+        'activityprotocollaunch', 'reactrootview', 'reactviewgroup', 'reactframelayout',
+        'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell', 'foryou',
+        'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
+    ]
+    # Note: 'nativemain' and 'activitynativemain' are EXCLUDED because ActivityNativeMain
+    # hosts the React Home UI as well as the 3D game view.
+    PURE_3D_GAME_SIGNALS = [
+        'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity'
+    ]
 
-    # Check 2: Player Logs for Disconnect / Return to Home / Leave Game
-    try:
-        log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
-        log_cmd = f"su -c 'LOGS=$(ls -t {log_dirs}/*Player*.log {log_dirs}/*.log 2>/dev/null | head -n 1); [ -n \"$LOGS\" ] && tail -n 80 $LOGS 2>/dev/null'"
-        log_text = (run_cmd(log_cmd, timeout=3).stdout or '').lower()
-        if log_text:
-            home_log_sigs = [
-                'disconnect notification received', 'navigating to home', 'leavegame',
-                'game ended', 'unload place', 'error code:', 'disconnected from game',
-                'roblox://navigation/home', 'leaving game', 'return to home', 'leave game'
-            ]
-            if any(sig in log_text for sig in home_log_sigs):
+    if content is None:
+        content = get_activity_top_dump()
+
+    if content and content.strip():
+        pkg_lines = get_package_activity_dump(package, content)
+        if not pkg_lines:
+            pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
+        if pkg_lines:
+            block_text = '\n'.join(pkg_lines).lower()
+
+            # 1. Stopped / non-resumed Roblox activity surface
+            if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
+                return False
+
+            # 2. ActivityProtocolLaunch is Roblox's Home Launcher component
+            if 'activityprotocollaunch' in block_text:
+                return False
+
+            # 3. Explicit Home Screen signals in activity block
+            if any(sig in block_text for sig in HOME_SIGNALS):
+                return False
+
+            # 4. Check for pure 3D game rendering surface without Home Launcher component
+            if any(sig in block_text for sig in PURE_3D_GAME_SIGNALS):
                 return True
-    except Exception:
-        pass
 
-    # Check 3: Logcat stream for recent Disconnect / Home navigation
-    try:
-        logcat_cmd = "su -c 'logcat -d -v time -t 200 ActivityTaskManager:V Roblox:V FLog:V'"
-        logcat_text = (run_cmd(logcat_cmd, timeout=3).stdout or '').lower()
-        if pkg in logcat_text:
-            if 'roblox://navigation/home' in logcat_text or 'activityprotocollaunch' in logcat_text or 'disconnect notification' in logcat_text:
-                return True
-    except Exception:
-        pass
-
-    # Check 4: Dumpsys activities / window stack check
-    try:
-        res = run_cmd(f"su -c 'dumpsys activity activities | grep -i {package}'", timeout=3)
-        act_text = (res.stdout or '').lower()
-        if act_text and 'activityprotocollaunch' in act_text:
-            return True
-    except Exception:
-        pass
+            # 5. Fallback for ambiguous block
+            return False
 
     return False
+
+def is_roblox_on_home_page(package, content=None):
+    """Return True if Roblox or clone is sitting on the Home Screen rather than in 3D game."""
+    return not is_app_in_game(package, content=content)
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
