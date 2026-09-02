@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.47-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:32:00 UTC"
+BUILD_VERSION = "v6.8.48-REI-REJOIN"
+BUILD_TIME = "2026-09-03 01:35:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -572,20 +572,30 @@ def _resolve_package_game_name(pkg, cfg):
     """Resolve display name of the configured game for a specific package."""
     method = cfg.get('game_method', 'all')
     if method == 'each':
+        pkg_games = cfg.get('package_games', {})
+        gid = str(pkg_games.get(pkg, cfg.get('game_id', '')) or '').strip()
         pkg_names = cfg.get('package_game_names', {})
-        if pkg in pkg_names and pkg_names[pkg]:
-            return pkg_names[pkg]
-        gid = cfg.get('package_games', {}).get(pkg, '')
-        if gid:
-            for gname, pid in PRESET_GAMES:
-                if pid == gid:
-                    return gname
-            return f"Place:{gid[:12]}"
-    gname = cfg.get('game_name')
-    if gname:
-        return gname
-    gid = cfg.get('game_id')
-    return f"Place:{gid[:12]}" if gid else 'No Game Set'
+        stored_name = str(pkg_names.get(pkg, '') or '').strip()
+        if stored_name and not _is_generated_game_name(stored_name):
+            return stored_name
+    else:
+        gid = str(cfg.get('game_id', '') or '').strip()
+        stored_name = str(cfg.get('game_name', '') or '').strip()
+        if stored_name and not _is_generated_game_name(stored_name):
+            return stored_name
+
+    if not gid:
+        return 'No Game Set'
+
+    for gname, pid in PRESET_GAMES:
+        if pid == gid:
+            return gname
+
+    fetched = lookup_roblox_game_name(gid)
+    if fetched and not _is_generated_game_name(fetched):
+        return fetched
+
+    return f"Game ({gid[:12]})" if len(gid) > 12 else f"Place:{gid}"
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
@@ -1262,37 +1272,27 @@ class TerminalRejoinLoop:
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
                     else:
-                        # \u2605 PROCESS ALIVE \u2192 check if in-game or on Home Screen
+                        # ★ PROCESS ALIVE → check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
-                        # Exact Roblox Home route emitted by Android when the clone opens its Home page.
                         home_event = get_roblox_home_page_event(pkg) if home_rejoin_enabled else ''
                         on_home_page = bool(home_event and home_event != self.home_page_events.get(pkg))
+                        time_since_launch = now - self.last_launch.get(pkg, 0)
+
                         if on_home_page:
                             self.home_page_events[pkg] = home_event
-                            self.log(f"[{pkg}] Roblox Home page route detected")
-                            in_game = False
-                        if in_game:
-                            self.set_status(pkg, 'Ingame')
+                            self.set_status(pkg, 'Home Page')
+                            self.log(f"[{pkg}] Roblox Home page detected \u2192 Force stopping & rejoining place")
+                            self.set_status(pkg, 'Rejoining')
+                            force_stop_app(pkg)
+                            time.sleep(2)
+                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                            self.last_launch[pkg] = time.time()
+                            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        elif time_since_launch < LAUNCH_GRACE and not in_game:
+                            self.set_status(pkg, 'Launching')
                         else:
-                            # NOT in-game — check if still within launch grace period (20s)
-                            time_since_launch = now - self.last_launch.get(pkg, 0)
-                            if time_since_launch < LAUNCH_GRACE and not on_home_page:
-                                self.set_status(pkg, 'Launching')
-                            elif on_home_page:
-                                # Rejoin only after the exact Roblox Home-route event. An
-                                # ambiguous activity dump is common while Termux is foreground
-                                # or a split-screen window is transitioning and must not trigger
-                                # a force-stop/relaunch loop.
-                                self.set_status(pkg, 'Home Page')
-                                self.log(f"[{pkg}] Roblox Home page detected \u2192 Force stopping & rejoining place")
-                                self.set_status(pkg, 'Rejoining')
-                                force_stop_app(pkg)
-                                time.sleep(2)
-                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                self.last_launch[pkg] = time.time()
-                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                            else:
-                                self.set_status(pkg, 'Checking')
+                            # Alive and not on Home screen -> Ingame
+                            self.set_status(pkg, 'Ingame')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
                 # must not silently kill this daemon thread — that would
