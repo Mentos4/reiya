@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.48-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:35:00 UTC"
+BUILD_VERSION = "v6.8.49-REI-REJOIN"
+BUILD_TIME = "2026-09-03 01:38:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -845,11 +845,11 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         curl_args.append(webhook_url)
         curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
         if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
-            print('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
+            rejoin_engine.log('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
             return
-        print(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
+        rejoin_engine.log(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
     except Exception as e:
-        print(f"[!] curl webhook send error: {e}")
+        rejoin_engine.log(f"[!] curl webhook send error: {e}")
 
     if screenshot_path and os.path.exists(screenshot_path):
         try:
@@ -882,10 +882,10 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
                 method='POST'
             )
             webhook_opener.open(req, timeout=20)
-            print("[+] Webhook sent with screenshot.")
+            rejoin_engine.log("[+] Webhook sent with screenshot.")
             return
         except Exception as e:
-            print(f"[!] Webhook multipart send failed, falling back to JSON: {e}")
+            rejoin_engine.log(f"[!] Webhook multipart send failed, falling back to JSON: {e}")
 
     try:
         data_bytes = json.dumps(payload).encode('utf-8')
@@ -896,9 +896,9 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
             method='POST'
         )
         webhook_opener.open(req, timeout=15)
-        print("[+] Webhook JSON sent.")
+        rejoin_engine.log("[+] Webhook JSON sent.")
     except Exception as e:
-        print(f"[!] Webhook JSON send error: {e}")
+        rejoin_engine.log(f"[!] Webhook JSON send error: {e}")
 
 class WebhookThread(threading.Thread):
     def __init__(self, webhook_url, interval, get_status_fn, start_time):
@@ -933,18 +933,19 @@ class TerminalRejoinLoop:
         self.start_time = None
         self.webhook_thread = None
         self.home_page_events = {}
+        self.recent_logs = []
+        self.dashboard_active = False
 
     def log(self, msg):
-        """Writes explicit \\r\\n like render_live_dashboard's out() — this
-        runs on the background _loop thread, which keeps emitting log lines
-        after the user leaves the dashboard (Option 8 only stops the display,
-        not the engine — Option 9 does that). A bare print()'s '\\n' doesn't
-        always get translated to CRLF on Termux ptys, so without this the
-        background thread's output staircases and corrupts every menu screen
-        drawn afterward, making the CLI look frozen/unresponsive."""
+        """Buffers log entries for the live dashboard and writes to stdout when dashboard is not active."""
         ts = time.strftime('%H:%M:%S')
-        sys.stdout.write(f"[{ts}] {msg}\r\n")
-        sys.stdout.flush()
+        log_entry = f"[{ts}] {msg}"
+        self.recent_logs.append(log_entry)
+        if len(self.recent_logs) > 8:
+            self.recent_logs.pop(0)
+        if not self.dashboard_active:
+            sys.stdout.write(f"{log_entry}\r\n")
+            sys.stdout.flush()
 
     def set_status(self, pkg, status_str):
         self.status[pkg] = {'status': status_str, 'time': time.time()}
@@ -1102,6 +1103,7 @@ class TerminalRejoinLoop:
         saved_terminal_mode = None
         termios_module = None
         try:
+            self.dashboard_active = True
             # Termux's buffered TextIO stdin can miss readiness notifications
             # after the dashboard has been redrawn. Read the TTY directly in
             # cbreak mode so one Enter key always exits this screen.
@@ -1174,6 +1176,14 @@ class TerminalRejoinLoop:
                     out(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
                 out(SEP)
+                # ── Recent Activity ────────────────────────────────
+                out(f"{BOLD}[ Recent Activity ]{RESET}")
+                recent = self.recent_logs[-3:] if self.recent_logs else ["(No activity logged yet)"]
+                for log_line in recent:
+                    vis_line = log_line if len(log_line) <= TOTAL_W - 4 else log_line[:TOTAL_W - 5] + '..'
+                    out(f"  {vis_line}")
+
+                out(SEP)
                 out(f"{BOLD}[Enter] Stop Auto Rejoin & Main Menu{RESET}")
                 sys.stdout.flush()
 
@@ -1195,6 +1205,7 @@ class TerminalRejoinLoop:
         except (KeyboardInterrupt, Exception):
             pass
         finally:
+            self.dashboard_active = False
             if input_fd is not None and saved_terminal_mode is not None:
                 try:
                     termios_module.tcsetattr(input_fd, termios_module.TCSADRAIN, saved_terminal_mode)
