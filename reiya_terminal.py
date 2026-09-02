@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.44-REI-REJOIN"
-BUILD_TIME = "2026-09-02 17:00:02 UTC"
+BUILD_VERSION = "v6.8.45-REI-REJOIN"
+BUILD_TIME = "2026-09-02 17:07:08 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -125,18 +125,28 @@ def _is_generated_game_name(name):
 
 _roblox_username_cache = {}
 
-def _extract_roblox_user_id(log_text):
-    """Read a Roblox user ID from common Player-log formats."""
-    patterns = [
+def _extract_roblox_identity(log_text):
+    """Read a Roblox username or user ID from common Player-log formats."""
+    text = log_text or ''
+    username_patterns = [
+        r'\busername\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
+        r'\buser_name\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
+        r'\blogged\s+in\s+as\s+["\']?([A-Za-z0-9_]{3,20})',
+    ]
+    for pattern in username_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1), ''
+    user_id_patterns = [
         r'\buserId\s*[:=]\s*["\']?(\d+)',
         r'\buserid\s*[:=]\s*["\']?(\d+)',
         r'\buser_id\s*[:=]\s*["\']?(\d+)',
     ]
-    for pattern in patterns:
-        match = re.search(pattern, log_text or '', re.IGNORECASE)
+    for pattern in user_id_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return match.group(1)
-    return ''
+            return '', match.group(1)
+    return '', ''
 
 def get_roblox_username(package):
     """Detect the logged-in Roblox account for a clone from its Player log."""
@@ -147,7 +157,10 @@ def get_roblox_username(package):
         return ''
     log_path = f'/data/data/{package}/files/appData/logs/*_Player_*_last.log'
     log_text = run_cmd(f"su -c 'tail -n 600 {log_path} 2>/dev/null'", timeout=5).stdout
-    user_id = _extract_roblox_user_id(log_text)
+    username, user_id = _extract_roblox_identity(log_text)
+    if username:
+        _roblox_username_cache[package] = (username, time.time())
+        return username
     if not user_id:
         return ''
     try:
@@ -1100,7 +1113,7 @@ class TerminalRejoinLoop:
                 for idx, p in enumerate(pkgs, 1):
                     info_d  = statuses.get(p, {})
                     st      = info_d.get('status', 'Launching')
-                    uname   = get_roblox_username(p) or p
+                    uname   = get_roblox_username(p) or 'Detecting'
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
