@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.46-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:10:00 UTC"
+BUILD_VERSION = "v6.8.47-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:15:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -422,23 +422,16 @@ def get_activity_top_dump():
 def is_roblox_on_home_page(package, content=None):
     """
     Determine whether Roblox or a clone is sitting on the Home Screen vs In-Game.
-    Checks dumpsys activity top, dumpsys window focused app, and logcat signals.
+    Combines dumpsys window, dumpsys activity top, and UI automator hierarchy checks.
     """
-    HOME_SIGNALS = [
-        'activityprotocollaunch', 'reactrootview', 'reactviewgroup', 'reactframelayout',
-        'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell', 'foryou',
-        'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
-    ]
-    GAME_SIGNALS = [
-        'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview', 'activitynativemain'
-    ]
+    pkg = str(package or '').lower()
+    if not pkg:
+        return False
 
-    # 1. Check focused window component via dumpsys window
+    # 1. Check window stack / focused app via dumpsys window
     try:
-        w_dump = run_cmd("su -c 'dumpsys window | grep -E \"mCurrentFocus|mFocusedApp\"'", timeout=3).stdout.lower()
-        if package.lower() in w_dump and 'activityprotocollaunch' in w_dump:
+        w_dump = run_cmd("su -c 'dumpsys window windows | grep -iE \"mCurrentFocus|mFocusedApp|mObserved|mSurface\"'", timeout=3).stdout.lower()
+        if pkg in w_dump and 'activityprotocollaunch' in w_dump:
             return True
     except Exception:
         pass
@@ -450,15 +443,46 @@ def is_roblox_on_home_page(package, content=None):
     if content and content.strip():
         pkg_lines = get_package_activity_dump(package, content)
         if not pkg_lines:
-            pkg_lines = [line for line in content.split('\n') if package.lower() in line.lower()]
+            pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
         if pkg_lines:
             block_text = '\n'.join(pkg_lines).lower()
-            # Stale stopped activity surface
+
+            # Stale / stopped activity
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
                 return True
-            # Home Screen React UI / Protocol Launch active
-            if any(sig in block_text for sig in HOME_SIGNALS) and not any(sig in block_text for sig in GAME_SIGNALS):
+
+            # Direct ActivityProtocolLaunch presence in active activity block
+            if 'activityprotocollaunch' in block_text:
                 return True
+
+            # React Home UI signals without active 3D surface view
+            HOME_SIGNALS = [
+                'activityprotocollaunch', 'reactrootview', 'reactviewgroup', 'reactframelayout',
+                'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
+                'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+                'loginview', 'landingview', 'authactivity', 'appshell', 'foryou',
+                'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
+            ]
+            # Exclude activitynativemain/nativemain because ActivityNativeMain hosts React Home UI too!
+            PURE_3D_GAME_SIGNALS = [
+                'surfaceview', 'glsurfaceview', 'textureview', 'renderview'
+            ]
+
+            has_home_sig = any(sig in block_text for sig in HOME_SIGNALS)
+            has_3d_surface = any(sig in block_text for sig in PURE_3D_GAME_SIGNALS)
+
+            if has_home_sig and not has_3d_surface:
+                return True
+
+    # 3. UI Automator XML dump fallback for visible Home UI ("For you", "Charts", "Recommended For You", "Add Friends")
+    xml_path = '/sdcard/rei_ui_check.xml'
+    try:
+        res = run_cmd(f"su -c 'uiautomator dump {xml_path} >/dev/null && cat {xml_path}'", timeout=4)
+        ui_text = (res.stdout or '').lower()
+        if ('for you' in ui_text and 'charts' in ui_text) or ('recommended for you' in ui_text) or ('add friends' in ui_text and 'share qr' in ui_text) or ('home' in ui_text and 'chat' in ui_text and 'more' in ui_text):
+            return True
+    except Exception:
+        pass
 
     return False
 
