@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.45-REI-REJOIN"
-BUILD_TIME = "2026-09-02 17:07:08 UTC"
+BUILD_VERSION = "v6.8.46-REI-REJOIN"
+BUILD_TIME = "2026-09-03 01:27:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -124,39 +124,73 @@ def _is_generated_game_name(name):
     return bool(re.match(r'^(Game \(|Place:)', str(name or '')))
 
 _roblox_username_cache = {}
+_INVALID_USERNAMES = {'null', 'none', 'true', 'false', 'undefined', 'system', 'unknown', 'default', 'player'}
 
 def _extract_roblox_identity(log_text):
-    """Read a Roblox username or user ID from common Player-log formats."""
+    """Read a Roblox username or user ID from common Player-log formats or XML prefs."""
     text = log_text or ''
+
+    # 1. Direct Username Patterns
     username_patterns = [
-        r'\busername\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
-        r'\buser_name\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
-        r'\blogged\s+in\s+as\s+["\']?([A-Za-z0-9_]{3,20})',
+        # XML tags: <string name="username">Player123</string>, <string name="user_name">...
+        r'<string\s+name=["\'](?:user_?name|username|account_?name|roblox_?username)["\'][^>]*>([^<]+)</string>',
+        # JSON / Key-Value: "username":"Player123", username: Player123
+        r'["\']?(?:user_?name|username)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+        # FLog / Log lines: LocalPlayer UserName: Player123, Username: Player123, User Name: Player123
+        r'(?:localplayer\s+)?user\s*name\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'\blogged\s+in\s+as\s+["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'\bauthenticated\s+as\s+["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'\[FLog::(?:User|Output|Login)\]\s*(?:User(?:name)?)\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
     ]
     for pattern in username_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1), ''
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            uname = match.group(1).strip()
+            if uname and uname.lower() not in _INVALID_USERNAMES and not uname.isdigit():
+                return uname, ''
+
+    # 2. User ID Patterns (if username not directly found)
     user_id_patterns = [
-        r'\buserId\s*[:=]\s*["\']?(\d+)',
-        r'\buserid\s*[:=]\s*["\']?(\d+)',
-        r'\buser_id\s*[:=]\s*["\']?(\d+)',
+        # XML tags: <string name="userId">123456</string>
+        r'<string\s+name=["\'](?:user_?id|userid)["\'][^>]*>(\d{3,12})</string>',
+        # XML int/long tags: <int name="UserId" value="123456"/>
+        r'<(?:int|long|string)\s+name=["\'](?:user_?id|userid)["\'][^>]*value=["\'](\d{3,12})["\']',
+        # JSON / Key-Value: "userId": 123456, user_id: 123456
+        r'["\']?(?:user_?id|userid)["\']?\s*[:=]\s*["\']?(\d{3,12})["\']?',
+        # FLog / Log lines: LocalPlayer UserId: 123456, User ID: 123456
+        r'(?:localplayer\s+)?user\s*id\s*[:=]\s*["\']?(\d{3,12})["\']?',
+        r'\[FLog::(?:User|Output|Login)\]\s*(?:User\s*ID)\s*[:=]\s*["\']?(\d{3,12})["\']?',
     ]
     for pattern in user_id_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return '', match.group(1)
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            uid = match.group(1).strip()
+            if uid and uid != '0':
+                return '', uid
+
     return '', ''
 
 def get_roblox_username(package):
-    """Detect the logged-in Roblox account for a clone from its Player log."""
+    """Detect the logged-in Roblox account for a clone from its Player log or shared_prefs."""
     cached = _roblox_username_cache.get(package)
     if cached and time.time() - cached[1] < 3600:
         return cached[0]
     if not re.fullmatch(r'[A-Za-z0-9._]+', str(package or '')):
         return ''
-    log_path = f'/data/data/{package}/files/appData/logs/*_Player_*_last.log'
-    log_text = run_cmd(f"su -c 'tail -n 600 {log_path} 2>/dev/null'", timeout=5).stdout
+
+    # Fast shell extraction:
+    # 1. Tail latest Player logs (checking files/appData/logs, files/logs, sdcard logs)
+    # 2. Grep XML files in shared_prefs specifically (NO recursive asset scan!)
+    command = (
+        f"su -c '"
+        f"for d in \"/data/data/{package}/files/appData/logs\" \"/data/data/{package}/files/logs\" \"/sdcard/Android/data/{package}/files/appData/logs\"; do "
+        f"  if [ -d \"$d\" ]; then "
+        f"    f=$(ls -t \"$d\"/*Player*.log \"$d\"/*.log 2>/dev/null | head -n 2); "
+        f"    [ -n \"$f\" ] && tail -n 600 $f 2>/dev/null; "
+        f"  fi; "
+        f"done; "
+        f"grep -h -E -i \"(user|account|name|player)\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null"
+        f"'"
+    )
+    log_text = run_cmd(command, timeout=4).stdout
     username, user_id = _extract_roblox_identity(log_text)
     if username:
         _roblox_username_cache[package] = (username, time.time())
@@ -168,7 +202,7 @@ def get_roblox_username(package):
             f'https://users.roblox.com/v1/users/{urllib.parse.quote(user_id)}',
             headers={'User-Agent': 'REI-REJOIN/1.0'},
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=4) as response:
             username = str(json.loads(response.read().decode('utf-8')).get('name') or '').strip()
         if username:
             _roblox_username_cache[package] = (username, time.time())
