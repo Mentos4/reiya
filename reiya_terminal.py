@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.52-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:40:00 UTC"
+BUILD_VERSION = "v6.8.53-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:45:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -422,20 +422,20 @@ def get_activity_top_dump():
 def is_app_in_game(package, content=None):
     """
     Check if a Roblox app or clone is connected to an active 3D game place.
-    Roblox 3D engine uses RakNet UDP sockets (ports 53000-65000) when in-game.
-    Sitting on the Home Screen has NO active 3D game UDP sockets.
+    Roblox 3D engine uses RakNet UDP sockets (ports 50000-65535) when in-game.
+    Home Screen web/API traffic only uses HTTPS/QUIC ports (443, 80, 53).
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
-    # Check 1: RakNet UDP socket inspection for active 3D game server connection
+    # Check 1: RakNet UDP socket inspection for active 3D game server connection (ports 50000 - 65535)
     try:
         pid_res = run_cmd(f"su -c 'pidof {pkg}'", timeout=2)
         pids = (pid_res.stdout or '').strip().split()
         if pids:
             pid = pids[0]
-            # Inspect netstat for active UDP connections associated with this PID
+            # Inspect netstat for UDP sockets associated with this PID
             net_res = run_cmd(f"su -c 'netstat -anp 2>/dev/null | grep -i {pid}'", timeout=2)
             net_text = (net_res.stdout or '').lower()
             if net_text:
@@ -444,10 +444,15 @@ def is_app_in_game(package, content=None):
                     parts = line.split()
                     if len(parts) >= 5:
                         remote = parts[4]
-                        if ':' in remote and not remote.startswith('0.0.0.0:') and not remote.startswith('127.0.0.1:') and not remote.startswith('::'):
-                            return True
+                        if ':' in remote:
+                            port_str = remote.split(':')[-1]
+                            if port_str.isdigit():
+                                port = int(port_str)
+                                # Dedicated 3D game servers run on high UDP ports (50000 - 65535)
+                                if 50000 <= port <= 65535:
+                                    return True
 
-            # Inspect /proc/{pid}/net/udp fallback for non-zero remote socket entries
+            # Inspect /proc/{pid}/net/udp fallback for high remote ports (50000 - 65535)
             udp_res = run_cmd(f"su -c 'cat /proc/{pid}/net/udp 2>/dev/null'", timeout=2)
             udp_text = (udp_res.stdout or '').strip()
             if udp_text:
@@ -456,8 +461,14 @@ def is_app_in_game(package, content=None):
                     parts = line.split()
                     if len(parts) >= 3:
                         rem_addr = parts[2]
-                        if not rem_addr.startswith('00000000:'):
-                            return True
+                        if ':' in rem_addr and not rem_addr.startswith('00000000:'):
+                            try:
+                                hex_port = rem_addr.split(':')[1]
+                                port = int(hex_port, 16)
+                                if 50000 <= port <= 65535:
+                                    return True
+                            except Exception:
+                                pass
     except Exception:
         pass
 
