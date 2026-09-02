@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.50-REI-REJOIN"
-BUILD_TIME = "2026-09-02 17:43:52 UTC"
+BUILD_VERSION = "v6.8.44-REI-REJOIN"
+BUILD_TIME = "2026-09-02 17:00:02 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -124,77 +124,30 @@ def _is_generated_game_name(name):
     return bool(re.match(r'^(Game \(|Place:)', str(name or '')))
 
 _roblox_username_cache = {}
-_INVALID_USERNAMES = {'null', 'none', 'true', 'false', 'undefined', 'system', 'unknown', 'default', 'player'}
 
-def _extract_roblox_identity(log_text):
-    """Read a Roblox username or user ID from common Player-log formats or XML prefs."""
-    text = log_text or ''
-
-    # 1. Direct Username Patterns
-    username_patterns = [
-        # XML tags: <string name="username">Player123</string>, <string name="user_name">...
-        r'<string\s+name=["\'](?:user_?name|username|account_?name|roblox_?username)["\'][^>]*>([^<]+)</string>',
-        # JSON / Key-Value: "username":"Player123", username: Player123
-        r'["\']?(?:user_?name|username)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
-        # FLog / Log lines: LocalPlayer UserName: Player123, Username: Player123, User Name: Player123
-        r'(?:localplayer\s+)?user\s*name\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\blogged\s+in\s+as\s+["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\bauthenticated\s+as\s+["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\[FLog::(?:User|Output|Login)\]\s*(?:User(?:name)?)\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+def _extract_roblox_user_id(log_text):
+    """Read a Roblox user ID from common Player-log formats."""
+    patterns = [
+        r'\buserId\s*[:=]\s*["\']?(\d+)',
+        r'\buserid\s*[:=]\s*["\']?(\d+)',
+        r'\buser_id\s*[:=]\s*["\']?(\d+)',
     ]
-    for pattern in username_patterns:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            uname = match.group(1).strip()
-            if uname and uname.lower() not in _INVALID_USERNAMES and not uname.isdigit():
-                return uname, ''
-
-    # 2. User ID Patterns (if username not directly found)
-    user_id_patterns = [
-        # XML tags: <string name="userId">123456</string>
-        r'<string\s+name=["\'](?:user_?id|userid)["\'][^>]*>(\d{3,12})</string>',
-        # XML int/long tags: <int name="UserId" value="123456"/>
-        r'<(?:int|long|string)\s+name=["\'](?:user_?id|userid)["\'][^>]*value=["\'](\d{3,12})["\']',
-        # JSON / Key-Value: "userId": 123456, user_id: 123456
-        r'["\']?(?:user_?id|userid)["\']?\s*[:=]\s*["\']?(\d{3,12})["\']?',
-        # FLog / Log lines: LocalPlayer UserId: 123456, User ID: 123456
-        r'(?:localplayer\s+)?user\s*id\s*[:=]\s*["\']?(\d{3,12})["\']?',
-        r'\[FLog::(?:User|Output|Login)\]\s*(?:User\s*ID)\s*[:=]\s*["\']?(\d{3,12})["\']?',
-    ]
-    for pattern in user_id_patterns:
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            uid = match.group(1).strip()
-            if uid and uid != '0':
-                return '', uid
-
-    return '', ''
+    for pattern in patterns:
+        match = re.search(pattern, log_text or '', re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ''
 
 def get_roblox_username(package):
-    """Detect the logged-in Roblox account for a clone from its Player log or shared_prefs."""
+    """Detect the logged-in Roblox account for a clone from its Player log."""
     cached = _roblox_username_cache.get(package)
     if cached and time.time() - cached[1] < 3600:
         return cached[0]
     if not re.fullmatch(r'[A-Za-z0-9._]+', str(package or '')):
         return ''
-
-    # Fast shell extraction:
-    # 1. Tail latest Player logs (checking files/appData/logs, files/logs, sdcard logs)
-    # 2. Grep XML files in shared_prefs specifically (NO recursive asset scan!)
-    command = (
-        f"su -c '"
-        f"for d in \"/data/data/{package}/files/appData/logs\" \"/data/data/{package}/files/logs\" \"/sdcard/Android/data/{package}/files/appData/logs\"; do "
-        f"  if [ -d \"$d\" ]; then "
-        f"    f=$(ls -t \"$d\"/*Player*.log \"$d\"/*.log 2>/dev/null | head -n 2); "
-        f"    [ -n \"$f\" ] && tail -n 600 $f 2>/dev/null; "
-        f"  fi; "
-        f"done; "
-        f"grep -h -E -i \"(user|account|name|player)\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null"
-        f"'"
-    )
-    log_text = run_cmd(command, timeout=4).stdout
-    username, user_id = _extract_roblox_identity(log_text)
-    if username:
-        _roblox_username_cache[package] = (username, time.time())
-        return username
+    log_path = f'/data/data/{package}/files/appData/logs/*_Player_*_last.log'
+    log_text = run_cmd(f"su -c 'tail -n 600 {log_path} 2>/dev/null'", timeout=5).stdout
+    user_id = _extract_roblox_user_id(log_text)
     if not user_id:
         return ''
     try:
@@ -202,7 +155,7 @@ def get_roblox_username(package):
             f'https://users.roblox.com/v1/users/{urllib.parse.quote(user_id)}',
             headers={'User-Agent': 'REI-REJOIN/1.0'},
         )
-        with urllib.request.urlopen(request, timeout=4) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             username = str(json.loads(response.read().decode('utf-8')).get('name') or '').strip()
         if username:
             _roblox_username_cache[package] = (username, time.time())
@@ -431,7 +384,7 @@ def get_activity_top_dump():
 def is_app_in_game(package, content=None):
     """
     Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
-    Rule-compliant: Checks GAME_SIGNALS before HOME_SIGNALS, fallbacks to False if package not found in dump.
+    Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
     `content` may be passed in (a dump already fetched via get_activity_top_dump())
     to avoid re-running the heavy dumpsys command per package; if omitted, it is
     fetched here for backwards compatibility.
@@ -440,9 +393,10 @@ def is_app_in_game(package, content=None):
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
         'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
         'loginview', 'landingview', 'authactivity', 'appshell', 'for you',
-        'charts', 'recommended for', 'moments', 'activityprotocollaunch',
-        'homeactivity', 'hometab'
+        'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
+        'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
     ]
+    # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
     GAME_SIGNALS = [
         'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
     ]
@@ -459,16 +413,16 @@ def is_app_in_game(package, content=None):
             # 1. A stopped/non-resumed Roblox activity only retains a stale surface; rejoin it.
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
                 return False
-            # 2. Check for 3D Game rendering signals FIRST (takes precedence over generic UI wrappers)
-            if any(sig in block_text for sig in GAME_SIGNALS):
-                return True
-            # 3. Check for explicit Home Screen signals
+            # 2. Check for explicit Home Screen / React UI signals.
             if any(sig in block_text for sig in HOME_SIGNALS):
                 return False
-            # 4. Default fallback if ambiguous
+            # 2. Check for explicit 3D Game rendering signals
+            if any(sig in block_text for sig in GAME_SIGNALS):
+                return True
+            # 3. Default fallback if ambiguous
             return False
 
-    # Default fallback when package is not found in activity dump: False
+    # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
     return False
 
 
@@ -572,30 +526,20 @@ def _resolve_package_game_name(pkg, cfg):
     """Resolve display name of the configured game for a specific package."""
     method = cfg.get('game_method', 'all')
     if method == 'each':
-        pkg_games = cfg.get('package_games', {})
-        gid = str(pkg_games.get(pkg, cfg.get('game_id', '')) or '').strip()
         pkg_names = cfg.get('package_game_names', {})
-        stored_name = str(pkg_names.get(pkg, '') or '').strip()
-        if stored_name and not _is_generated_game_name(stored_name):
-            return stored_name
-    else:
-        gid = str(cfg.get('game_id', '') or '').strip()
-        stored_name = str(cfg.get('game_name', '') or '').strip()
-        if stored_name and not _is_generated_game_name(stored_name):
-            return stored_name
-
-    if not gid:
-        return 'No Game Set'
-
-    for gname, pid in PRESET_GAMES:
-        if pid == gid:
-            return gname
-
-    fetched = lookup_roblox_game_name(gid)
-    if fetched and not _is_generated_game_name(fetched):
-        return fetched
-
-    return f"Game ({gid[:12]})" if len(gid) > 12 else f"Place:{gid}"
+        if pkg in pkg_names and pkg_names[pkg]:
+            return pkg_names[pkg]
+        gid = cfg.get('package_games', {}).get(pkg, '')
+        if gid:
+            for gname, pid in PRESET_GAMES:
+                if pid == gid:
+                    return gname
+            return f"Place:{gid[:12]}"
+    gname = cfg.get('game_name')
+    if gname:
+        return gname
+    gid = cfg.get('game_id')
+    return f"Place:{gid[:12]}" if gid else 'No Game Set'
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
@@ -845,11 +789,11 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         curl_args.append(webhook_url)
         curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
         if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
-            rejoin_engine.log('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
+            print('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
             return
-        rejoin_engine.log(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
+        print(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
     except Exception as e:
-        rejoin_engine.log(f"[!] curl webhook send error: {e}")
+        print(f"[!] curl webhook send error: {e}")
 
     if screenshot_path and os.path.exists(screenshot_path):
         try:
@@ -882,10 +826,10 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
                 method='POST'
             )
             webhook_opener.open(req, timeout=20)
-            rejoin_engine.log("[+] Webhook sent with screenshot.")
+            print("[+] Webhook sent with screenshot.")
             return
         except Exception as e:
-            rejoin_engine.log(f"[!] Webhook multipart send failed, falling back to JSON: {e}")
+            print(f"[!] Webhook multipart send failed, falling back to JSON: {e}")
 
     try:
         data_bytes = json.dumps(payload).encode('utf-8')
@@ -896,9 +840,9 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
             method='POST'
         )
         webhook_opener.open(req, timeout=15)
-        rejoin_engine.log("[+] Webhook JSON sent.")
+        print("[+] Webhook JSON sent.")
     except Exception as e:
-        rejoin_engine.log(f"[!] Webhook JSON send error: {e}")
+        print(f"[!] Webhook JSON send error: {e}")
 
 class WebhookThread(threading.Thread):
     def __init__(self, webhook_url, interval, get_status_fn, start_time):
@@ -933,19 +877,18 @@ class TerminalRejoinLoop:
         self.start_time = None
         self.webhook_thread = None
         self.home_page_events = {}
-        self.recent_logs = []
-        self.dashboard_active = False
 
     def log(self, msg):
-        """Buffers log entries for the live dashboard and writes to stdout when dashboard is not active."""
+        """Writes explicit \\r\\n like render_live_dashboard's out() — this
+        runs on the background _loop thread, which keeps emitting log lines
+        after the user leaves the dashboard (Option 8 only stops the display,
+        not the engine — Option 9 does that). A bare print()'s '\\n' doesn't
+        always get translated to CRLF on Termux ptys, so without this the
+        background thread's output staircases and corrupts every menu screen
+        drawn afterward, making the CLI look frozen/unresponsive."""
         ts = time.strftime('%H:%M:%S')
-        log_entry = f"[{ts}] {msg}"
-        self.recent_logs.append(log_entry)
-        if len(self.recent_logs) > 8:
-            self.recent_logs.pop(0)
-        if not self.dashboard_active:
-            sys.stdout.write(f"{log_entry}\r\n")
-            sys.stdout.flush()
+        sys.stdout.write(f"[{ts}] {msg}\r\n")
+        sys.stdout.flush()
 
     def set_status(self, pkg, status_str):
         self.status[pkg] = {'status': status_str, 'time': time.time()}
@@ -1033,8 +976,7 @@ class TerminalRejoinLoop:
             sys.stdout.write(str(s) + "\r\n")
 
         def detect_width(fallback):
-            """Use the configured dashboard width as a hard cap, then probe the
-            real terminal width fresh each call. Reserves one
+            """Probe the real terminal width fresh each call. Reserves one
             trailing column: a line that exactly fills the terminal defers its
             wrap, sticking the next print's first char onto the same row.
             Uses os.get_terminal_size() (a plain ioctl syscall) instead of
@@ -1043,11 +985,10 @@ class TerminalRejoinLoop:
             Termux/VPhone devices to cause noticeable slowdowns/crashes while
             the dashboard was open. Falls back to the subprocess probe only
             if the syscall isn't available (e.g. stdout isn't a real tty)."""
-            configured = max(30, int(fallback))
             try:
                 val = os.get_terminal_size().columns
                 if val > 10:
-                    return min(configured, max(30, val - 1))
+                    return max(30, val - 1)
             except Exception:
                 pass
             for cmd in ['stty size', 'tput cols']:
@@ -1056,10 +997,10 @@ class TerminalRejoinLoop:
                     parts = r.stdout.strip().split()
                     val = parts[-1] if parts else ''
                     if val.isdigit() and int(val) > 10:
-                        return min(configured, max(30, int(val) - 1))
+                        return max(30, int(val) - 1)
                 except Exception:
                     pass
-            return configured
+            return fallback
 
         def build_layout(target_w):
             """Derive column widths + row-building helpers for one frame from
@@ -1105,7 +1046,6 @@ class TerminalRejoinLoop:
         saved_terminal_mode = None
         termios_module = None
         try:
-            self.dashboard_active = True
             # Termux's buffered TextIO stdin can miss readiness notifications
             # after the dashboard has been redrawn. Read the TTY directly in
             # cbreak mode so one Enter key always exits this screen.
@@ -1160,13 +1100,12 @@ class TerminalRejoinLoop:
                 for idx, p in enumerate(pkgs, 1):
                     info_d  = statuses.get(p, {})
                     st      = info_d.get('status', 'Launching')
-                    uname   = get_roblox_username(p) or 'Detecting'
+                    uname   = get_roblox_username(p) or p
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
                     elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
-                    elif st == 'Checking':                       st_c = f"{CYAN}Check {RESET}"
                     else:                                        st_c = st
 
                     pkg_w = COLS[2][1]
@@ -1176,14 +1115,6 @@ class TerminalRejoinLoop:
                     gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
 
                     out(table_row([idx, uname, pkg_t, st_c, gname_t]))
-
-                out(SEP)
-                # ── Recent Activity ────────────────────────────────
-                out(f"{BOLD}[ Recent Activity ]{RESET}")
-                recent = self.recent_logs[-3:] if self.recent_logs else ["(No activity logged yet)"]
-                for log_line in recent:
-                    vis_line = log_line if len(log_line) <= TOTAL_W - 4 else log_line[:TOTAL_W - 5] + '..'
-                    out(f"  {vis_line}")
 
                 out(SEP)
                 out(f"{BOLD}[Enter] Stop Auto Rejoin & Main Menu{RESET}")
@@ -1207,7 +1138,6 @@ class TerminalRejoinLoop:
         except (KeyboardInterrupt, Exception):
             pass
         finally:
-            self.dashboard_active = False
             if input_fd is not None and saved_terminal_mode is not None:
                 try:
                     termios_module.tcsetattr(input_fd, termios_module.TCSADRAIN, saved_terminal_mode)
@@ -1285,27 +1215,37 @@ class TerminalRejoinLoop:
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
                     else:
-                        # ★ PROCESS ALIVE → check if in-game or on Home Screen
+                        # \u2605 PROCESS ALIVE \u2192 check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
+                        # Exact Roblox Home route emitted by Android when the clone opens its Home page.
                         home_event = get_roblox_home_page_event(pkg) if home_rejoin_enabled else ''
                         on_home_page = bool(home_event and home_event != self.home_page_events.get(pkg))
-                        time_since_launch = now - self.last_launch.get(pkg, 0)
-
                         if on_home_page:
                             self.home_page_events[pkg] = home_event
-                            self.set_status(pkg, 'Home Page')
-                            self.log(f"[{pkg}] Roblox Home page detected \u2192 Force stopping & rejoining place")
-                            self.set_status(pkg, 'Rejoining')
-                            force_stop_app(pkg)
-                            time.sleep(2)
-                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                            self.last_launch[pkg] = time.time()
-                            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                        elif time_since_launch < LAUNCH_GRACE and not in_game:
-                            self.set_status(pkg, 'Launching')
-                        else:
-                            # Alive and not on Home screen -> Ingame
+                            self.log(f"[{pkg}] Roblox Home page route detected")
+                            in_game = False
+                        if in_game:
                             self.set_status(pkg, 'Ingame')
+                        else:
+                            # NOT in-game — check if still within launch grace period (20s)
+                            time_since_launch = now - self.last_launch.get(pkg, 0)
+                            if time_since_launch < LAUNCH_GRACE and not on_home_page:
+                                self.set_status(pkg, 'Launching')
+                            elif on_home_page:
+                                # Rejoin only after the exact Roblox Home-route event. An
+                                # ambiguous activity dump is common while Termux is foreground
+                                # or a split-screen window is transitioning and must not trigger
+                                # a force-stop/relaunch loop.
+                                self.set_status(pkg, 'Home Page')
+                                self.log(f"[{pkg}] Roblox Home page detected \u2192 Force stopping & rejoining place")
+                                self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                time.sleep(2)
+                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                                self.last_launch[pkg] = time.time()
+                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            else:
+                                self.set_status(pkg, 'Checking')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
                 # must not silently kill this daemon thread — that would
