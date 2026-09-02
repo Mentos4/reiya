@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.46-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:27:00 UTC"
+BUILD_VERSION = "v6.8.47-REI-REJOIN"
+BUILD_TIME = "2026-09-03 01:32:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -431,7 +431,7 @@ def get_activity_top_dump():
 def is_app_in_game(package, content=None):
     """
     Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
-    Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
+    Rule-compliant: Checks GAME_SIGNALS before HOME_SIGNALS, fallbacks to False if package not found in dump.
     `content` may be passed in (a dump already fetched via get_activity_top_dump())
     to avoid re-running the heavy dumpsys command per package; if omitted, it is
     fetched here for backwards compatibility.
@@ -440,10 +440,9 @@ def is_app_in_game(package, content=None):
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
         'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
         'loginview', 'landingview', 'authactivity', 'appshell', 'for you',
-        'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
-        'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
+        'charts', 'recommended for', 'moments', 'activityprotocollaunch',
+        'homeactivity', 'hometab'
     ]
-    # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
     GAME_SIGNALS = [
         'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
     ]
@@ -460,16 +459,16 @@ def is_app_in_game(package, content=None):
             # 1. A stopped/non-resumed Roblox activity only retains a stale surface; rejoin it.
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
                 return False
-            # 2. Check for explicit Home Screen / React UI signals.
-            if any(sig in block_text for sig in HOME_SIGNALS):
-                return False
-            # 2. Check for explicit 3D Game rendering signals
+            # 2. Check for 3D Game rendering signals FIRST (takes precedence over generic UI wrappers)
             if any(sig in block_text for sig in GAME_SIGNALS):
                 return True
-            # 3. Default fallback if ambiguous
+            # 3. Check for explicit Home Screen signals
+            if any(sig in block_text for sig in HOME_SIGNALS):
+                return False
+            # 4. Default fallback if ambiguous
             return False
 
-    # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
+    # Default fallback when package is not found in activity dump: False
     return False
 
 
@@ -1153,6 +1152,7 @@ class TerminalRejoinLoop:
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
                     elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
+                    elif st == 'Checking':                       st_c = f"{CYAN}Check {RESET}"
                     else:                                        st_c = st
 
                     pkg_w = COLS[2][1]
