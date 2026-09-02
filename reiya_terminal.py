@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.49-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:38:00 UTC"
+BUILD_VERSION = "v6.8.50-REI-REJOIN"
+BUILD_TIME = "2026-09-02 17:43:52 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1033,7 +1033,8 @@ class TerminalRejoinLoop:
             sys.stdout.write(str(s) + "\r\n")
 
         def detect_width(fallback):
-            """Probe the real terminal width fresh each call. Reserves one
+            """Use the configured dashboard width as a hard cap, then probe the
+            real terminal width fresh each call. Reserves one
             trailing column: a line that exactly fills the terminal defers its
             wrap, sticking the next print's first char onto the same row.
             Uses os.get_terminal_size() (a plain ioctl syscall) instead of
@@ -1042,10 +1043,11 @@ class TerminalRejoinLoop:
             Termux/VPhone devices to cause noticeable slowdowns/crashes while
             the dashboard was open. Falls back to the subprocess probe only
             if the syscall isn't available (e.g. stdout isn't a real tty)."""
+            configured = max(30, int(fallback))
             try:
                 val = os.get_terminal_size().columns
                 if val > 10:
-                    return max(30, val - 1)
+                    return min(configured, max(30, val - 1))
             except Exception:
                 pass
             for cmd in ['stty size', 'tput cols']:
@@ -1054,10 +1056,10 @@ class TerminalRejoinLoop:
                     parts = r.stdout.strip().split()
                     val = parts[-1] if parts else ''
                     if val.isdigit() and int(val) > 10:
-                        return max(30, int(val) - 1)
+                        return min(configured, max(30, int(val) - 1))
                 except Exception:
                     pass
-            return fallback
+            return configured
 
         def build_layout(target_w):
             """Derive column widths + row-building helpers for one frame from
