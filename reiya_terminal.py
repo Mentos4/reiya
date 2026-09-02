@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.39-REI-REJOIN"
-BUILD_TIME = "2026-08-31 22:17:00 UTC"
+BUILD_VERSION = "v6.8.44-REI-REJOIN"
+BUILD_TIME = "2026-09-02 17:00:02 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -122,6 +122,47 @@ def lookup_roblox_game_name(game_value):
     return fallback
 def _is_generated_game_name(name):
     return bool(re.match(r'^(Game \(|Place:)', str(name or '')))
+
+_roblox_username_cache = {}
+
+def _extract_roblox_user_id(log_text):
+    """Read a Roblox user ID from common Player-log formats."""
+    patterns = [
+        r'\buserId\s*[:=]\s*["\']?(\d+)',
+        r'\buserid\s*[:=]\s*["\']?(\d+)',
+        r'\buser_id\s*[:=]\s*["\']?(\d+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, log_text or '', re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ''
+
+def get_roblox_username(package):
+    """Detect the logged-in Roblox account for a clone from its Player log."""
+    cached = _roblox_username_cache.get(package)
+    if cached and time.time() - cached[1] < 3600:
+        return cached[0]
+    if not re.fullmatch(r'[A-Za-z0-9._]+', str(package or '')):
+        return ''
+    log_path = f'/data/data/{package}/files/appData/logs/*_Player_*_last.log'
+    log_text = run_cmd(f"su -c 'tail -n 600 {log_path} 2>/dev/null'", timeout=5).stdout
+    user_id = _extract_roblox_user_id(log_text)
+    if not user_id:
+        return ''
+    try:
+        request = urllib.request.Request(
+            f'https://users.roblox.com/v1/users/{urllib.parse.quote(user_id)}',
+            headers={'User-Agent': 'REI-REJOIN/1.0'},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            username = str(json.loads(response.read().decode('utf-8')).get('name') or '').strip()
+        if username:
+            _roblox_username_cache[package] = (username, time.time())
+            return username
+    except Exception:
+        pass
+    return ''
 
 def load_config():
     global config
@@ -968,7 +1009,7 @@ class TerminalRejoinLoop:
             columns is target - (3*N + 1)."""
             N = 5
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, status_w = 2, 7, 6
+            no_w, user_w, status_w = 2, 12, 6
             remaining = max(8, budget - no_w - user_w - status_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
@@ -1047,8 +1088,8 @@ class TerminalRejoinLoop:
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                sampled_at = time.strftime('%H:%M:%S')
-                out(pipe_row([(f"CPU {cpu}% | RAM {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB) | {sampled_at}", TOTAL_W - 3)]))
+                sampled_at = time.strftime('%Y-%m-%d %H:%M:%S')
+                out(pipe_row([(f"CPU {cpu}% | RAM {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB) | Updated {sampled_at}", TOTAL_W - 3)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
@@ -1059,7 +1100,7 @@ class TerminalRejoinLoop:
                 for idx, p in enumerate(pkgs, 1):
                     info_d  = statuses.get(p, {})
                     st      = info_d.get('status', 'Launching')
-                    uname   = f"wu***{idx:02d}"
+                    uname   = get_roblox_username(p) or p
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
@@ -1117,12 +1158,20 @@ class TerminalRejoinLoop:
         w, h = get_screen_size()
         total_apps = len(packages)
 
-        # Initial launch of all packages
+        # Keep already-running packages untouched. Option 8 is a monitor, so it
+        # launches only packages that are actually closed; this prevents opening
+        # the dashboard from rejoining every selected clone at once.
         for i, pkg in enumerate(packages):
+            self.home_page_events[pkg] = get_roblox_home_page_event(pkg)
+            if is_app_running(pkg):
+                self.last_launch[pkg] = 0
+                self.set_status(pkg, 'Checking')
+                self.log(f"[{pkg}] Already running -> monitoring only")
+                continue
+
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
-            self.home_page_events[pkg] = get_roblox_home_page_event(pkg)
             self.last_launch[pkg] = time.time()
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
@@ -1149,18 +1198,24 @@ class TerminalRejoinLoop:
                     running = is_app_running(pkg)
 
                     if not running:
-                        # ★ PROCESS DEAD → REJOIN
-                        self.log(f"[{pkg}] Process dead → Rejoining")
-                        self.set_status(pkg, 'Rejoining')
-                        if auto_clear:
-                            clear_app_cache(pkg)
-                            time.sleep(1)
-                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        self.last_launch[pkg] = now
-                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                        # A package can briefly have no PID while Android is creating it.
+                        # Do not repeatedly launch it during that window: rapid retries can
+                        # consume enough memory for Android to kill Termux itself.
+                        time_since_launch = now - self.last_launch.get(pkg, 0)
+                        if time_since_launch < LAUNCH_GRACE:
+                            self.set_status(pkg, 'Launching')
+                        else:
+                            self.log(f"[{pkg}] Process dead \u2192 Rejoining")
+                            self.set_status(pkg, 'Rejoining')
+                            if auto_clear:
+                                clear_app_cache(pkg)
+                                time.sleep(1)
+                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                            self.last_launch[pkg] = now
+                            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
 
                     else:
-                        # ★ PROCESS ALIVE → check if in-game or on Home Screen
+                        # \u2605 PROCESS ALIVE \u2192 check if in-game or on Home Screen
                         in_game = is_app_in_game(pkg, content=activity_dump)
                         # Exact Roblox Home route emitted by Android when the clone opens its Home page.
                         home_event = get_roblox_home_page_event(pkg) if home_rejoin_enabled else ''
@@ -1176,19 +1231,21 @@ class TerminalRejoinLoop:
                             time_since_launch = now - self.last_launch.get(pkg, 0)
                             if time_since_launch < LAUNCH_GRACE and not on_home_page:
                                 self.set_status(pkg, 'Launching')
-                            else:
-                                # HOME SCREEN detected (past 20s grace period)
+                            elif on_home_page:
+                                # Rejoin only after the exact Roblox Home-route event. An
+                                # ambiguous activity dump is common while Termux is foreground
+                                # or a split-screen window is transitioning and must not trigger
+                                # a force-stop/relaunch loop.
                                 self.set_status(pkg, 'Home Page')
-                                if home_rejoin_enabled:
-                                    self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
-                                    self.set_status(pkg, 'Rejoining')
-                                    force_stop_app(pkg)
-                                    time.sleep(2)
-                                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                    self.last_launch[pkg] = time.time()
-                                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                                else:
-                                    self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
+                                self.log(f"[{pkg}] Roblox Home page detected \u2192 Force stopping & rejoining place")
+                                self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                time.sleep(2)
+                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                                self.last_launch[pkg] = time.time()
+                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            else:
+                                self.set_status(pkg, 'Checking')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
                 # must not silently kill this daemon thread — that would
