@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.52-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:50:00 UTC"
+BUILD_VERSION = "v6.8.53-REI-REJOIN"
+BUILD_TIME = "2026-09-03 01:54:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -132,15 +132,13 @@ def _extract_roblox_identity(log_text):
 
     # 1. Direct Username Patterns
     username_patterns = [
-        # XML tags: <string name="username">Player123</string>, <string name="user_name">...
-        r'<string\s+name=["\'](?:user_?name|username|account_?name|roblox_?username)["\'][^>]*>([^<]+)</string>',
+        # Match ANY XML <string name="..."> containing user/account/player/login/name
+        r'<string\s+name=["\'][^"\']*(?:user|account|player|login|name)[^"\']*["\'][^>]*>([^<]+)</string>',
         # JSON / Key-Value: "username":"Player123", username: Player123
-        r'["\']?(?:user_?name|username)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'["\']?(?:user_?name|username|account_?name)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
         # FLog / Log lines: LocalPlayer UserName: Player123, Username: Player123, User Name: Player123
-        r'(?:localplayer\s+)?user\s*name\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\blogged\s+in\s+as\s+["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\bauthenticated\s+as\s+["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\[FLog::(?:User|Output|Login)\]\s*(?:User(?:name)?)\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'\[FLog::[^\]]+\]\s*(?:User(?:name)?|Player|LocalPlayer)\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'(?:localplayer|user|player|authenticated|logged\s+in\s+as)\s*(?:user\s*name|name)?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
     ]
     for pattern in username_patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
@@ -151,14 +149,14 @@ def _extract_roblox_identity(log_text):
     # 2. User ID Patterns (if username not directly found)
     user_id_patterns = [
         # XML tags: <string name="userId">123456</string>
-        r'<string\s+name=["\'](?:user_?id|userid)["\'][^>]*>(\d{3,12})</string>',
+        r'<string\s+name=["\'][^"\']*(?:user_?id|userid|account_?id)[^"\']*["\'][^>]*>(\d{3,12})</string>',
         # XML int/long tags: <int name="UserId" value="123456"/>
-        r'<(?:int|long|string)\s+name=["\'](?:user_?id|userid)["\'][^>]*value=["\'](\d{3,12})["\']',
+        r'<(?:int|long|string)\s+name=["\'][^"\']*(?:user_?id|userid|account_?id)[^"\']*["\'][^>]*value=["\'](\d{3,12})["\']',
         # JSON / Key-Value: "userId": 123456, user_id: 123456
         r'["\']?(?:user_?id|userid)["\']?\s*[:=]\s*["\']?(\d{3,12})["\']?',
         # FLog / Log lines: LocalPlayer UserId: 123456, User ID: 123456
-        r'(?:localplayer\s+)?user\s*id\s*[:=]\s*["\']?(\d{3,12})["\']?',
-        r'\[FLog::(?:User|Output|Login)\]\s*(?:User\s*ID)\s*[:=]\s*["\']?(\d{3,12})["\']?',
+        r'\[FLog::[^\]]+\]\s*(?:User\s*ID|UserId)\s*[:=]\s*["\']?(\d{3,12})["\']?',
+        r'(?:localplayer|user)\s*id\s*[:=]\s*["\']?(\d{3,12})["\']?',
     ]
     for pattern in user_id_patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
@@ -178,16 +176,16 @@ def get_roblox_username(package):
 
     # Fast shell extraction:
     # 1. Tail latest Player logs (checking files/appData/logs, files/logs, sdcard logs)
-    # 2. Grep XML files in shared_prefs specifically (NO recursive asset scan!)
+    # 2. Inspect XML preference files specifically
     command = (
         f"su -c '"
         f"for d in \"/data/data/{package}/files/appData/logs\" \"/data/data/{package}/files/logs\" \"/sdcard/Android/data/{package}/files/appData/logs\"; do "
         f"  if [ -d \"$d\" ]; then "
-        f"    f=$(ls -t \"$d\"/*Player*.log \"$d\"/*.log 2>/dev/null | head -n 2); "
-        f"    [ -n \"$f\" ] && tail -n 600 $f 2>/dev/null; "
+        f"    f=$(ls -t \"$d\"/*Player*.log \"$d\"/*.log 2>/dev/null | head -n 3); "
+        f"    [ -n \"$f\" ] && tail -n 1000 $f 2>/dev/null; "
         f"  fi; "
         f"done; "
-        f"grep -h -E -i \"(user|account|name|player)\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null"
+        f"cat /data/data/{package}/shared_prefs/*.xml 2>/dev/null"
         f"'"
     )
     log_text = run_cmd(command, timeout=4).stdout
