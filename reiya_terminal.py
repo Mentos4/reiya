@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.51-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:35:00 UTC"
+BUILD_VERSION = "v6.8.52-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:40:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -421,13 +421,47 @@ def get_activity_top_dump():
 
 def is_app_in_game(package, content=None):
     """
-    Check if package is active in a 3D Game Place vs sitting on the Home Screen.
-    Uses lightweight 'dumpsys activity top' fetched once per poll cycle.
+    Check if a Roblox app or clone is connected to an active 3D game place.
+    Roblox 3D engine uses RakNet UDP sockets (ports 53000-65000) when in-game.
+    Sitting on the Home Screen has NO active 3D game UDP sockets.
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
+    # Check 1: RakNet UDP socket inspection for active 3D game server connection
+    try:
+        pid_res = run_cmd(f"su -c 'pidof {pkg}'", timeout=2)
+        pids = (pid_res.stdout or '').strip().split()
+        if pids:
+            pid = pids[0]
+            # Inspect netstat for active UDP connections associated with this PID
+            net_res = run_cmd(f"su -c 'netstat -anp 2>/dev/null | grep -i {pid}'", timeout=2)
+            net_text = (net_res.stdout or '').lower()
+            if net_text:
+                udp_lines = [l for l in net_text.splitlines() if 'udp' in l or 'raw' in l]
+                for line in udp_lines:
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        remote = parts[4]
+                        if ':' in remote and not remote.startswith('0.0.0.0:') and not remote.startswith('127.0.0.1:') and not remote.startswith('::'):
+                            return True
+
+            # Inspect /proc/{pid}/net/udp fallback for non-zero remote socket entries
+            udp_res = run_cmd(f"su -c 'cat /proc/{pid}/net/udp 2>/dev/null'", timeout=2)
+            udp_text = (udp_res.stdout or '').strip()
+            if udp_text:
+                lines = udp_text.splitlines()[1:]
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        rem_addr = parts[2]
+                        if not rem_addr.startswith('00000000:'):
+                            return True
+    except Exception:
+        pass
+
+    # Check 2: Activity top dump check fallback
     HOME_SIGNALS = [
         'activityprotocollaunch', 'reactrootview', 'reactviewgroup', 'reactframelayout',
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
@@ -435,8 +469,6 @@ def is_app_in_game(package, content=None):
         'loginview', 'landingview', 'authactivity', 'appshell', 'foryou',
         'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
     ]
-    # Note: 'nativemain' and 'activitynativemain' are EXCLUDED because ActivityNativeMain
-    # hosts the React Home UI as well as the 3D game view.
     PURE_3D_GAME_SIGNALS = [
         'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity'
     ]
@@ -451,24 +483,17 @@ def is_app_in_game(package, content=None):
         if pkg_lines:
             block_text = '\n'.join(pkg_lines).lower()
 
-            # 1. Stopped / non-resumed Roblox activity surface
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
                 return False
 
-            # 2. ActivityProtocolLaunch is Roblox's Home Launcher component
             if 'activityprotocollaunch' in block_text:
                 return False
 
-            # 3. Explicit Home Screen signals in activity block
             if any(sig in block_text for sig in HOME_SIGNALS):
                 return False
 
-            # 4. Check for pure 3D game rendering surface without Home Launcher component
             if any(sig in block_text for sig in PURE_3D_GAME_SIGNALS):
                 return True
-
-            # 5. Fallback for ambiguous block
-            return False
 
     return False
 
