@@ -8,9 +8,8 @@ Single standalone CLI script combining all core functions of REI REJOIN Roblox A
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REI REJOIN ASCII Dashboard UI (2-line REI REJOIN block logo + clean settings & live stats table)
-- Home Page Reset & Callback Rejoin (Force stops stuck Home Screen and retries launch intent until in-game)
-- Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
-- Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
+- Direct ActivityProtocolLaunch Component Invocation (Launches the selected game place)
+- Instant App Exit Re-launch (Triggers immediate rejoin if the app is closed)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
@@ -36,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.45-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:58:30 UTC"
+BUILD_VERSION = "v6.8.46-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:10:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -218,6 +217,7 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
             config.update(saved)
+            removed_home_rejoin_setting = config.pop('home_rejoin_enabled', None) is not None
             renamed = False
             if config.get('game_id') and _is_generated_game_name(config.get('game_name')):
                 config['game_name'] = lookup_roblox_game_name(config['game_id'])
@@ -228,7 +228,7 @@ def load_config():
                 if _is_generated_game_name(package_names.get(package)):
                     package_names[package] = lookup_roblox_game_name(game_value)
                     renamed = True
-            if renamed:
+            if renamed or removed_home_rejoin_setting:
                 save_config()
         except Exception as e:
             print(f"[!] Warning loading config: {e}")
@@ -392,9 +392,7 @@ def get_roblox_home_page_event(package):
         return ''
 
 def get_package_activity_dump(package, content):
-    """
-    Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block.
-    """
+    """Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block."""
     lines = content.split('\n')
     pkg_lines = []
     capturing = False
@@ -411,13 +409,7 @@ def get_package_activity_dump(package, content):
     return pkg_lines
 
 def get_activity_top_dump():
-    """Fetch 'dumpsys activity top' once. This is a system-wide dump (same
-    content regardless of which package you're checking), so callers
-    monitoring multiple packages should fetch it ONCE per poll cycle and
-    reuse it for every package — calling it per-package multiplies an
-    already-heavy su+dumpsys invocation by the package count, which was a
-    major source of the CPU/battery load causing slowdowns on constrained
-    Termux/VPhone devices."""
+    """Fetch 'dumpsys activity top' once per poll cycle."""
     for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
             res = run_cmd(cmd, timeout=4)
@@ -427,61 +419,49 @@ def get_activity_top_dump():
             pass
     return ''
 
-def is_app_in_game(package, content=None):
+def is_roblox_on_home_page(package, content=None):
     """
-    Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
-    Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
-    `content` may be passed in (a dump already fetched via get_activity_top_dump())
-    to avoid re-running the heavy dumpsys command per package; if omitted, it is
-    fetched here for backwards compatibility.
+    Determine whether Roblox or a clone is sitting on the Home Screen vs In-Game.
+    Checks dumpsys activity top, dumpsys window focused app, and logcat signals.
     """
     HOME_SIGNALS = [
+        'activityprotocollaunch', 'reactrootview', 'reactviewgroup', 'reactframelayout',
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
         'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell', 'for you',
-        'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
-        'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
+        'loginview', 'landingview', 'authactivity', 'appshell', 'foryou',
+        'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
     ]
-    # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
     GAME_SIGNALS = [
-        'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
+        'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview', 'activitynativemain'
     ]
 
+    # 1. Check focused window component via dumpsys window
+    try:
+        w_dump = run_cmd("su -c 'dumpsys window | grep -E \"mCurrentFocus|mFocusedApp\"'", timeout=3).stdout.lower()
+        if package.lower() in w_dump and 'activityprotocollaunch' in w_dump:
+            return True
+    except Exception:
+        pass
+
+    # 2. Check dumpsys activity top
     if content is None:
         content = get_activity_top_dump()
 
-    if content.strip():
+    if content and content.strip():
         pkg_lines = get_package_activity_dump(package, content)
         if not pkg_lines:
-            pkg_lines = [line for line in content.split('\n') if package in line]
+            pkg_lines = [line for line in content.split('\n') if package.lower() in line.lower()]
         if pkg_lines:
             block_text = '\n'.join(pkg_lines).lower()
-            # 1. A stopped/non-resumed Roblox activity only retains a stale surface; rejoin it.
+            # Stale stopped activity surface
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
-                return False
-            # 2. Check for explicit Home Screen / React UI signals.
-            if any(sig in block_text for sig in HOME_SIGNALS):
-                return False
-            # 2. Check for explicit 3D Game rendering signals
-            if any(sig in block_text for sig in GAME_SIGNALS):
                 return True
-            # 3. Default fallback if ambiguous
-            return False
+            # Home Screen React UI / Protocol Launch active
+            if any(sig in block_text for sig in HOME_SIGNALS) and not any(sig in block_text for sig in GAME_SIGNALS):
+                return True
 
-    # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
     return False
 
-
-
-def is_roblox_home_ui():
-    """Detect Roblox's visible Home UI when ActivityNativeMain retains its game surface."""
-    xml_path = '/sdcard/rei_rejoin_ui.xml'
-    try:
-        result = run_cmd(f"su -c 'uiautomator dump {xml_path} >/dev/null && cat {xml_path}'", timeout=6)
-        ui_text = result.stdout.lower()
-        return ('for you' in ui_text and 'charts' in ui_text) or ('home' in ui_text and 'search' in ui_text and 'chat' in ui_text)
-    except Exception:
-        return False
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
     try:
@@ -922,7 +902,6 @@ class TerminalRejoinLoop:
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
-        self.home_page_events = {}
 
     def log(self, msg):
         """Writes explicit \\r\\n like render_live_dashboard's out() — this
@@ -1197,8 +1176,7 @@ class TerminalRejoinLoop:
         auto_clear          = cfg.get('clear_cache', False)
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
-        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
-        # Grace period after launch — avoids false "Home Page" detection during app startup
+        # Grace period after launch prevents duplicate launches while Android creates the process.
         LAUNCH_GRACE        = 20
 
         w, h = get_screen_size()
@@ -1208,7 +1186,6 @@ class TerminalRejoinLoop:
         # launches only packages that are actually closed; this prevents opening
         # the dashboard from rejoining every selected clone at once.
         for i, pkg in enumerate(packages):
-            self.home_page_events[pkg] = get_roblox_home_page_event(pkg)
             if is_app_running(pkg):
                 self.last_launch[pkg] = 0
                 self.set_status(pkg, 'Checking')
@@ -1228,10 +1205,6 @@ class TerminalRejoinLoop:
 
         while self.running:
             try:
-                # Fetched once per cycle and reused for every package below —
-                # dumpsys activity top is system-wide and identical per package,
-                # so calling it per-package multiplied a heavy su+dumpsys call by
-                # the package count on every poll.
                 activity_dump = get_activity_top_dump()
 
                 for i, pkg in enumerate(packages):
@@ -1251,7 +1224,7 @@ class TerminalRejoinLoop:
                         if time_since_launch < LAUNCH_GRACE:
                             self.set_status(pkg, 'Launching')
                         else:
-                            self.log(f"[{pkg}] Process dead \u2192 Rejoining")
+                            self.log(f"[{pkg}] Process dead -> Rejoining")
                             self.set_status(pkg, 'Rejoining')
                             if auto_clear:
                                 clear_app_cache(pkg)
@@ -1259,39 +1232,25 @@ class TerminalRejoinLoop:
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                             self.last_launch[pkg] = now
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-
                     else:
-                        # \u2605 PROCESS ALIVE \u2192 check if in-game or on Home Screen
-                        in_game = is_app_in_game(pkg, content=activity_dump)
-                        # Exact Roblox Home route emitted by Android when the clone opens its Home page.
-                        home_event = get_roblox_home_page_event(pkg) if home_rejoin_enabled else ''
-                        on_home_page = bool(home_event and home_event != self.home_page_events.get(pkg))
-                        if on_home_page:
-                            self.home_page_events[pkg] = home_event
-                            self.log(f"[{pkg}] Roblox Home page route detected")
-                            in_game = False
-                        if in_game:
-                            self.set_status(pkg, 'Ingame')
-                        else:
-                            # NOT in-game — check if still within launch grace period (20s)
-                            time_since_launch = now - self.last_launch.get(pkg, 0)
-                            if time_since_launch < LAUNCH_GRACE and not on_home_page:
-                                self.set_status(pkg, 'Launching')
-                            elif on_home_page:
-                                # Rejoin only after the exact Roblox Home-route event. An
-                                # ambiguous activity dump is common while Termux is foreground
-                                # or a split-screen window is transitioning and must not trigger
-                                # a force-stop/relaunch loop.
+                        # PROCESS ALIVE -> check if stuck on Roblox Home Screen
+                        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
+                        time_since_launch = now - self.last_launch.get(pkg, 0)
+
+                        if home_rejoin_enabled and time_since_launch >= LAUNCH_GRACE:
+                            on_home = is_roblox_on_home_page(pkg, activity_dump)
+                            if on_home:
                                 self.set_status(pkg, 'Home Page')
-                                self.log(f"[{pkg}] Roblox Home page detected \u2192 Force stopping & rejoining place")
+                                self.log(f"[{pkg}] Roblox Home page detected -> Force stopping & rejoining place")
                                 self.set_status(pkg, 'Rejoining')
                                 force_stop_app(pkg)
                                 time.sleep(2)
                                 bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                                 self.last_launch[pkg] = time.time()
                                 launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                            else:
-                                self.set_status(pkg, 'Checking')
+                                continue
+
+                        self.set_status(pkg, 'Ingame')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
                 # must not silently kill this daemon thread — that would
