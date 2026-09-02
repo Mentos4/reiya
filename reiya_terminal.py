@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.51-REI-REJOIN"
-BUILD_TIME = "2026-09-03 01:47:00 UTC"
+BUILD_VERSION = "v6.8.52-REI-REJOIN"
+BUILD_TIME = "2026-09-03 01:50:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
