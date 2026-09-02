@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.48-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:20:00 UTC"
+BUILD_VERSION = "v6.8.49-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:25:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -422,13 +422,36 @@ def get_activity_top_dump():
 def is_roblox_on_home_page(package, content=None):
     """
     Determine whether Roblox or a clone is sitting on the Home Screen vs In-Game.
-    Combines dumpsys activity top, Player logs, logcat, and UI automator hierarchy checks.
+    Primary check queries package-isolated activity stack: dumpsys activity a {package}.
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
-    # 1. Check dumpsys activity top for ActivityProtocolLaunch or Home UI signals
+    # 1. Primary check: dumpsys activity a {package} (Inspects target package activity stack)
+    try:
+        res = run_cmd(f"su -c 'dumpsys activity a {package}'", timeout=3)
+        act_text = (res.stdout or '').lower()
+        if act_text:
+            hist_lines = [l for l in act_text.splitlines() if 'hist #' in l or 'activityrecord' in l or 'mresumed=true' in l or 'topresumedactivity' in l]
+            hist_text = '\n'.join(hist_lines)
+            if 'activityprotocollaunch' in hist_text or 'mainactivity' in hist_text:
+                return True
+            if 'activityprotocollaunch' in act_text and 'activitynativemain' not in hist_text:
+                return True
+    except Exception:
+        pass
+
+    # 2. Window stack check: dumpsys window windows
+    try:
+        w_res = run_cmd(f"su -c 'dumpsys window windows | grep -i {package}'", timeout=3)
+        w_text = (w_res.stdout or '').lower()
+        if w_text and 'activityprotocollaunch' in w_text:
+            return True
+    except Exception:
+        pass
+
+    # 3. System activity dump check
     if content is None:
         content = get_activity_top_dump()
 
@@ -436,33 +459,18 @@ def is_roblox_on_home_page(package, content=None):
         pkg_lines = get_package_activity_dump(package, content)
         if not pkg_lines:
             pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
-        block_text = '\n'.join(pkg_lines).lower() if pkg_lines else content.lower()
+        if pkg_lines:
+            block_text = '\n'.join(pkg_lines).lower()
+            if 'activityprotocollaunch' in block_text:
+                return True
+            if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
+                return True
 
-        # Stale / stopped activity surface
-        if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
-            return True
-
-        # ActivityProtocolLaunch is Roblox's Home Launcher component
-        if 'activityprotocollaunch' in block_text:
-            return True
-
-        # Explicit Home Screen signals in activity dump
-        if any(sig in block_text for sig in ['foryou', 'charts', 'landingview', 'hometab', 'homeactivity', 'appshell', 'loginactivity']):
-            return True
-
-    # 2. Check dumpsys window for ActivityProtocolLaunch or roblox://navigation/home
-    try:
-        w_dump = run_cmd("su -c 'dumpsys window windows | grep -iE \"activityprotocollaunch|roblox://navigation/home\"'", timeout=3).stdout.lower()
-        if w_dump.strip():
-            return True
-    except Exception:
-        pass
-
-    # 3. Check Player Logs for Disconnect / Home Navigation / LeaveGame
+    # 4. Player Log disconnect / return to home check
     try:
         log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
-        cmd = f"su -c 'LOGS=$(ls -t {log_dirs}/*Player*.log {log_dirs}/*.log 2>/dev/null | head -n 1); [ -n \"$LOGS\" ] && tail -n 100 $LOGS 2>/dev/null'"
-        log_text = (run_cmd(cmd, timeout=3).stdout or '').lower()
+        log_cmd = f"su -c 'LOGS=$(ls -t {log_dirs}/*Player*.log {log_dirs}/*.log 2>/dev/null | head -n 1); [ -n \"$LOGS\" ] && tail -n 80 $LOGS 2>/dev/null'"
+        log_text = (run_cmd(log_cmd, timeout=3).stdout or '').lower()
         if log_text:
             home_log_sigs = [
                 'disconnect notification received', 'navigating to home', 'leavegame',
@@ -471,25 +479,6 @@ def is_roblox_on_home_page(package, content=None):
             ]
             if any(sig in log_text for sig in home_log_sigs):
                 return True
-    except Exception:
-        pass
-
-    # 4. Check Logcat for recent Home Navigation events
-    try:
-        logcat_cmd = "su -c 'logcat -d -v time -t 150 ActivityTaskManager:V Roblox:V FLog:V'"
-        logcat_text = (run_cmd(logcat_cmd, timeout=3).stdout or '').lower()
-        if pkg in logcat_text and ('roblox://navigation/home' in logcat_text or 'activityprotocollaunch' in logcat_text):
-            return True
-    except Exception:
-        pass
-
-    # 5. UI Automator XML dump fallback for visible Home Screen texts ("For you", "Charts", "Set up your account", "Add Friends")
-    xml_path = '/sdcard/rei_ui_check.xml'
-    try:
-        res = run_cmd(f"su -c 'uiautomator dump {xml_path} >/dev/null && cat {xml_path}'", timeout=6)
-        ui_text = (res.stdout or '').lower()
-        if ('for you' in ui_text and 'charts' in ui_text) or ('recommended for' in ui_text) or ('set up your account' in ui_text) or ('add friends' in ui_text and 'share qr' in ui_text) or ('home' in ui_text and 'chat' in ui_text and 'more' in ui_text):
-            return True
     except Exception:
         pass
 
@@ -938,12 +927,15 @@ class TerminalRejoinLoop:
         self.logs = []
 
     def log(self, msg):
-        """Append log lines to self.logs so they render cleanly in the live dashboard."""
+        """Append log lines to self.logs list; only print to stdout when dashboard is stopped."""
         ts = time.strftime('%H:%M:%S')
         line = f"[{ts}] {msg}"
         self.logs.append(line)
-        if len(self.logs) > 8:
+        if len(self.logs) > 10:
             self.logs.pop(0)
+        if not self.running:
+            sys.stdout.write(f"{line}\r\n")
+            sys.stdout.flush()
 
     def set_status(self, pkg, status_str):
         self.status[pkg] = {'status': status_str, 'time': time.time()}
@@ -1171,13 +1163,6 @@ class TerminalRejoinLoop:
 
                     out(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
-                out(SEP)
-                out(f"{BOLD}Recent Activity Logs:{RESET}")
-                if self.logs:
-                    for l in self.logs[-4:]:
-                        out(f"  {l}")
-                else:
-                    out("  (Monitoring active)")
                 out(SEP)
                 out(f"{BOLD}[Enter] Stop Auto Rejoin & Main Menu{RESET}")
                 sys.stdout.flush()
