@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.49-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:25:00 UTC"
+BUILD_VERSION = "v6.8.50-REI-REJOIN"
+BUILD_TIME = "2026-09-03 02:30:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -422,51 +422,35 @@ def get_activity_top_dump():
 def is_roblox_on_home_page(package, content=None):
     """
     Determine whether Roblox or a clone is sitting on the Home Screen vs In-Game.
-    Primary check queries package-isolated activity stack: dumpsys activity a {package}.
+    Primary check queries visible screen UI hierarchy (uiautomator dump).
+    Fallback checks query Player logs, logcat, and dumpsys.
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
-    # 1. Primary check: dumpsys activity a {package} (Inspects target package activity stack)
-    try:
-        res = run_cmd(f"su -c 'dumpsys activity a {package}'", timeout=3)
-        act_text = (res.stdout or '').lower()
-        if act_text:
-            hist_lines = [l for l in act_text.splitlines() if 'hist #' in l or 'activityrecord' in l or 'mresumed=true' in l or 'topresumedactivity' in l]
-            hist_text = '\n'.join(hist_lines)
-            if 'activityprotocollaunch' in hist_text or 'mainactivity' in hist_text:
-                return True
-            if 'activityprotocollaunch' in act_text and 'activitynativemain' not in hist_text:
-                return True
-    except Exception:
-        pass
+    # Check 1: UI Automator XML Dump (Inspects visible screen text for Home UI elements)
+    # Visible on screen in Noka, Delta, Arceus, and standard Roblox Home Screen:
+    # "For you", "Charts", "Recommended For You", "Set up your account", "Add Friends"
+    for xml_file in ['/data/local/tmp/rei_ui.xml', '/sdcard/rei_ui.xml']:
+        try:
+            cmd = f"su -c 'uiautomator dump {xml_file} >/dev/null 2>&1 && cat {xml_file} 2>/dev/null'"
+            res = run_cmd(cmd, timeout=5)
+            ui_text = (res.stdout or '').lower()
+            if ui_text:
+                is_home = (
+                    ('for you' in ui_text and 'charts' in ui_text) or
+                    ('recommended for' in ui_text) or
+                    ('set up your account' in ui_text) or
+                    ('add friends' in ui_text and 'share qr' in ui_text) or
+                    ('home' in ui_text and 'chat' in ui_text and 'more' in ui_text)
+                )
+                if is_home:
+                    return True
+        except Exception:
+            pass
 
-    # 2. Window stack check: dumpsys window windows
-    try:
-        w_res = run_cmd(f"su -c 'dumpsys window windows | grep -i {package}'", timeout=3)
-        w_text = (w_res.stdout or '').lower()
-        if w_text and 'activityprotocollaunch' in w_text:
-            return True
-    except Exception:
-        pass
-
-    # 3. System activity dump check
-    if content is None:
-        content = get_activity_top_dump()
-
-    if content and content.strip():
-        pkg_lines = get_package_activity_dump(package, content)
-        if not pkg_lines:
-            pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
-        if pkg_lines:
-            block_text = '\n'.join(pkg_lines).lower()
-            if 'activityprotocollaunch' in block_text:
-                return True
-            if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
-                return True
-
-    # 4. Player Log disconnect / return to home check
+    # Check 2: Player Logs for Disconnect / Return to Home / Leave Game
     try:
         log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
         log_cmd = f"su -c 'LOGS=$(ls -t {log_dirs}/*Player*.log {log_dirs}/*.log 2>/dev/null | head -n 1); [ -n \"$LOGS\" ] && tail -n 80 $LOGS 2>/dev/null'"
@@ -475,10 +459,29 @@ def is_roblox_on_home_page(package, content=None):
             home_log_sigs = [
                 'disconnect notification received', 'navigating to home', 'leavegame',
                 'game ended', 'unload place', 'error code:', 'disconnected from game',
-                'roblox://navigation/home', 'leaving game', 'return to home'
+                'roblox://navigation/home', 'leaving game', 'return to home', 'leave game'
             ]
             if any(sig in log_text for sig in home_log_sigs):
                 return True
+    except Exception:
+        pass
+
+    # Check 3: Logcat stream for recent Disconnect / Home navigation
+    try:
+        logcat_cmd = "su -c 'logcat -d -v time -t 200 ActivityTaskManager:V Roblox:V FLog:V'"
+        logcat_text = (run_cmd(logcat_cmd, timeout=3).stdout or '').lower()
+        if pkg in logcat_text:
+            if 'roblox://navigation/home' in logcat_text or 'activityprotocollaunch' in logcat_text or 'disconnect notification' in logcat_text:
+                return True
+    except Exception:
+        pass
+
+    # Check 4: Dumpsys activities / window stack check
+    try:
+        res = run_cmd(f"su -c 'dumpsys activity activities | grep -i {package}'", timeout=3)
+        act_text = (res.stdout or '').lower()
+        if act_text and 'activityprotocollaunch' in act_text:
+            return True
     except Exception:
         pass
 
