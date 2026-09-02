@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.45-REI-REJOIN"
-BUILD_TIME = "2026-09-02 17:07:08 UTC"
+BUILD_VERSION = "v6.8.47-REI-REJOIN"
+BUILD_TIME = "2026-09-02 17:12:54 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -129,18 +129,20 @@ def _extract_roblox_identity(log_text):
     """Read a Roblox username or user ID from common Player-log formats."""
     text = log_text or ''
     username_patterns = [
-        r'\busername\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
-        r'\buser_name\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
+        r'\busername["\']?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
+        r'\buser_name["\']?\s*[:=]\s*["\']?([A-Za-z0-9_]{3,20})',
         r'\blogged\s+in\s+as\s+["\']?([A-Za-z0-9_]{3,20})',
+        r'name=["\'](?:username|user_name)["\'][^>]*>\s*([A-Za-z0-9_]{3,20})',
     ]
     for pattern in username_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return match.group(1), ''
     user_id_patterns = [
-        r'\buserId\s*[:=]\s*["\']?(\d+)',
-        r'\buserid\s*[:=]\s*["\']?(\d+)',
-        r'\buser_id\s*[:=]\s*["\']?(\d+)',
+        r'\buserId["\']?\s*[:=]\s*["\']?(\d+)',
+        r'\buserid["\']?\s*[:=]\s*["\']?(\d+)',
+        r'\buser_id["\']?\s*[:=]\s*["\']?(\d+)',
+        r'name=["\'](?:userid|user_id)["\'][^>]*>\s*(\d+)',
     ]
     for pattern in user_id_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -156,7 +158,14 @@ def get_roblox_username(package):
     if not re.fullmatch(r'[A-Za-z0-9._]+', str(package or '')):
         return ''
     log_path = f'/data/data/{package}/files/appData/logs/*_Player_*_last.log'
-    log_text = run_cmd(f"su -c 'tail -n 600 {log_path} 2>/dev/null'", timeout=5).stdout
+    identity_paths = f'/data/data/{package}/shared_prefs /data/data/{package}/files/appData'
+    # Player logs vary by Roblox/clone version. Also inspect the clone's local
+    # preference files, where Android builds commonly persist account identity.
+    command = (
+        f"su -c 'tail -n 600 {log_path} 2>/dev/null; "
+        f"grep -R -h -E -i \"(user(name|_name)|user(id|_id))\" {identity_paths} 2>/dev/null | tail -n 200'"
+    )
+    log_text = run_cmd(command, timeout=5).stdout
     username, user_id = _extract_roblox_identity(log_text)
     if username:
         _roblox_username_cache[package] = (username, time.time())
