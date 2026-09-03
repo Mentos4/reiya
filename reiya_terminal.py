@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.58-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:43:00 UTC"
+BUILD_VERSION = "v6.8.59-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:46:30 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1279,20 +1279,13 @@ class TerminalRejoinLoop:
         w, h = get_screen_size()
         total_apps = len(packages)
 
-        # Keep already-running packages untouched. Option 8 is a monitor, so it
-        # launches only packages that are actually closed; this prevents opening
-        # the dashboard from rejoining every selected clone at once.
+        # Launch all selected packages into the target Roblox place on Option 8 startup
         for i, pkg in enumerate(packages):
-            if is_app_running(pkg):
-                self.last_launch[pkg] = 0
-                self.set_status(pkg, 'Checking')
-                self.log(f"[{pkg}] Already running -> monitoring only")
-                continue
-
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
             self.last_launch[pkg] = time.time()
+            self.log(f"[{pkg}] Launching game place...")
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             if sequential and i < len(packages) - 1:
                 time.sleep(delay_open_tab)
