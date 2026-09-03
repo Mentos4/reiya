@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.54-REI-REJOIN"
-BUILD_TIME = "2026-09-03 14:47:00 UTC"
+BUILD_VERSION = "v6.8.55-REI-REJOIN"
+BUILD_TIME = "2026-09-03 14:52:30 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -47,6 +47,8 @@ PRESET_GAMES = [
     ('Anime Origin',       '129932912185311'),
     ('Anime Expedition',   '84515722934860'),
     ('Run a Restaurant',   '77843161404023'),
+    ('Anime Astral Sim',   '102072869879193'),
+    ('Steal An Egg',       '107778070777162'),
     ('World Zero',         '2727067538'),
     ('Blue Heater 2',      '16893821047'),
     ('Grow a Garden 2',    '126884695'),
