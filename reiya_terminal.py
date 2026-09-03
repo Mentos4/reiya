@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.56-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:20:00 UTC"
+BUILD_VERSION = "v6.8.58-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:28:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -78,7 +78,6 @@ DEFAULT_CONFIG = {
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
-    'home_rejoin_enabled': False,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
@@ -376,16 +375,50 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive. Only returns True if a real numeric PID is found."""
+    """Check if the app process is alive using pidof, pgrep, ps, and dumpsys."""
+    pkg = str(package or '').lower().strip()
+    if not pkg:
+        return False
+
+    # Check 1: pidof
     for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
-            res = run_cmd(cmd, timeout=3)
+            res = run_cmd(cmd, timeout=2)
             out = res.stdout.strip()
-            # Must be non-empty AND all parts must be numeric (actual PIDs)
-            if out and all(part.isdigit() for part in out.split()):
+            if out and any(part.isdigit() for part in out.split()):
                 return True
         except Exception:
             pass
+
+    # Check 2: pgrep -f
+    for cmd in [f"su -c 'pgrep -f {package}'", f"pgrep -f {package}"]:
+        try:
+            res = run_cmd(cmd, timeout=2)
+            out = res.stdout.strip()
+            if out and any(part.isdigit() for part in out.split()):
+                return True
+        except Exception:
+            pass
+
+    # Check 3: ps -A output search
+    for cmd in ["su -c 'ps -A 2>/dev/null'", "ps -A 2>/dev/null", "ps 2>/dev/null"]:
+        try:
+            res = run_cmd(cmd, timeout=2)
+            out = (res.stdout or '').lower()
+            if out and pkg in out:
+                return True
+        except Exception:
+            pass
+
+    # Check 4: dumpsys process check
+    try:
+        res = run_cmd(f"su -c 'dumpsys activity processes {package} 2>/dev/null'", timeout=2)
+        out = (res.stdout or '').lower()
+        if out and ('proc #' in out or 'processrecord' in out or pkg in out):
+            return True
+    except Exception:
+        pass
+
     return False
 
 def get_roblox_home_page_event(package):
@@ -513,10 +546,8 @@ def is_app_in_game(package, content=None):
     return True
 
 def is_roblox_on_home_page(package, content=None):
-    """Return True if Roblox or clone is sitting on the Home Screen rather than in 3D game."""
-    if not is_app_running(package):
-        return False
-    return not is_app_in_game(package, content=content)
+    """Legacy stub — home screen force-rejoin logic has been completely removed."""
+    return False
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -589,7 +620,7 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     for cmd in intents:
         try:
             res = run_cmd(cmd, timeout=6)
-            if res.returncode == 0 and "Error" not in res.stdout:
+            if res.returncode == 0:
                 return True
         except Exception:
             pass
@@ -1148,7 +1179,6 @@ class TerminalRejoinLoop:
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
-                h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', False) else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
@@ -1233,7 +1263,7 @@ class TerminalRejoinLoop:
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         # Grace period after launch prevents duplicate launches while Android creates the process.
-        LAUNCH_GRACE        = 20
+        LAUNCH_GRACE        = 30
 
         w, h = get_screen_size()
         total_apps = len(packages)
@@ -1243,7 +1273,7 @@ class TerminalRejoinLoop:
         # the dashboard from rejoining every selected clone at once.
         for i, pkg in enumerate(packages):
             if is_app_running(pkg):
-                self.last_launch[pkg] = 0
+                self.last_launch[pkg] = time.time()
                 self.set_status(pkg, 'Checking')
                 self.log(f"[{pkg}] Already running -> monitoring only")
                 continue
@@ -1289,23 +1319,7 @@ class TerminalRejoinLoop:
                             self.last_launch[pkg] = now
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     else:
-                        # PROCESS ALIVE -> check if stuck on Roblox Home Screen
-                        home_rejoin_enabled = cfg.get('home_rejoin_enabled', False)
-                        time_since_launch = now - self.last_launch.get(pkg, 0)
-
-                        if home_rejoin_enabled and time_since_launch >= LAUNCH_GRACE:
-                            on_home = is_roblox_on_home_page(pkg, activity_dump)
-                            if on_home:
-                                self.set_status(pkg, 'Home Page')
-                                self.log(f"[{pkg}] Roblox Home page detected -> Force stopping & rejoining place")
-                                self.set_status(pkg, 'Rejoining')
-                                force_stop_app(pkg)
-                                time.sleep(2)
-                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                self.last_launch[pkg] = time.time()
-                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                                continue
-
+                        # PROCESS ALIVE -> keep running, no force stopping
                         self.set_status(pkg, 'Ingame')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
@@ -1580,11 +1594,8 @@ def interactive_menu():
             clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
-            hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', False)}]: ").strip().lower()
-            if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
-
             save_config()
-            print("\n[+] Timing & Home Screen settings updated.")
+            print("\n[+] Timing settings updated.")
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
