@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.59-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:46:30 UTC"
+BUILD_VERSION = "v6.8.60-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:50:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -377,13 +377,27 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive. Only returns True if a real numeric PID is found."""
-    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
+    """Check if the app process is alive across all Android environments (su, pgrep, ps)."""
+    cmds = [
+        f"su -c 'pidof {package}'",
+        f"pidof {package}",
+        f"su -c 'pgrep -f {package}'",
+        f"pgrep -f {package}",
+        f"su -c 'ps -ef | grep {package}'",
+        f"ps -ef | grep {package}"
+    ]
+    for cmd in cmds:
         try:
             res = run_cmd(cmd, timeout=3)
             out = res.stdout.strip()
-            # Must be non-empty AND all parts must be numeric (actual PIDs)
-            if out and all(part.isdigit() for part in out.split()):
+            if not out:
+                continue
+            # If pidof/pgrep output contains any numeric PID
+            pids = [part for part in out.split() if part.isdigit()]
+            if pids:
+                return True
+            # If ps output contains package name and process line
+            if package.lower() in out.lower() and 'grep' not in out.lower():
                 return True
         except Exception:
             pass
