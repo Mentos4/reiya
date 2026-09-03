@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.55-REI-REJOIN"
-BUILD_TIME = "2026-09-03 14:52:30 UTC"
+BUILD_VERSION = "v6.8.56-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:38:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -432,14 +432,14 @@ def get_activity_top_dump():
 def is_app_in_game(package, content=None):
     """
     Check if a Roblox app or clone is connected to an active 3D game place.
-    Roblox 3D engine uses RakNet UDP sockets (ports 50000-65535) when in-game.
+    Roblox 3D engine uses RakNet UDP sockets (ports 10000-65535) when in-game.
     Home Screen web/API traffic only uses HTTPS/QUIC ports (443, 80, 53).
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
-    # Check 1: RakNet UDP socket inspection for active 3D game server connection (ports 50000 - 65535)
+    # Check 1: RakNet UDP socket inspection for active 3D game server connection (ports 10000 - 65535)
     try:
         pid_res = run_cmd(f"su -c 'pidof {pkg}'", timeout=2)
         pids = (pid_res.stdout or '').strip().split()
@@ -458,11 +458,11 @@ def is_app_in_game(package, content=None):
                             port_str = remote.split(':')[-1]
                             if port_str.isdigit():
                                 port = int(port_str)
-                                # Dedicated 3D game servers run on high UDP ports (50000 - 65535)
-                                if 50000 <= port <= 65535:
+                                # Dedicated 3D game servers run on UDP ports (10000 - 65535)
+                                if 10000 <= port <= 65535:
                                     return True
 
-            # Inspect /proc/{pid}/net/udp fallback for high remote ports (50000 - 65535)
+            # Inspect /proc/{pid}/net/udp fallback for remote ports (10000 - 65535)
             udp_res = run_cmd(f"su -c 'cat /proc/{pid}/net/udp 2>/dev/null'", timeout=2)
             udp_text = (udp_res.stdout or '').strip()
             if udp_text:
@@ -475,7 +475,7 @@ def is_app_in_game(package, content=None):
                             try:
                                 hex_port = rem_addr.split(':')[1]
                                 port = int(hex_port, 16)
-                                if 50000 <= port <= 65535:
+                                if 10000 <= port <= 65535:
                                     return True
                             except Exception:
                                 pass
@@ -483,15 +483,15 @@ def is_app_in_game(package, content=None):
         pass
 
     # Check 2: Activity top dump check fallback
+    # Note: ReactViewGroup / ReactFrameLayout / ActivityProtocolLaunch MUST NOT be treated as Home signals
+    # because React views overlay the 3D surface even while in-game.
     HOME_SIGNALS = [
-        'activityprotocollaunch', 'reactrootview', 'reactviewgroup', 'reactframelayout',
-        'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell', 'foryou',
-        'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
+        'loginactivity', 'welcomeactivity', 'titleactivity', 'lobbyactivity',
+        'bootstrapactivity', 'loginview', 'landingview', 'authactivity',
+        'foryou', 'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
     ]
     PURE_3D_GAME_SIGNALS = [
-        'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity'
+        'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity', 'nativeactivity'
     ]
 
     if content is None:
@@ -507,20 +507,29 @@ def is_app_in_game(package, content=None):
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
                 return False
 
-            if 'activityprotocollaunch' in block_text:
-                return False
+            # Check 3D Game Surface FIRST
+            if any(sig in block_text for sig in PURE_3D_GAME_SIGNALS):
+                return True
 
             if any(sig in block_text for sig in HOME_SIGNALS):
                 return False
 
-            if any(sig in block_text for sig in PURE_3D_GAME_SIGNALS):
-                return True
-
     return False
 
 def is_roblox_on_home_page(package, content=None):
-    """Return True if Roblox or clone is sitting on the Home Screen rather than in 3D game."""
-    return not is_app_in_game(package, content=content)
+    """Return True ONLY if Roblox is explicitly confirmed sitting on the Home Screen rather than in 3D game."""
+    if is_app_in_game(package, content=content):
+        return False
+
+    # Additional safety check: verify process is alive before claiming on Home Page
+    try:
+        pid_res = run_cmd(f"su -c 'pidof {package}'", timeout=2)
+        if not (pid_res.stdout or '').strip():
+            return False
+    except Exception:
+        pass
+
+    return True
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
