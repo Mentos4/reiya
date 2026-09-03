@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.57-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:25:00 UTC"
+BUILD_VERSION = "v6.8.56-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:30:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
+    'home_rejoin_enabled': True,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
@@ -218,6 +219,7 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
             config.update(saved)
+            removed_home_rejoin_setting = config.pop('home_rejoin_enabled', None) is not None
             renamed = False
             if config.get('game_id') and _is_generated_game_name(config.get('game_name')):
                 config['game_name'] = lookup_roblox_game_name(config['game_id'])
@@ -228,7 +230,7 @@ def load_config():
                 if _is_generated_game_name(package_names.get(package)):
                     package_names[package] = lookup_roblox_game_name(game_value)
                     renamed = True
-            if renamed:
+            if renamed or removed_home_rejoin_setting:
                 save_config()
         except Exception as e:
             print(f"[!] Warning loading config: {e}")
@@ -430,14 +432,14 @@ def get_activity_top_dump():
 def is_app_in_game(package, content=None):
     """
     Check if a Roblox app or clone is connected to an active 3D game place.
-    Roblox 3D engine uses RakNet UDP sockets (ports 50000-65535) when in-game.
-    Home Screen web/API traffic only uses HTTPS/QUIC ports (443, 80, 53).
+    Roblox 3D engine uses UDP sockets (ports 1024-65535, non-HTTP/DNS) when in-game.
+    Also checks 3D rendering views (SurfaceView, GLSurfaceView, TextureView, etc.)
     """
     pkg = str(package or '').lower()
     if not pkg:
         return False
 
-    # Check 1: RakNet UDP socket inspection for active 3D game server connection (ports 50000 - 65535)
+    # Check 1: UDP socket inspection for active game server connection (ports 1024 - 65535, excluding 53, 80, 443)
     try:
         pid_res = run_cmd(f"su -c 'pidof {pkg}'", timeout=2)
         pids = (pid_res.stdout or '').strip().split()
@@ -456,12 +458,11 @@ def is_app_in_game(package, content=None):
                             port_str = remote.split(':')[-1]
                             if port_str.isdigit():
                                 port = int(port_str)
-                                # Dedicated 3D game servers run on high UDP ports (50000 - 65535)
-                                if 50000 <= port <= 65535:
+                                if 1024 <= port <= 65535 and port not in (53, 80, 443):
                                     return True
 
-            # Inspect /proc/{pid}/net/udp fallback for high remote ports (50000 - 65535)
-            udp_res = run_cmd(f"su -c 'cat /proc/{pid}/net/udp 2>/dev/null'", timeout=2)
+            # Inspect /proc/{pid}/net/udp and /proc/{pid}/net/udp6 fallback
+            udp_res = run_cmd(f"su -c 'cat /proc/{pid}/net/udp /proc/{pid}/net/udp6 2>/dev/null'", timeout=2)
             udp_text = (udp_res.stdout or '').strip()
             if udp_text:
                 lines = udp_text.splitlines()[1:]
@@ -473,7 +474,7 @@ def is_app_in_game(package, content=None):
                             try:
                                 hex_port = rem_addr.split(':')[1]
                                 port = int(hex_port, 16)
-                                if 50000 <= port <= 65535:
+                                if 1024 <= port <= 65535 and port not in (53, 80, 443):
                                     return True
                             except Exception:
                                 pass
@@ -481,12 +482,8 @@ def is_app_in_game(package, content=None):
         pass
 
     # Check 2: Activity top dump check fallback
-    HOME_SIGNALS = [
-        'loginactivity', 'welcomeactivity', 'authactivity', 'landingview', 'hometab'
-    ]
     PURE_3D_GAME_SIGNALS = [
-        'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity',
-        'activityprotocollaunch', 'reactrootview', 'mainactivity'
+        'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity', 'nativemain', 'roblox'
     ]
 
     if content is None:
@@ -502,17 +499,20 @@ def is_app_in_game(package, content=None):
             if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
                 return False
 
+            # Check 3D rendering signals FIRST
             if any(sig in block_text for sig in PURE_3D_GAME_SIGNALS):
                 return True
 
-            if any(sig in block_text for sig in HOME_SIGNALS):
+            # Explicit home navigation signals ONLY
+            EXPLICIT_HOME_SIGNALS = ['dat=roblox://navigation/home', 'hometabview', 'landingview', 'loginactivity']
+            if any(sig in block_text for sig in EXPLICIT_HOME_SIGNALS):
                 return False
 
-    # Default to True if process is running to prevent false-positive force stopping
+    # Default fallback: if app process is alive, assume running/in-game
     return True
 
 def is_roblox_on_home_page(package, content=None):
-    """Return True if Roblox or clone is sitting on the Home Screen rather than in 3D game."""
+    """Return True ONLY if Roblox or clone process is alive AND explicitly stuck on Home Screen."""
     if not is_app_running(package):
         return False
     return not is_app_in_game(package, content=content)
@@ -1147,6 +1147,7 @@ class TerminalRejoinLoop:
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
+                h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
@@ -1231,7 +1232,7 @@ class TerminalRejoinLoop:
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         # Grace period after launch prevents duplicate launches while Android creates the process.
-        LAUNCH_GRACE        = 20
+        LAUNCH_GRACE        = 45
 
         w, h = get_screen_size()
         total_apps = len(packages)
@@ -1241,8 +1242,8 @@ class TerminalRejoinLoop:
         # the dashboard from rejoining every selected clone at once.
         for i, pkg in enumerate(packages):
             if is_app_running(pkg):
-                self.last_launch[pkg] = 0
-                self.set_status(pkg, 'Checking')
+                self.last_launch[pkg] = time.time()
+                self.set_status(pkg, 'Ingame')
                 self.log(f"[{pkg}] Already running -> monitoring only")
                 continue
 
@@ -1259,6 +1260,8 @@ class TerminalRejoinLoop:
 
         while self.running:
             try:
+                activity_dump = get_activity_top_dump()
+
                 for i, pkg in enumerate(packages):
                     if not self.running:
                         break
@@ -1285,7 +1288,23 @@ class TerminalRejoinLoop:
                             self.last_launch[pkg] = now
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     else:
-                        # PROCESS ALIVE -> Ingame
+                        # PROCESS ALIVE -> check if stuck on Roblox Home Screen
+                        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
+                        time_since_launch = now - self.last_launch.get(pkg, 0)
+
+                        if home_rejoin_enabled and time_since_launch >= LAUNCH_GRACE:
+                            on_home = is_roblox_on_home_page(pkg, activity_dump)
+                            if on_home:
+                                self.set_status(pkg, 'Home Page')
+                                self.log(f"[{pkg}] Roblox Home page detected -> Force stopping & rejoining place")
+                                self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                time.sleep(2)
+                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                                self.last_launch[pkg] = time.time()
+                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                                continue
+
                         self.set_status(pkg, 'Ingame')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
@@ -1560,8 +1579,11 @@ def interactive_menu():
             clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
+            hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
+            if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
+
             save_config()
-            print("\n[+] Timing settings updated.")
+            print("\n[+] Timing & Home Screen settings updated.")
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
