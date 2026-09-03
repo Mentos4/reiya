@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.61-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:53:00 UTC"
+BUILD_VERSION = "v6.8.62-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:58:30 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -376,30 +376,51 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive across all Android environments (su, pgrep, ps)."""
-    cmds = [
-        f"su -c 'pidof {package}'",
-        f"pidof {package}",
-        f"su -c 'pgrep -f {package}'",
-        f"pgrep -f {package}",
-        f"su -c 'ps -ef | grep {package}'",
-        f"ps -ef | grep {package}"
-    ]
-    for cmd in cmds:
+    """Check if the app process is alive without false-positive grep matches."""
+    pkg = str(package or '').strip().lower()
+    if not pkg:
+        return False
+
+    # 1. Try pidof (root and non-root)
+    for cmd in [f"su -c 'pidof {pkg}'", f"pidof {pkg}"]:
         try:
-            res = run_cmd(cmd, timeout=3)
-            out = res.stdout.strip()
-            if not out:
-                continue
-            # If pidof/pgrep output contains any numeric PID
-            pids = [part for part in out.split() if part.isdigit()]
-            if pids:
-                return True
-            # If ps output contains package name and process line
-            if package.lower() in out.lower() and 'grep' not in out.lower():
-                return True
+            res = run_cmd(cmd, timeout=2)
+            out = (res.stdout or '').strip()
+            if out:
+                parts = out.split()
+                if parts and all(p.isdigit() for p in parts):
+                    return True
         except Exception:
             pass
+
+    # 2. Try pgrep -f (root and non-root) — returns ONLY PIDs of matching cmdline
+    for cmd in [f"su -c 'pgrep -f {pkg}'", f"pgrep -f {pkg}"]:
+        try:
+            res = run_cmd(cmd, timeout=2)
+            out = (res.stdout or '').strip()
+            if out:
+                lines = [l.strip() for l in out.splitlines() if l.strip().isdigit()]
+                if lines:
+                    return True
+        except Exception:
+            pass
+
+    # 3. Try ps -A / ps inspection filtering out helper processes (grep, sh, su, python)
+    for cmd in ["su -c 'ps -A'", "su -c 'ps'", "ps -A", "ps"]:
+        try:
+            res = run_cmd(cmd, timeout=3)
+            out = (res.stdout or '').strip()
+            if not out:
+                continue
+            for line in out.splitlines():
+                line_lower = line.lower()
+                if any(bad in line_lower for bad in ['grep', 'sh', 'su ', 'python', 'pid tty']):
+                    continue
+                if pkg in line_lower:
+                    return True
+        except Exception:
+            pass
+
     return False
 
 def get_roblox_home_page_event(package):
