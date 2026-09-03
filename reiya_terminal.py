@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.60-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:50:00 UTC"
+BUILD_VERSION = "v6.8.61-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:53:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -78,7 +78,6 @@ DEFAULT_CONFIG = {
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
-    'home_rejoin_enabled': True,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
@@ -1203,7 +1202,6 @@ class TerminalRejoinLoop:
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
-                h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
@@ -1219,7 +1217,6 @@ class TerminalRejoinLoop:
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
                 out(f"AUTO SORT: {s_st}")
-                out(f"HOME REJOIN: {h_st}")
                 out(f"CLEAR CACHE: {c_st}")
                 out(SEP)
 
@@ -1610,11 +1607,8 @@ def interactive_menu():
             clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
-            hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
-            if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
-
             save_config()
-            print("\n[+] Timing & Home Screen settings updated.")
+            print("\n[+] Timing settings updated.")
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
