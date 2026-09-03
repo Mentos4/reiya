@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.57-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:41:00 UTC"
+BUILD_VERSION = "v6.8.58-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:43:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1302,8 +1302,6 @@ class TerminalRejoinLoop:
 
         while self.running:
             try:
-                activity_dump = get_activity_top_dump()
-
                 for i, pkg in enumerate(packages):
                     if not self.running:
                         break
@@ -1330,23 +1328,7 @@ class TerminalRejoinLoop:
                             self.last_launch[pkg] = now
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     else:
-                        # PROCESS ALIVE -> check if stuck on Roblox Home Screen
-                        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
-                        time_since_launch = now - self.last_launch.get(pkg, 0)
-
-                        if home_rejoin_enabled and time_since_launch >= LAUNCH_GRACE:
-                            on_home = is_roblox_on_home_page(pkg, activity_dump)
-                            if on_home:
-                                self.set_status(pkg, 'Home Page')
-                                self.log(f"[{pkg}] Roblox Home page detected -> Force stopping & rejoining place")
-                                self.set_status(pkg, 'Rejoining')
-                                force_stop_app(pkg)
-                                time.sleep(2)
-                                bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                self.last_launch[pkg] = time.time()
-                                launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                                continue
-
+                        # PROCESS ALIVE -> Monitor only, do not interrupt or force stop
                         self.set_status(pkg, 'Ingame')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
