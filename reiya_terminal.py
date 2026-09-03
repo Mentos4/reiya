@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.53-REI-REJOIN"
-BUILD_TIME = "2026-09-03 02:45:00 UTC"
+BUILD_VERSION = "v6.8.54-REI-REJOIN"
+BUILD_TIME = "2026-09-03 14:47:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -291,6 +291,14 @@ def clear_terminal_screen():
 def prompt(text):
     return input(text)
 
+def prompt_game_choice(text, stale_blank_window=0.25):
+    """Read a game choice without letting a leftover menu newline close setup."""
+    while True:
+        displayed_at = time.monotonic()
+        value = prompt(text)
+        if value.strip() or time.monotonic() - displayed_at >= stale_blank_window:
+            return value
+        print("[i] Waiting for your game choice...")
 def get_installed_packages():
     """
     Discover all installed packages on Android / VPhone / Emulators.
@@ -1486,7 +1494,7 @@ def interactive_menu():
                             print("  S. Skip (keep current setting)")
 
                             while True:
-                                gchoice = prompt(f"Choice for {pkg}: ").strip()
+                                gchoice = prompt_game_choice(f"Choice for {pkg}: ").strip()
                                 if gchoice.upper() == 'C':
                                     gid = prompt("  Enter Place ID / Link: ").strip()
                                     if not gid:
@@ -1518,7 +1526,7 @@ def interactive_menu():
                     print("  C. Custom Place ID or Private Server Link")
                     print("  Enter. Keep the current game")
                     while True:
-                        gchoice = prompt("\nChoice: ").strip()
+                        gchoice = prompt_game_choice("\nChoice: ").strip()
                         if not gchoice:
                             print("[i] No game choice entered; keeping the current game.")
                             break
