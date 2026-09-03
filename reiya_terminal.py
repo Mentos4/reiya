@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.56-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:38:00 UTC"
+BUILD_VERSION = "v6.8.57-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:41:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -517,19 +517,47 @@ def is_app_in_game(package, content=None):
     return False
 
 def is_roblox_on_home_page(package, content=None):
-    """Return True ONLY if Roblox is explicitly confirmed sitting on the Home Screen rather than in 3D game."""
+    """
+    Return True ONLY if Roblox is EXPLICITLY confirmed sitting on the Home/Login Screen.
+    Never return True by assumption — false positives cause force-stop rejoin loops on running games.
+    """
+    pkg = str(package or '').lower()
+    if not pkg:
+        return False
+
+    # 1. If active in-game signals exist, definitely NOT home page
     if is_app_in_game(package, content=content):
         return False
 
-    # Additional safety check: verify process is alive before claiming on Home Page
+    # 2. Check process is actually alive
     try:
         pid_res = run_cmd(f"su -c 'pidof {package}'", timeout=2)
         if not (pid_res.stdout or '').strip():
             return False
     except Exception:
-        pass
+        return False
 
-    return True
+    # 3. Require EXPLICIT positive home/login indicators in activity dump
+    EXPLICIT_HOME_SIGNALS = [
+        'loginactivity', 'welcomeactivity', 'titleactivity', 'lobbyactivity',
+        'bootstrapactivity', 'loginview', 'landingview', 'authactivity',
+        'foryou', 'charts', 'homeactivity', 'hometab'
+    ]
+
+    if content is None:
+        content = get_activity_top_dump()
+
+    if content and content.strip():
+        pkg_lines = get_package_activity_dump(package, content)
+        if not pkg_lines:
+            pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
+        if pkg_lines:
+            block_text = '\n'.join(pkg_lines).lower()
+            # ONLY return True if an explicit Home Screen activity/view is found
+            if any(sig in block_text for sig in EXPLICIT_HOME_SIGNALS):
+                return True
+
+    return False
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
