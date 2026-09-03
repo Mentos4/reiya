@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.59-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:30:00 UTC"
+BUILD_VERSION = "v6.8.60-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:32:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -375,49 +375,34 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive using pidof, pgrep, ps, and dumpsys."""
+    """Check if the app process is alive. Returns True only if a real numeric PID is found."""
     pkg = str(package or '').lower().strip()
     if not pkg:
         return False
 
+    base_pkg = pkg.split(':')[0]
+    
     # Check 1: pidof
-    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
-        try:
-            res = run_cmd(cmd, timeout=2)
-            out = res.stdout.strip()
-            if out and any(part.isdigit() for part in out.split()):
-                return True
-        except Exception:
-            pass
+    for target in [pkg, base_pkg]:
+        for cmd in [f"su -c 'pidof {target}'", f"pidof {target}"]:
+            try:
+                res = run_cmd(cmd, timeout=2)
+                out = res.stdout.strip()
+                if out and all(part.isdigit() for part in out.split()):
+                    return True
+            except Exception:
+                pass
 
     # Check 2: pgrep -f
-    for cmd in [f"su -c 'pgrep -f {package}'", f"pgrep -f {package}"]:
-        try:
-            res = run_cmd(cmd, timeout=2)
-            out = res.stdout.strip()
-            if out and any(part.isdigit() for part in out.split()):
-                return True
-        except Exception:
-            pass
-
-    # Check 3: ps -A output search
-    for cmd in ["su -c 'ps -A 2>/dev/null'", "ps -A 2>/dev/null", "ps 2>/dev/null"]:
-        try:
-            res = run_cmd(cmd, timeout=2)
-            out = (res.stdout or '').lower()
-            if out and pkg in out:
-                return True
-        except Exception:
-            pass
-
-    # Check 4: dumpsys process check
-    try:
-        res = run_cmd(f"su -c 'dumpsys activity processes {package} 2>/dev/null'", timeout=2)
-        out = (res.stdout or '').lower()
-        if out and ('proc #' in out or 'processrecord' in out or pkg in out):
-            return True
-    except Exception:
-        pass
+    for target in [pkg, base_pkg]:
+        for cmd in [f"su -c 'pgrep -f {target}'", f"pgrep -f {target}"]:
+            try:
+                res = run_cmd(cmd, timeout=2)
+                out = res.stdout.strip()
+                if out and any(part.isdigit() for part in out.split()):
+                    return True
+            except Exception:
+                pass
 
     return False
 
