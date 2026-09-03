@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.58-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:28:00 UTC"
+BUILD_VERSION = "v6.8.59-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:30:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1194,7 +1194,6 @@ class TerminalRejoinLoop:
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
                 out(f"AUTO SORT: {s_st}")
-                out(f"HOME REJOIN: {h_st}")
                 out(f"CLEAR CACHE: {c_st}")
                 out(SEP)
 
