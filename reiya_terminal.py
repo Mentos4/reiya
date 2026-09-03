@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.60-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:32:00 UTC"
+BUILD_VERSION = "v6.8.57-REI-REJOIN"
+BUILD_TIME = "2026-09-03 15:25:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -375,35 +375,16 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive. Returns True only if a real numeric PID is found."""
-    pkg = str(package or '').lower().strip()
-    if not pkg:
-        return False
-
-    base_pkg = pkg.split(':')[0]
-    
-    # Check 1: pidof
-    for target in [pkg, base_pkg]:
-        for cmd in [f"su -c 'pidof {target}'", f"pidof {target}"]:
-            try:
-                res = run_cmd(cmd, timeout=2)
-                out = res.stdout.strip()
-                if out and all(part.isdigit() for part in out.split()):
-                    return True
-            except Exception:
-                pass
-
-    # Check 2: pgrep -f
-    for target in [pkg, base_pkg]:
-        for cmd in [f"su -c 'pgrep -f {target}'", f"pgrep -f {target}"]:
-            try:
-                res = run_cmd(cmd, timeout=2)
-                out = res.stdout.strip()
-                if out and any(part.isdigit() for part in out.split()):
-                    return True
-            except Exception:
-                pass
-
+    """Check if the app process is alive. Only returns True if a real numeric PID is found."""
+    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
+        try:
+            res = run_cmd(cmd, timeout=3)
+            out = res.stdout.strip()
+            # Must be non-empty AND all parts must be numeric (actual PIDs)
+            if out and all(part.isdigit() for part in out.split()):
+                return True
+        except Exception:
+            pass
     return False
 
 def get_roblox_home_page_event(package):
@@ -531,8 +512,10 @@ def is_app_in_game(package, content=None):
     return True
 
 def is_roblox_on_home_page(package, content=None):
-    """Legacy stub — home screen force-rejoin logic has been completely removed."""
-    return False
+    """Return True if Roblox or clone is sitting on the Home Screen rather than in 3D game."""
+    if not is_app_running(package):
+        return False
+    return not is_app_in_game(package, content=content)
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -605,7 +588,7 @@ def launch_game(package, game_id, bounds=None, freeform=True):
     for cmd in intents:
         try:
             res = run_cmd(cmd, timeout=6)
-            if res.returncode == 0:
+            if res.returncode == 0 and "Error" not in res.stdout:
                 return True
         except Exception:
             pass
@@ -1179,6 +1162,7 @@ class TerminalRejoinLoop:
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
                 out(f"AUTO SORT: {s_st}")
+                out(f"HOME REJOIN: {h_st}")
                 out(f"CLEAR CACHE: {c_st}")
                 out(SEP)
 
@@ -1247,7 +1231,7 @@ class TerminalRejoinLoop:
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         # Grace period after launch prevents duplicate launches while Android creates the process.
-        LAUNCH_GRACE        = 30
+        LAUNCH_GRACE        = 20
 
         w, h = get_screen_size()
         total_apps = len(packages)
@@ -1257,7 +1241,7 @@ class TerminalRejoinLoop:
         # the dashboard from rejoining every selected clone at once.
         for i, pkg in enumerate(packages):
             if is_app_running(pkg):
-                self.last_launch[pkg] = time.time()
+                self.last_launch[pkg] = 0
                 self.set_status(pkg, 'Checking')
                 self.log(f"[{pkg}] Already running -> monitoring only")
                 continue
@@ -1275,8 +1259,6 @@ class TerminalRejoinLoop:
 
         while self.running:
             try:
-                activity_dump = get_activity_top_dump()
-
                 for i, pkg in enumerate(packages):
                     if not self.running:
                         break
@@ -1303,7 +1285,7 @@ class TerminalRejoinLoop:
                             self.last_launch[pkg] = now
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     else:
-                        # PROCESS ALIVE -> keep running, no force stopping
+                        # PROCESS ALIVE -> Ingame
                         self.set_status(pkg, 'Ingame')
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
