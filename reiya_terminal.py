@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.62-REI-REJOIN"
-BUILD_TIME = "2026-09-03 15:58:30 UTC"
+BUILD_VERSION = "v6.8.63-REI-REJOIN"
+BUILD_TIME = "2026-09-05 04:35:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -376,7 +376,7 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the app process is alive without false-positive grep matches."""
+    """Check if the exact app process (or one of its child processes) is alive."""
     pkg = str(package or '').strip().lower()
     if not pkg:
         return False
@@ -393,19 +393,9 @@ def is_app_running(package):
         except Exception:
             pass
 
-    # 2. Try pgrep -f (root and non-root) — returns ONLY PIDs of matching cmdline
-    for cmd in [f"su -c 'pgrep -f {pkg}'", f"pgrep -f {pkg}"]:
-        try:
-            res = run_cmd(cmd, timeout=2)
-            out = (res.stdout or '').strip()
-            if out:
-                lines = [l.strip() for l in out.splitlines() if l.strip().isdigit()]
-                if lines:
-                    return True
-        except Exception:
-            pass
-
-    # 3. Try ps -A / ps inspection filtering out helper processes (grep, sh, su, python)
+    # 2. Inspect the process-name column. Do not use pgrep -f: on some Android
+    # builds it matches the temporary pgrep command itself and reports a closed
+    # package as alive forever.
     for cmd in ["su -c 'ps -A'", "su -c 'ps'", "ps -A", "ps"]:
         try:
             res = run_cmd(cmd, timeout=3)
@@ -413,10 +403,11 @@ def is_app_running(package):
             if not out:
                 continue
             for line in out.splitlines():
-                line_lower = line.lower()
-                if any(bad in line_lower for bad in ['grep', 'sh', 'su ', 'python', 'pid tty']):
+                parts = line.split()
+                if not parts or parts[0].lower() in ('user', 'uid', 'pid'):
                     continue
-                if pkg in line_lower:
+                process_name = os.path.basename(parts[-1]).lower()
+                if process_name == pkg or process_name.startswith(f'{pkg}:'):
                     return True
         except Exception:
             pass
