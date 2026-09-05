@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.67-REI-REJOIN"
-BUILD_TIME = "2026-09-05 05:59:42 UTC"
+BUILD_VERSION = "v6.8.68-REI-REJOIN"
+BUILD_TIME = "2026-09-05 06:10:40 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1107,6 +1107,7 @@ class TerminalRejoinLoop:
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
+                    elif st == 'Waiting':                        st_c = f"{YELLOW}Wait{RESET}"
                     else:                                        st_c = st
 
                     pkg_w = COLS[2][1]
@@ -1148,7 +1149,6 @@ class TerminalRejoinLoop:
     def _loop(self, packages, cfg):
         check_interval      = float(cfg.get('check_interval', 8))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
-        sequential          = cfg.get('sequential_join', False)
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         # Grace period after launch prevents duplicate launches while Android creates the process.
@@ -1160,16 +1160,25 @@ class TerminalRejoinLoop:
         activity_seen = {pkg: False for pkg in packages}
         activity_misses = {pkg: 0 for pkg in packages}
 
-        # Launch all selected packages into the target Roblox place on Option 8 startup
+        # Option 8 startup is monitor-first: never send a new launch intent to a
+        # package whose main process is already alive. Reopening every package at
+        # once can make Android kill Roblox clones and Termux under memory pressure.
+        startup_launches = 0
         for i, pkg in enumerate(packages):
+            if is_app_running(pkg):
+                self.set_status(pkg, 'Ingame')
+                self.log(f"[{pkg}] Already running -> monitoring only")
+                continue
+
+            if startup_launches:
+                time.sleep(max(5, min(delay_open_tab, 15)))
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.set_status(pkg, 'Launching')
             self.last_launch[pkg] = time.time()
             self.log(f"[{pkg}] Launching game place...")
             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-            if sequential and i < len(packages) - 1:
-                time.sleep(delay_open_tab)
+            startup_launches += 1
 
         # Give apps extra time to fully start before monitoring begins
         time.sleep(8)
@@ -1180,6 +1189,7 @@ class TerminalRejoinLoop:
                 # is manually closed. Read all activity tasks once, then evaluate
                 # every selected package independently against that same snapshot.
                 open_activity_packages = get_open_activity_packages(packages)
+                launched_this_cycle = False
                 for i, pkg in enumerate(packages):
                     if not self.running:
                         break
@@ -1212,6 +1222,9 @@ class TerminalRejoinLoop:
                         if time_since_launch < LAUNCH_GRACE:
                             self.set_status(pkg, 'Launching')
                         else:
+                            if launched_this_cycle:
+                                self.set_status(pkg, 'Waiting')
+                                continue
                             self.log(f"[{pkg}] Process dead -> Rejoining")
                             self.set_status(pkg, 'Rejoining')
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
@@ -1219,6 +1232,7 @@ class TerminalRejoinLoop:
                             activity_seen[pkg] = False
                             activity_misses[pkg] = 0
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            launched_this_cycle = True
                     else:
                         # PROCESS ALIVE -> Monitor only, do not interrupt or force stop
                         self.set_status(pkg, 'Ingame')
