@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.65-REI-REJOIN"
-BUILD_TIME = "2026-09-05 05:48:04 UTC"
+BUILD_VERSION = "v6.8.66-REI-REJOIN"
+BUILD_TIME = "2026-09-05 05:54:19 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -438,6 +438,25 @@ def get_open_activity_packages(packages):
         except Exception:
             pass
     return None
+
+def evaluate_package_presence(package, process_running, open_activity_packages,
+                              activity_seen, activity_misses, launch_age,
+                              launch_grace, miss_limit):
+    """Stabilize delayed Android activity reports for one package."""
+    pkg = str(package or '').strip().lower()
+    if not process_running:
+        return False, activity_seen, 0, False
+    if open_activity_packages is None:
+        return True, activity_seen, 0, False
+    if pkg in open_activity_packages:
+        return True, True, 0, False
+    if launch_age < launch_grace:
+        return True, activity_seen, 0, True
+    if not activity_seen:
+        return True, False, 0, False
+
+    activity_misses += 1
+    return activity_misses < miss_limit, True, activity_misses, False
 
 def get_roblox_home_page_event(package):
     """Return the latest Android Home-route event for this Roblox clone."""
@@ -1322,10 +1341,13 @@ class TerminalRejoinLoop:
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         # Grace period after launch prevents duplicate launches while Android creates the process.
-        LAUNCH_GRACE        = 20
+        LAUNCH_GRACE        = 30
+        ACTIVITY_MISS_LIMIT = 3
 
         w, h = get_screen_size()
         total_apps = len(packages)
+        activity_seen = {pkg: False for pkg in packages}
+        activity_misses = {pkg: 0 for pkg in packages}
 
         # Launch all selected packages into the target Roblox place on Option 8 startup
         for i, pkg in enumerate(packages):
@@ -1354,15 +1376,28 @@ class TerminalRejoinLoop:
                     gid = self._get_game_id(pkg, cfg)
                     now = time.time()
 
-                    running = is_app_running(pkg)
-                    if running and open_activity_packages is not None:
-                        running = pkg.lower() in open_activity_packages
+                    time_since_launch = now - self.last_launch.get(pkg, 0)
+                    running, activity_seen[pkg], activity_misses[pkg], waiting_for_activity = (
+                        evaluate_package_presence(
+                            pkg,
+                            is_app_running(pkg),
+                            open_activity_packages,
+                            activity_seen[pkg],
+                            activity_misses[pkg],
+                            time_since_launch,
+                            LAUNCH_GRACE,
+                            ACTIVITY_MISS_LIMIT,
+                        )
+                    )
+
+                    if waiting_for_activity:
+                        self.set_status(pkg, 'Launching')
+                        continue
 
                     if not running:
                         # A package can briefly have no PID while Android is creating it.
                         # Do not repeatedly launch it during that window: rapid retries can
                         # consume enough memory for Android to kill Termux itself.
-                        time_since_launch = now - self.last_launch.get(pkg, 0)
                         if time_since_launch < LAUNCH_GRACE:
                             self.set_status(pkg, 'Launching')
                         else:
@@ -1373,6 +1408,8 @@ class TerminalRejoinLoop:
                                 time.sleep(1)
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                             self.last_launch[pkg] = now
+                            activity_seen[pkg] = False
+                            activity_misses[pkg] = 0
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
                     else:
                         # PROCESS ALIVE -> Monitor only, do not interrupt or force stop
