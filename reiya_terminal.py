@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.63-REI-REJOIN"
-BUILD_TIME = "2026-09-05 04:35:00 UTC"
+BUILD_VERSION = "v6.8.64-REI-REJOIN"
+BUILD_TIME = "2026-09-05 05:41:32 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -376,7 +376,7 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the exact app process (or one of its child processes) is alive."""
+    """Check if the package's main app process is alive."""
     pkg = str(package or '').strip().lower()
     if not pkg:
         return False
@@ -407,7 +407,9 @@ def is_app_running(package):
                 if not parts or parts[0].lower() in ('user', 'uid', 'pid'):
                     continue
                 process_name = os.path.basename(parts[-1]).lower()
-                if process_name == pkg or process_name.startswith(f'{pkg}:'):
+                # A package:child process can outlive the closed Roblox window.
+                # Only the exact main process means Option 8 should show Ingame.
+                if process_name == pkg:
                     return True
         except Exception:
             pass
