@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.70-REI-REJOIN"
-BUILD_TIME = "2026-09-05 06:20:04 UTC"
+BUILD_VERSION = "v6.8.71-REI-REJOIN"
+BUILD_TIME = "2026-09-05 06:26:31 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -419,48 +419,64 @@ def is_app_running(package):
 
     return False
 
-def get_open_activity_packages(packages):
-    """Return packages with an Android activity task, or None when dumpsys is unavailable."""
-    commands = ["su -c 'dumpsys activity activities'", 'dumpsys activity activities']
+def extract_visible_window_packages(packages, content):
+    """Extract selected packages that have a visible Android window."""
+    content_lower = str(content or '').lower()
+    visibility_markers = (
+        'mhassurface=true', 'isonscreen=true', 'isvisible=true', 'mviewvisibility=0x0'
+    )
+    if not any(marker in content_lower for marker in visibility_markers):
+        return None
+
+    blocks = re.split(r'(?=^\s*(?:window #\d+\s+)?window\{)', content_lower, flags=re.MULTILINE)
+    visible_packages = set()
+    for block in blocks:
+        positive = any(marker in block for marker in visibility_markers)
+        hidden = any(marker in block for marker in (
+            'mhassurface=false', 'isonscreen=false', 'isvisible=false',
+            'mviewvisibility=0x4', 'mviewvisibility=0x8'
+        ))
+        if not positive or hidden:
+            continue
+        for package in packages:
+            pkg = str(package or '').strip().lower()
+            if pkg and re.search(rf'(?<![a-z0-9_.]){re.escape(pkg)}/', block):
+                visible_packages.add(pkg)
+    return visible_packages
+
+def get_open_window_packages(packages):
+    """Return selected packages with visible windows, or None when unsupported."""
+    commands = ["su -c 'dumpsys window windows'", 'dumpsys window windows']
     for command in commands:
         try:
             res = run_cmd(command, timeout=5)
             content = (res.stdout or '').strip()
-            content_lower = content.lower()
-            if not content or not any(marker in content_lower for marker in (
-                'activity manager activities', 'activityrecord{', 'task{'
-            )):
-                continue
-
-            open_packages = set()
-            for package in packages:
-                pkg = str(package or '').strip().lower()
-                if pkg and re.search(rf'(?<![a-z0-9_.]){re.escape(pkg)}/', content_lower):
-                    open_packages.add(pkg)
-            return open_packages
+            visible = extract_visible_window_packages(packages, content)
+            if visible is not None:
+                return visible
         except Exception:
             pass
     return None
 
-def evaluate_package_presence(package, process_running, open_activity_packages,
-                              activity_seen, activity_misses, launch_age,
+def evaluate_package_presence(package, process_running, open_window_packages,
+                              window_seen, window_misses, launch_age,
                               launch_grace, miss_limit):
-    """Stabilize delayed Android activity reports for one package."""
+    """Stabilize delayed Android visible-window reports for one package."""
     pkg = str(package or '').strip().lower()
     if not process_running:
-        return False, activity_seen, 0, False
-    if open_activity_packages is None:
-        return True, activity_seen, 0, not activity_seen
-    if pkg in open_activity_packages:
+        return False, window_seen, 0, False
+    if open_window_packages is None:
+        return True, window_seen, 0, not window_seen
+    if pkg in open_window_packages:
         return True, True, 0, False
     if launch_age < launch_grace:
-        return True, activity_seen, 0, True
-    if not activity_seen:
-        activity_misses += 1
-        return activity_misses < miss_limit, False, activity_misses, activity_misses < miss_limit
+        return True, window_seen, 0, True
+    if not window_seen:
+        window_misses += 1
+        return window_misses < miss_limit, False, window_misses, window_misses < miss_limit
 
-    activity_misses += 1
-    return activity_misses < miss_limit, True, activity_misses, False
+    window_misses += 1
+    return window_misses < miss_limit, True, window_misses, False
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -1149,58 +1165,56 @@ class TerminalRejoinLoop:
                     pass
 
     def _loop(self, packages, cfg):
-        check_interval      = float(cfg.get('check_interval', 8))
+        check_interval      = max(5, float(cfg.get('check_interval', 8)))
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
-        # Grace period after launch prevents duplicate launches while Android creates the process.
+        # Launch protection prevents duplicate deep links while Roblox loads.
         LAUNCH_GRACE        = 30
+        LAUNCH_PROTECTION   = 120
+        ACTIVE_PROCESS_CONFIRM = 10
         ACTIVE_LAUNCH_TIMEOUT = 60
-        ACTIVITY_MISS_LIMIT = 3
+        WINDOW_MISS_LIMIT   = 4
 
         w, h = get_screen_size()
         total_apps = len(packages)
-        activity_seen = {pkg: False for pkg in packages}
-        activity_misses = {pkg: 0 for pkg in packages}
+        window_seen = {pkg: False for pkg in packages}
+        window_misses = {pkg: 0 for pkg in packages}
 
         # Startup only classifies packages. The monitor loop owns every launch so
         # it can enforce one active launch at a time.
-        startup_open_activity_packages = get_open_activity_packages(packages)
+        startup_open_window_packages = get_open_window_packages(packages)
         for pkg in packages:
             if is_app_running(pkg):
-                if (startup_open_activity_packages is not None and
-                        pkg.lower() in startup_open_activity_packages):
-                    activity_seen[pkg] = True
+                if (startup_open_window_packages is not None and
+                        pkg.lower() in startup_open_window_packages):
+                    window_seen[pkg] = True
                     self.set_status(pkg, 'Ingame')
                     self.log(f"[{pkg}] Already open -> monitoring only")
-                elif startup_open_activity_packages is None:
+                elif startup_open_window_packages is None:
                     self.set_status(pkg, 'Checking')
-                    self.log(f"[{pkg}] Process found; activity check unavailable -> checking")
+                    self.log(f"[{pkg}] Process found; visible-window check unavailable -> checking")
                 else:
                     self.set_status(pkg, 'Checking')
-                    self.log(f"[{pkg}] Cached process without open activity -> checking")
+                    self.log(f"[{pkg}] Background process without visible window -> checking")
             else:
                 self.set_status(pkg, 'Waiting')
                 self.log(f"[{pkg}] Closed -> queued for launch")
 
-        # Give apps extra time to fully start before monitoring begins
-        time.sleep(8)
-
         active_launch_pkg = None
         while self.running:
             try:
-                # Android can keep a clone's main process cached after its window
-                # is manually closed. Read all activity tasks once, then evaluate
-                # every selected package independently against that same snapshot.
-                open_activity_packages = get_open_activity_packages(packages)
+                # A cached process is not enough: use the actual visible-window
+                # snapshot so closed/background clones are never labeled Ingame.
+                open_window_packages = get_open_window_packages(packages)
                 if active_launch_pkg:
                     active_key = active_launch_pkg.lower()
+                    active_launch_age = time.time() - self.last_launch.get(active_launch_pkg, 0)
                     launch_confirmed = (
-                        open_activity_packages is not None and
-                        active_key in open_activity_packages
+                        open_window_packages is not None and
+                        active_key in open_window_packages
                     )
-                    if open_activity_packages is None and is_app_running(active_launch_pkg):
-                        active_launch_age = time.time() - self.last_launch.get(active_launch_pkg, 0)
-                        launch_confirmed = active_launch_age >= ACTIVE_LAUNCH_TIMEOUT
+                    if is_app_running(active_launch_pkg) and active_launch_age >= ACTIVE_PROCESS_CONFIRM:
+                        launch_confirmed = True
                     if launch_confirmed:
                         self.log(f"[{active_launch_pkg}] Open confirmed -> next package may launch")
                         active_launch_pkg = None
@@ -1213,20 +1227,27 @@ class TerminalRejoinLoop:
                     now = time.time()
 
                     time_since_launch = now - self.last_launch.get(pkg, 0)
-                    running, activity_seen[pkg], activity_misses[pkg], waiting_for_activity = (
+                    process_running = is_app_running(pkg)
+                    effective_open_windows = open_window_packages
+                    if (process_running and pkg in self.last_launch and
+                            time_since_launch < LAUNCH_PROTECTION):
+                        effective_open_windows = set(open_window_packages or ())
+                        effective_open_windows.add(pkg.lower())
+
+                    running, window_seen[pkg], window_misses[pkg], waiting_for_window = (
                         evaluate_package_presence(
                             pkg,
-                            is_app_running(pkg),
-                            open_activity_packages,
-                            activity_seen[pkg],
-                            activity_misses[pkg],
+                            process_running,
+                            effective_open_windows,
+                            window_seen[pkg],
+                            window_misses[pkg],
                             time_since_launch,
                             LAUNCH_GRACE,
-                            ACTIVITY_MISS_LIMIT,
+                            WINDOW_MISS_LIMIT,
                         )
                     )
 
-                    if waiting_for_activity:
+                    if waiting_for_window:
                         if time_since_launch < LAUNCH_GRACE:
                             self.set_status(pkg, 'Launching')
                         else:
@@ -1251,9 +1272,10 @@ class TerminalRejoinLoop:
                             self.set_status(pkg, 'Rejoining')
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                             self.last_launch[pkg] = now
-                            activity_seen[pkg] = False
-                            activity_misses[pkg] = 0
+                            window_seen[pkg] = False
+                            window_misses[pkg] = 0
                             launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            self.set_status(pkg, 'Launching')
                             active_launch_pkg = pkg
                     else:
                         # PROCESS ALIVE -> Monitor only, do not interrupt or force stop
