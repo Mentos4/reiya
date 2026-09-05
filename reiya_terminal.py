@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.66-REI-REJOIN"
-BUILD_TIME = "2026-09-05 05:54:19 UTC"
+BUILD_VERSION = "v6.8.67-REI-REJOIN"
+BUILD_TIME = "2026-09-05 05:59:42 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -65,7 +65,6 @@ DEFAULT_CONFIG = {
     'launch_wait': 15,
     'rejoin_cooldown': 10,
     'sequential_join': False,
-    'clear_cache': False,
     'webhook_enabled': False,
     'selected_packages': [],
     'game_method': 'all',
@@ -218,7 +217,11 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
             config.update(saved)
-            removed_home_rejoin_setting = config.pop('home_rejoin_enabled', None) is not None
+            removed_obsolete_settings = False
+            for obsolete_key in ('home_rejoin_enabled', 'clear_cache'):
+                if obsolete_key in config:
+                    config.pop(obsolete_key, None)
+                    removed_obsolete_settings = True
             renamed = False
             if config.get('game_id') and _is_generated_game_name(config.get('game_name')):
                 config['game_name'] = lookup_roblox_game_name(config['game_id'])
@@ -229,7 +232,7 @@ def load_config():
                 if _is_generated_game_name(package_names.get(package)):
                     package_names[package] = lookup_roblox_game_name(game_value)
                     renamed = True
-            if renamed or removed_home_rejoin_setting:
+            if renamed or removed_obsolete_settings:
                 save_config()
         except Exception as e:
             print(f"[!] Warning loading config: {e}")
@@ -458,176 +461,6 @@ def evaluate_package_presence(package, process_running, open_activity_packages,
     activity_misses += 1
     return activity_misses < miss_limit, True, activity_misses, False
 
-def get_roblox_home_page_event(package):
-    """Return the latest Android Home-route event for this Roblox clone."""
-    try:
-        command = "su -c 'logcat -d -v time -s ActivityTaskManager'"
-        text = run_cmd(command, timeout=5).stdout
-        marker = 'dat=roblox://navigation/home'
-        component = f'cmp={package}/com.roblox.client.ActivityProtocolLaunch'
-        events = [line.strip() for line in text.splitlines() if marker in line and component in line]
-        return events[-1] if events else ''
-    except Exception:
-        return ''
-
-def get_package_activity_dump(package, content):
-    """Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block."""
-    lines = content.split('\n')
-    pkg_lines = []
-    capturing = False
-
-    for line in lines:
-        if ('TASK ' in line or 'ACTIVITY ' in line) and package in line:
-            capturing = True
-            pkg_lines.append(line)
-        elif capturing:
-            if ('TASK ' in line or 'ACTIVITY ' in line) and package not in line:
-                break
-            pkg_lines.append(line)
-
-    return pkg_lines
-
-def get_activity_top_dump():
-    """Fetch 'dumpsys activity top' once per poll cycle."""
-    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
-        try:
-            res = run_cmd(cmd, timeout=4)
-            if res.stdout.strip():
-                return res.stdout
-        except Exception:
-            pass
-    return ''
-
-def is_app_in_game(package, content=None):
-    """
-    Check if a Roblox app or clone is connected to an active 3D game place.
-    Roblox 3D engine uses RakNet UDP sockets (ports 10000-65535) when in-game.
-    Home Screen web/API traffic only uses HTTPS/QUIC ports (443, 80, 53).
-    """
-    pkg = str(package or '').lower()
-    if not pkg:
-        return False
-
-    # Check 1: RakNet UDP socket inspection for active 3D game server connection (ports 10000 - 65535)
-    try:
-        pid_res = run_cmd(f"su -c 'pidof {pkg}'", timeout=2)
-        pids = (pid_res.stdout or '').strip().split()
-        if pids:
-            pid = pids[0]
-            # Inspect netstat for UDP sockets associated with this PID
-            net_res = run_cmd(f"su -c 'netstat -anp 2>/dev/null | grep -i {pid}'", timeout=2)
-            net_text = (net_res.stdout or '').lower()
-            if net_text:
-                udp_lines = [l for l in net_text.splitlines() if 'udp' in l or 'raw' in l]
-                for line in udp_lines:
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        remote = parts[4]
-                        if ':' in remote:
-                            port_str = remote.split(':')[-1]
-                            if port_str.isdigit():
-                                port = int(port_str)
-                                # Dedicated 3D game servers run on UDP ports (10000 - 65535)
-                                if 10000 <= port <= 65535:
-                                    return True
-
-            # Inspect /proc/{pid}/net/udp fallback for remote ports (10000 - 65535)
-            udp_res = run_cmd(f"su -c 'cat /proc/{pid}/net/udp 2>/dev/null'", timeout=2)
-            udp_text = (udp_res.stdout or '').strip()
-            if udp_text:
-                lines = udp_text.splitlines()[1:]
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        rem_addr = parts[2]
-                        if ':' in rem_addr and not rem_addr.startswith('00000000:'):
-                            try:
-                                hex_port = rem_addr.split(':')[1]
-                                port = int(hex_port, 16)
-                                if 10000 <= port <= 65535:
-                                    return True
-                            except Exception:
-                                pass
-    except Exception:
-        pass
-
-    # Check 2: Activity top dump check fallback
-    # Note: ReactViewGroup / ReactFrameLayout / ActivityProtocolLaunch MUST NOT be treated as Home signals
-    # because React views overlay the 3D surface even while in-game.
-    HOME_SIGNALS = [
-        'loginactivity', 'welcomeactivity', 'titleactivity', 'lobbyactivity',
-        'bootstrapactivity', 'loginview', 'landingview', 'authactivity',
-        'foryou', 'charts', 'recommended for', 'moments', 'homeactivity', 'hometab'
-    ]
-    PURE_3D_GAME_SIGNALS = [
-        'surfaceview', 'glsurfaceview', 'textureview', 'renderview', 'gameactivity', 'nativeactivity'
-    ]
-
-    if content is None:
-        content = get_activity_top_dump()
-
-    if content and content.strip():
-        pkg_lines = get_package_activity_dump(package, content)
-        if not pkg_lines:
-            pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
-        if pkg_lines:
-            block_text = '\n'.join(pkg_lines).lower()
-
-            if 'mresumed=false' in block_text and 'mstopped=true' in block_text:
-                return False
-
-            # Check 3D Game Surface FIRST
-            if any(sig in block_text for sig in PURE_3D_GAME_SIGNALS):
-                return True
-
-            if any(sig in block_text for sig in HOME_SIGNALS):
-                return False
-
-    return False
-
-def is_roblox_on_home_page(package, content=None):
-    """
-    Return True ONLY if Roblox is EXPLICITLY confirmed sitting on the Home/Login Screen.
-    Never return True by assumption — false positives cause force-stop rejoin loops on running games.
-    """
-    pkg = str(package or '').lower()
-    if not pkg:
-        return False
-
-    # 1. If active in-game signals exist, definitely NOT home page
-    if is_app_in_game(package, content=content):
-        return False
-
-    # 2. Check process is actually alive
-    try:
-        pid_res = run_cmd(f"su -c 'pidof {package}'", timeout=2)
-        if not (pid_res.stdout or '').strip():
-            return False
-    except Exception:
-        return False
-
-    # 3. Require EXPLICIT positive home/login indicators in activity dump
-    EXPLICIT_HOME_SIGNALS = [
-        'loginactivity', 'welcomeactivity', 'titleactivity', 'lobbyactivity',
-        'bootstrapactivity', 'loginview', 'landingview', 'authactivity',
-        'foryou', 'charts', 'homeactivity', 'hometab'
-    ]
-
-    if content is None:
-        content = get_activity_top_dump()
-
-    if content and content.strip():
-        pkg_lines = get_package_activity_dump(package, content)
-        if not pkg_lines:
-            pkg_lines = [line for line in content.split('\n') if pkg in line.lower()]
-        if pkg_lines:
-            block_text = '\n'.join(pkg_lines).lower()
-            # ONLY return True if an explicit Home Screen activity/view is found
-            if any(sig in block_text for sig in EXPLICIT_HOME_SIGNALS):
-                return True
-
-    return False
-
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
     try:
@@ -751,24 +584,6 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
         pkg_gid = game_id or _resolve_package_game_id(pkg, config)
         launch_game(pkg, pkg_gid, bounds=bounds, freeform=True)
         time.sleep(1)
-
-def force_stop_app(package):
-    """Force stop an application using am force-stop."""
-    try:
-        run_cmd(f"su -c 'am force-stop {package}'", timeout=5)
-        return True
-    except Exception as e:
-        print(f"[!] Force stop error: {e}")
-        return False
-
-def clear_app_cache(package):
-    """Clear app data/cache using pm clear."""
-    try:
-        run_cmd(f"su -c 'pm clear {package}'", timeout=10)
-        return True
-    except Exception as e:
-        print(f"[!] Clear cache error: {e}")
-        return False
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1258,7 +1073,6 @@ class TerminalRejoinLoop:
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
-                c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
                 cpu = get_cpu_usage()
@@ -1273,7 +1087,6 @@ class TerminalRejoinLoop:
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
                 out(f"AUTO SORT: {s_st}")
-                out(f"CLEAR CACHE: {c_st}")
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
@@ -1293,7 +1106,6 @@ class TerminalRejoinLoop:
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
                     else:                                        st_c = st
 
@@ -1337,7 +1149,6 @@ class TerminalRejoinLoop:
         check_interval      = float(cfg.get('check_interval', 8))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
         sequential          = cfg.get('sequential_join', False)
-        auto_clear          = cfg.get('clear_cache', False)
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         # Grace period after launch prevents duplicate launches while Android creates the process.
@@ -1403,9 +1214,6 @@ class TerminalRejoinLoop:
                         else:
                             self.log(f"[{pkg}] Process dead -> Rejoining")
                             self.set_status(pkg, 'Rejoining')
-                            if auto_clear:
-                                clear_app_cache(pkg)
-                                time.sleep(1)
                             bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
                             self.last_launch[pkg] = now
                             activity_seen[pkg] = False
@@ -1683,9 +1491,6 @@ def interactive_menu():
 
             seq = prompt(f"Sequential Join? (y/n) [{config.get('sequential_join', False)}]: ").strip().lower()
             if seq in ['y', 'n']: config['sequential_join'] = (seq == 'y')
-
-            clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
-            if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
             save_config()
             print("\n[+] Timing settings updated.")
