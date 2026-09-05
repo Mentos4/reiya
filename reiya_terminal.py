@@ -8,12 +8,13 @@ Single standalone CLI script combining all core functions of REI REJOIN Roblox A
 - Direct Game Launching via Place ID or Private Server Link
 - Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REI REJOIN ASCII Dashboard UI (2-line REI REJOIN block logo + clean settings & live stats table)
-- Direct ActivityProtocolLaunch Component Invocation (Launches the selected game place)
-- Instant App Exit Re-launch (Triggers immediate rejoin if the app is closed)
+- Home Page Reset & Callback Rejoin (Force stops stuck Home Screen and retries launch intent until in-game)
+- Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
+- Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
 - Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
-- System monitoring (CPU, Uptime, Screenshots)
+- System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
 - Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear, Auto-Sort)
 - Autoexecute script management
@@ -32,11 +33,10 @@ import urllib.request
 import urllib.parse
 import mimetypes
 import select
-import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.71-REI-REJOIN"
-BUILD_TIME = "2026-09-05 06:26:31 UTC"
+BUILD_VERSION = "v6.8.72-REI-REJOIN"
+BUILD_TIME = "2026-09-05 06:35:18 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -47,8 +47,6 @@ PRESET_GAMES = [
     ('Anime Origin',       '129932912185311'),
     ('Anime Expedition',   '84515722934860'),
     ('Run a Restaurant',   '77843161404023'),
-    ('Anime Astral Sim',   '102072869879193'),
-    ('Steal An Egg',       '107778070777162'),
     ('World Zero',         '2727067538'),
     ('Blue Heater 2',      '16893821047'),
     ('Grow a Garden 2',    '126884695'),
@@ -65,6 +63,7 @@ DEFAULT_CONFIG = {
     'launch_wait': 15,
     'rejoin_cooldown': 10,
     'sequential_join': False,
+    'clear_cache': False,
     'webhook_enabled': False,
     'selected_packages': [],
     'game_method': 'all',
@@ -77,137 +76,12 @@ DEFAULT_CONFIG = {
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
+    'home_rejoin_enabled': True,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
 # Global config state
 config = DEFAULT_CONFIG.copy()
-
-def _place_id_from_game_value(game_value):
-    """Extract a Roblox place ID from an ID, game URL, or private-server link."""
-    value = str(game_value or '').strip()
-    match = re.search(r'/games/(\d+)|(?:^|[?&])placeId=(\d+)', value)
-    if match:
-        return match.group(1) or match.group(2)
-    numeric_prefix = re.match(r'^(\d+)(?:\?|$)', value)
-    return numeric_prefix.group(1) if numeric_prefix else ''
-
-def lookup_roblox_game_name(game_value):
-    """Fetch a Roblox experience name for the dashboard; fall back to its place ID."""
-    place_id = _place_id_from_game_value(game_value)
-    fallback = f"Game ({place_id[:15]}...)" if len(place_id) > 15 else f"Game ({place_id})"
-    if not place_id:
-        return fallback
-    try:
-        headers = {'User-Agent': 'REI-REJOIN/1.0'}
-        universe_request = urllib.request.Request(
-            f'https://apis.roblox.com/universes/v1/places/{urllib.parse.quote(place_id)}/universe',
-            headers=headers
-        )
-        with urllib.request.urlopen(universe_request, timeout=8) as response:
-            universe_id = json.loads(response.read().decode('utf-8')).get('universeId')
-        if not universe_id:
-            return fallback
-        game_request = urllib.request.Request(
-            'https://games.roblox.com/v1/games?universeIds=' + urllib.parse.quote(str(universe_id)),
-            headers=headers
-        )
-        with urllib.request.urlopen(game_request, timeout=8) as response:
-            games = json.loads(response.read().decode('utf-8')).get('data', [])
-        if games and games[0].get('name'):
-            return str(games[0]['name'])
-    except Exception:
-        pass
-    return fallback
-def _is_generated_game_name(name):
-    return bool(re.match(r'^(Game \(|Place:)', str(name or '')))
-
-_roblox_username_cache = {}
-
-def _extract_roblox_identity(text):
-    """Read a Roblox username or user ID from logs, preferences, or JSON data."""
-    if not text:
-        return '', ''
-
-    # 1. Search for direct username matches
-    username_patterns = [
-        r'name=["\'](?:username|user_name|UserName|last_username|account_name|logged_in_user|ROBLOX_USERNAME)["\'][^>]*>\s*([A-Za-z0-9_]{3,20})\s*</',
-        r'["\']?(?:username|user_name|UserName|last_username|account_name|logged_in_user|ROBLOX_USERNAME)["\']?\s*[:=]\s*["\']([A-Za-z0-9_]{3,20})["\']',
-        r'\b(?:Username|user_name|UserName|Logged\s+in\s+as|LocalPlayer\s+UserName)\s*[:=]?\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
-        r'\[FLog::[^\]]+\]\s*(?:Username|User):\s*([A-Za-z0-9_]{3,20})',
-    ]
-    for pattern in username_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            uname = match.group(1).strip()
-            if uname.lower() not in ('system', 'null', 'undefined', 'default', 'unknown', 'true', 'false', 'none', 'string', 'userid', 'username'):
-                return uname, ''
-
-    # 2. Search for user ID matches
-    user_id_patterns = [
-        r'name=["\'](?:userId|user_id|UserId|ROBLOX_USER_ID)["\'][^>]*>\s*(\d{4,15})\s*</',
-        r'name=["\'](?:userId|user_id|UserId|ROBLOX_USER_ID)["\'][^>]*value=["\'](\d{4,15})["\']',
-        r'["\']?(?:userId|user_id|UserId|ROBLOX_USER_ID)["\']?\s*[:=]\s*["\']?(\d{4,15})["\']?',
-        r'\b(?:User\s*ID|userId|user_id)\s*[:=]?\s*["\']?(\d{4,15})["\']?',
-    ]
-    for pattern in user_id_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            uid = match.group(1).strip()
-            if uid != '0':
-                return '', uid
-
-    return '', ''
-
-def get_roblox_username(package):
-    """Detect the logged-in Roblox account for a clone from its Player logs and shared_prefs."""
-    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
-        return ''
-
-    now = time.time()
-    cached = _roblox_username_cache.get(package)
-    if cached:
-        name, ts = cached
-        ttl = 3600 if name else 10
-        if now - ts < ttl:
-            return name
-
-    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
-    prefs_dir = f"/data/data/{package}/shared_prefs"
-
-    cmd = (
-        f"su -c '"
-        f"LOGFILES=$(ls -t {log_dirs}/*.log {log_dirs}/*Player*.log 2>/dev/null | head -n 3); "
-        f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
-        f"if [ -d \"{prefs_dir}\" ]; then grep -h -E -i \"(user(name|_name)|user(id|_id))\" {prefs_dir}/*.xml 2>/dev/null | head -n 200; fi"
-        f"'"
-    )
-
-    res = run_cmd(cmd, timeout=6)
-    combined_text = res.stdout or ''
-
-    username, user_id = _extract_roblox_identity(combined_text)
-
-    if username:
-        _roblox_username_cache[package] = (username, now)
-        return username
-
-    if user_id:
-        try:
-            req = urllib.request.Request(
-                f'https://users.roblox.com/v1/users/{urllib.parse.quote(user_id)}',
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
-            )
-            with urllib.request.urlopen(req, timeout=5) as response:
-                api_name = str(json.loads(response.read().decode('utf-8')).get('name') or '').strip()
-            if api_name:
-                _roblox_username_cache[package] = (api_name, now)
-                return api_name
-        except Exception:
-            pass
-
-    _roblox_username_cache[package] = ('', now)
-    return ''
 
 def load_config():
     global config
@@ -217,23 +91,6 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
             config.update(saved)
-            removed_obsolete_settings = False
-            for obsolete_key in ('home_rejoin_enabled', 'clear_cache'):
-                if obsolete_key in config:
-                    config.pop(obsolete_key, None)
-                    removed_obsolete_settings = True
-            renamed = False
-            if config.get('game_id') and _is_generated_game_name(config.get('game_name')):
-                config['game_name'] = lookup_roblox_game_name(config['game_id'])
-                renamed = True
-            package_games = config.get('package_games', {})
-            package_names = config.setdefault('package_game_names', {})
-            for package, game_value in package_games.items():
-                if _is_generated_game_name(package_names.get(package)):
-                    package_names[package] = lookup_roblox_game_name(game_value)
-                    renamed = True
-            if renamed or removed_obsolete_settings:
-                save_config()
         except Exception as e:
             print(f"[!] Warning loading config: {e}")
     return config
@@ -286,23 +143,18 @@ def set_landscape_orientation():
             pass
 
 def clear_terminal_screen():
-    """Redraw from the top without spawning ``clear``/``cls`` every frame."""
-    # Direct ANSI control codes work in Termux and avoid a shell subprocess
-    # stealing the terminal while the live dashboard is refreshing.
-    sys.stdout.write("\033[H\033[2J\033[3J")
-    sys.stdout.flush()
+    """Clear terminal screen completely preventing duplicate overlapping headers."""
+    try:
+        if os.name == 'posix':
+            os.system('clear')
+        else:
+            os.system('cls')
+    except Exception:
+        print("\033[H\033[2J\033[3J", end="")
 
 def prompt(text):
     return input(text)
 
-def prompt_game_choice(text, stale_blank_window=0.25):
-    """Read a game choice without letting a leftover menu newline close setup."""
-    while True:
-        displayed_at = time.monotonic()
-        value = prompt(text)
-        if value.strip() or time.monotonic() - displayed_at >= stale_blank_window:
-            return value
-        print("[i] Waiting for your game choice...")
 def get_installed_packages():
     """
     Discover all installed packages on Android / VPhone / Emulators.
@@ -379,104 +231,96 @@ def get_roblox_packages():
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
-    """Check if the package's main app process is alive."""
-    pkg = str(package or '').strip().lower()
-    if not pkg:
-        return False
-
-    # 1. Try pidof (root and non-root)
-    for cmd in [f"su -c 'pidof {pkg}'", f"pidof {pkg}"]:
-        try:
-            res = run_cmd(cmd, timeout=2)
-            out = (res.stdout or '').strip()
-            if out:
-                parts = out.split()
-                if parts and all(p.isdigit() for p in parts):
-                    return True
-        except Exception:
-            pass
-
-    # 2. Inspect the process-name column. Do not use pgrep -f: on some Android
-    # builds it matches the temporary pgrep command itself and reports a closed
-    # package as alive forever.
-    for cmd in ["su -c 'ps -A'", "su -c 'ps'", "ps -A", "ps"]:
+    """Check if the app process is alive. Only returns True if a real numeric PID is found."""
+    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
         try:
             res = run_cmd(cmd, timeout=3)
-            out = (res.stdout or '').strip()
-            if not out:
-                continue
-            for line in out.splitlines():
-                parts = line.split()
-                if not parts or parts[0].lower() in ('user', 'uid', 'pid'):
-                    continue
-                process_name = os.path.basename(parts[-1]).lower()
-                # A package:child process can outlive the closed Roblox window.
-                # Only the exact main process means Option 8 should show Ingame.
-                if process_name == pkg:
-                    return True
+            out = res.stdout.strip()
+            # Must be non-empty AND all parts must be numeric (actual PIDs)
+            if out and all(part.isdigit() for part in out.split()):
+                return True
         except Exception:
             pass
-
     return False
 
-def extract_visible_window_packages(packages, content):
-    """Extract selected packages that have a visible Android window."""
-    content_lower = str(content or '').lower()
-    visibility_markers = (
-        'mhassurface=true', 'isonscreen=true', 'isvisible=true', 'mviewvisibility=0x0'
-    )
-    if not any(marker in content_lower for marker in visibility_markers):
-        return None
+def get_package_activity_dump(package, content):
+    """
+    Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block.
+    """
+    lines = content.split('\n')
+    pkg_lines = []
+    capturing = False
 
-    blocks = re.split(r'(?=^\s*(?:window #\d+\s+)?window\{)', content_lower, flags=re.MULTILINE)
-    visible_packages = set()
-    for block in blocks:
-        positive = any(marker in block for marker in visibility_markers)
-        hidden = any(marker in block for marker in (
-            'mhassurface=false', 'isonscreen=false', 'isvisible=false',
-            'mviewvisibility=0x4', 'mviewvisibility=0x8'
-        ))
-        if not positive or hidden:
-            continue
-        for package in packages:
-            pkg = str(package or '').strip().lower()
-            if pkg and re.search(rf'(?<![a-z0-9_.]){re.escape(pkg)}/', block):
-                visible_packages.add(pkg)
-    return visible_packages
+    for line in lines:
+        if ('TASK ' in line or 'ACTIVITY ' in line) and package in line:
+            capturing = True
+            pkg_lines.append(line)
+        elif capturing:
+            if ('TASK ' in line or 'ACTIVITY ' in line) and package not in line:
+                break
+            pkg_lines.append(line)
 
-def get_open_window_packages(packages):
-    """Return selected packages with visible windows, or None when unsupported."""
-    commands = ["su -c 'dumpsys window windows'", 'dumpsys window windows']
-    for command in commands:
+    return pkg_lines
+
+def get_activity_top_dump():
+    """Fetch 'dumpsys activity top' once. This is a system-wide dump (same
+    content regardless of which package you're checking), so callers
+    monitoring multiple packages should fetch it ONCE per poll cycle and
+    reuse it for every package — calling it per-package multiplies an
+    already-heavy su+dumpsys invocation by the package count, which was a
+    major source of the CPU/battery load causing slowdowns on constrained
+    Termux/VPhone devices."""
+    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
         try:
-            res = run_cmd(command, timeout=5)
-            content = (res.stdout or '').strip()
-            visible = extract_visible_window_packages(packages, content)
-            if visible is not None:
-                return visible
+            res = run_cmd(cmd, timeout=4)
+            if res.stdout.strip():
+                return res.stdout
         except Exception:
             pass
-    return None
+    return ''
 
-def evaluate_package_presence(package, process_running, open_window_packages,
-                              window_seen, window_misses, launch_age,
-                              launch_grace, miss_limit):
-    """Stabilize delayed Android visible-window reports for one package."""
-    pkg = str(package or '').strip().lower()
-    if not process_running:
-        return False, window_seen, 0, False
-    if open_window_packages is None:
-        return True, window_seen, 0, not window_seen
-    if pkg in open_window_packages:
-        return True, True, 0, False
-    if launch_age < launch_grace:
-        return True, window_seen, 0, True
-    if not window_seen:
-        window_misses += 1
-        return window_misses < miss_limit, False, window_misses, window_misses < miss_limit
+def is_app_in_game(package, content=None):
+    """
+    Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
+    Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
+    `content` may be passed in (a dump already fetched via get_activity_top_dump())
+    to avoid re-running the heavy dumpsys command per package; if omitted, it is
+    fetched here for backwards compatibility.
+    """
+    HOME_SIGNALS = [
+        'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
+        'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
+        'loginview', 'landingview', 'authactivity', 'appshell', 'for you',
+        'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
+        'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
+    ]
+    # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
+    GAME_SIGNALS = [
+        'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
+    ]
 
-    window_misses += 1
-    return window_misses < miss_limit, True, window_misses, False
+    if content is None:
+        content = get_activity_top_dump()
+
+    if content.strip():
+        pkg_lines = get_package_activity_dump(package, content)
+        if not pkg_lines:
+            pkg_lines = [line for line in content.split('\n') if package in line]
+        if pkg_lines:
+            block_text = '\n'.join(pkg_lines).lower()
+            # 1. Check for explicit Home Screen / React UI signals FIRST
+            if any(sig in block_text for sig in HOME_SIGNALS):
+                return False
+            # 2. Check for explicit 3D Game rendering signals
+            if any(sig in block_text for sig in GAME_SIGNALS):
+                return True
+            # 3. Default fallback if ambiguous
+            return False
+
+    # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
+    return False
+
+
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -602,6 +446,24 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
         launch_game(pkg, pkg_gid, bounds=bounds, freeform=True)
         time.sleep(1)
 
+def force_stop_app(package):
+    """Force stop an application using am force-stop."""
+    try:
+        run_cmd(f"su -c 'am force-stop {package}'", timeout=5)
+        return True
+    except Exception as e:
+        print(f"[!] Force stop error: {e}")
+        return False
+
+def clear_app_cache(package):
+    """Clear app data/cache using pm clear."""
+    try:
+        run_cmd(f"su -c 'pm clear {package}'", timeout=10)
+        return True
+    except Exception as e:
+        print(f"[!] Clear cache error: {e}")
+        return False
+
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
 # ==============================================================================
@@ -613,7 +475,7 @@ _last_cpu_pct = 0.0
 _proc_read_mode = {}   # path -> 'direct' | 'su' | 'unavailable', decided once per path
 _proc_su_cache = {}    # path -> (content, timestamp) — last successful su read
 
-SU_READ_MIN_INTERVAL = 1  # Keep the fallback cache brief; each 5s dashboard redraw requests a fresh /proc sample.
+SU_READ_MIN_INTERVAL = 5  # seconds between su re-reads of the same /proc path — matches the dashboard's 5s redraw cadence so stats actually refresh on screen instead of appearing frozen for multiple frames
 
 def _read_proc_file(path, timeout=2):
     """Reads a /proc file, remembering which method actually works so we
@@ -694,33 +556,47 @@ def get_cpu_usage():
         return _last_cpu_pct
 
 def get_ram_usage():
-    """Returns live physical RAM usage as (percent, used, total) MiB.
+    """Same PermissionError trap as get_cpu_usage() — falls back to su (once
+    per session, see _read_proc_file) if /proc/meminfo can't be opened
+    directly on this device.
 
-    MemAvailable is Android's reclaimable-memory estimate and changes as apps
-    allocate or release RAM. It is therefore used for the dashboard's live
-    used-RAM value, with MemFree retained only as a fallback.
-    """
+    Some older Android kernels don't expose 'MemAvailable' in /proc/meminfo
+    at all. meminfo.get(..., 0) silently defaulted that to 0, which made
+    used_kb = total_kb - 0 = total_kb on every single read — i.e. "used"
+    pinned to the exact same value as "total" forever, reading as frozen
+    RAM rather than a permission/throttle issue like CPU had. Fall back to
+    the pre-3.14-kernel approximation (MemFree + Buffers + Cached) so usage
+    actually reflects live state on those devices too."""
     try:
-        content = _read_proc_file('/proc/meminfo')
-        if not content:
-            return 0.0, 0, 0
-        values = {}
-        for line in content.splitlines():
-            key, _, value = line.partition(':')
-            parts = value.split()
-            if parts and parts[0].isdigit():
-                values[key] = int(parts[0])  # /proc/meminfo values are KiB
+        meminfo = {}
+        content = _read_proc_file('/proc/meminfo') or ''
 
-        total_kib = values.get('MemTotal', 0)
-        available_kib = values.get('MemAvailable', 0)
-        # Android can report reclaimable memory above physical MemTotal.
-        free_kib = available_kib if 0 < available_kib < total_kib else values.get('MemFree', 0)
-        if total_kib <= 0:
-            return 0.0, 0, 0
-        used_kib = max(0, min(total_kib, total_kib - free_kib))
-        return round(used_kib * 100.0 / total_kib, 1), round(used_kib / 1024), round(total_kib / 1024)
+        for line in content.split('\n'):
+            parts = line.split()
+            if len(parts) >= 2:
+                meminfo[parts[0].rstrip(':')] = int(parts[1])
+        total_kb = meminfo.get('MemTotal', 0)
+        if 'MemAvailable' in meminfo:
+            avail_kb = meminfo['MemAvailable']
+        else:
+            avail_kb = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0)
+        used_kb = max(0, total_kb - avail_kb)
+        return used_kb / 1024 / 1024, total_kb / 1024 / 1024  # GB
     except Exception:
-        return 0.0, 0, 0
+        return 0.0, 0.0
+
+def get_process_ram(package):
+    try:
+        result = run_cmd(f"su -c 'dumpsys meminfo {package} -c'", timeout=5)
+        for line in result.stdout.split('\n'):
+            if 'TOTAL' in line:
+                parts = line.split(',')
+                if len(parts) > 1:
+                    return int(parts[1].strip()) // 1024  # MB
+        return 0
+    except Exception:
+        return 0
+
 def get_device_name():
     try:
         result = run_cmd('getprop ro.product.model', timeout=3)
@@ -734,90 +610,60 @@ def format_uptime(seconds):
     s = int(seconds % 60)
     return f"{h:02d}h:{m:02d}m:{s:02d}s"
 
-def take_screenshot(output_path=None):
-    """Capture as root, then transfer base64 text so Termux owns the final PNG."""
-    output_path = output_path or os.path.join(os.path.expanduser('~'), '.rei_rejoin_screenshot.png')
-    root_path = '/sdcard/rei_rejoin_webhook.png'
+def take_screenshot(output_path='/sdcard/roblox_mgr_shot.png'):
     try:
-        command = f"su -c 'screencap -p {root_path} && base64 {root_path}'"
-        result = subprocess.run(command, shell=True, capture_output=True, timeout=15)
-        image_data = base64.b64decode(result.stdout, validate=False)
-        if result.returncode == 0 and image_data.startswith(b'\x89PNG\r\n\x1a\n'):
-            with open(output_path, 'wb') as image_file:
-                image_file.write(image_data)
+        run_cmd(f"su -c 'screencap -p {output_path}'", timeout=8)
+        if os.path.exists(output_path):
             return output_path
-        print(f'[!] Screenshot capture did not produce a PNG (exit {result.returncode}).')
-    except Exception as e:
-        print(f'[!] Screenshot capture error: {e}')
+    except Exception:
+        pass
     return None
-def normalize_webhook_url(webhook_url):
-    """Correct a common pasted `https>` typo and reject malformed webhook URLs."""
-    url = str(webhook_url or '').strip().replace('https>://', 'https://').replace('http>://', 'http://').replace('https>', 'https:').replace('http>', 'http:')
-    markdown_match = re.fullmatch(r'\[(https?://[^\]]+)\]\(https?://[^)]+\)', url)
-    if markdown_match:
-        url = markdown_match.group(1)
-    parsed = urllib.parse.urlparse(url)
-    return url if parsed.scheme in ('https', 'http') and parsed.netloc else ''
+
 # ==============================================================================
 # 3. DISCORD WEBHOOK SENDER
 # ==============================================================================
 
 def send_discord_webhook(webhook_url, statuses=None, start_time=None):
-    webhook_url = normalize_webhook_url(webhook_url)
     if not webhook_url:
-        print('[!] Invalid Discord webhook URL. Paste the full https://discord.com/api/webhooks/... URL.')
         return
 
     cpu = get_cpu_usage()
-    ram_pct, ram_used_mib, ram_total_mib = get_ram_usage()
+    used_ram, total_ram = get_ram_usage()
     device = get_device_name()
     uptime_sec = time.time() - (start_time or time.time())
     uptime = format_uptime(uptime_sec)
 
-    app_lines = 'No selected Roblox packages are reporting yet.'
+    app_lines = ''
     if statuses:
         parts = []
         for i, (pkg, info) in enumerate(statuses.items(), 1):
             status = info.get('status', 'Unknown')
-            marker = '\U0001F7E2' if status.lower() in ('ingame', 'running') else '\U0001F534'
-            parts.append(f'**{i}. {marker} {status}**\n+ ?? `{pkg}`')
+            ram = get_process_ram(pkg)
+            parts.append(
+                f'**{i}.** {status} | `{pkg}`\n'
+                f'    RAM: {ram} MB'
+            )
         if parts:
             app_lines = '\n'.join(parts)
 
+    description = (
+        f'**Device:** {device}\n'
+        f'**Uptime:** {uptime}\n'
+        f'**CPU:** {cpu}% / 100%\n'
+        f'**RAM:** {used_ram:.2f} / {total_ram:.2f} GB\n'
+    )
+    if app_lines:
+        description += f'\n**Application Details:**\n{app_lines}'
+
     embed = {
-        'author': {'name': 'REI REJOIN'},
-        'description': f'\U0001F4F1 **Device name: {device}**',
-        'color': 0x3498DB,
-        'fields': [
-            {'name': '\U000023F1 Uptime', 'value': uptime, 'inline': True},
-            {'name': '\U00002699 Total CPU usage', 'value': f'{cpu}% / 100%', 'inline': True},
-            {'name': '\U0001F4BE Total RAM usage', 'value': f'{ram_used_mib}/{ram_total_mib} MiB ({ram_pct}%)', 'inline': True},
-            {'name': '\U0001F4CA Application Details', 'value': app_lines, 'inline': False},
-        ],
+        'title': 'REI REJOIN Core',
+        'description': description,
+        'color': 0x00CCCC,
         'footer': {'text': 'Roblox Account Manager CLI'},
     }
-    payload = {'embeds': [embed]}
-    # Ignore malformed device proxy environment variables for direct Discord delivery.
-    webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    screenshot_path = take_screenshot()
-    if screenshot_path and os.path.exists(screenshot_path):
-        embed['image'] = {'url': 'attachment://screenshot.png'}
-        payload['attachments'] = [{'id': 0, 'filename': 'screenshot.png'}]
 
-    # curl avoids urllib's malformed-proxy handling on some Termux environments.
-    try:
-        curl_args = ['curl', '--noproxy', '*', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
-                     '-F', 'payload_json=' + json.dumps(payload)]
-        if screenshot_path and os.path.exists(screenshot_path):
-            curl_args += ['-F', 'files[0]=@' + screenshot_path + ';type=image/png']
-        curl_args.append(webhook_url)
-        curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
-        if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
-            print('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
-            return
-        print(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
-    except Exception as e:
-        print(f"[!] curl webhook send error: {e}")
+    payload = {'embeds': [embed]}
+    screenshot_path = take_screenshot()
 
     if screenshot_path and os.path.exists(screenshot_path):
         try:
@@ -849,7 +695,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
                 headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
                 method='POST'
             )
-            webhook_opener.open(req, timeout=20)
+            urllib.request.urlopen(req, timeout=20)
             print("[+] Webhook sent with screenshot.")
             return
         except Exception as e:
@@ -863,7 +709,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
             headers={'Content-Type': 'application/json'},
             method='POST'
         )
-        webhook_opener.open(req, timeout=15)
+        urllib.request.urlopen(req, timeout=15)
         print("[+] Webhook JSON sent.")
     except Exception as e:
         print(f"[!] Webhook JSON send error: {e}")
@@ -900,18 +746,18 @@ class TerminalRejoinLoop:
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
-        self.logs = []
 
     def log(self, msg):
-        """Append log lines to self.logs list; only print to stdout when dashboard is stopped."""
+        """Writes explicit \\r\\n like render_live_dashboard's out() — this
+        runs on the background _loop thread, which keeps emitting log lines
+        after the user leaves the dashboard (Option 8 only stops the display,
+        not the engine — Option 9 does that). A bare print()'s '\\n' doesn't
+        always get translated to CRLF on Termux ptys, so without this the
+        background thread's output staircases and corrupts every menu screen
+        drawn afterward, making the CLI look frozen/unresponsive."""
         ts = time.strftime('%H:%M:%S')
-        line = f"[{ts}] {msg}"
-        self.logs.append(line)
-        if len(self.logs) > 10:
-            self.logs.pop(0)
-        if not self.running:
-            sys.stdout.write(f"{line}\r\n")
-            sys.stdout.flush()
+        sys.stdout.write(f"[{ts}] {msg}\r\n")
+        sys.stdout.flush()
 
     def set_status(self, pkg, status_str):
         self.status[pkg] = {'status': status_str, 'time': time.time()}
@@ -1032,7 +878,7 @@ class TerminalRejoinLoop:
             columns is target - (3*N + 1)."""
             N = 5
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, status_w = 2, 12, 6
+            no_w, user_w, status_w = 2, 7, 6
             remaining = max(8, budget - no_w - user_w - status_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
@@ -1063,37 +909,29 @@ class TerminalRejoinLoop:
             sep = "-" * total_w
             table_sep = "|" + "|".join("-" * (w + 2) for _, w in cols) + "|"
 
-            return cols, total_w, cell, pipe_row, table_row, sep, table_sep
+            # Two stat columns sized to sum to total_w: for N cells, overhead
+            # is 3*N+1 (each cell is width+2 chars, plus N+1 pipes).
+            stat_w = total_w - (3 * 2 + 1)
+            cpu_w  = stat_w // 2
+            ram_w  = stat_w - cpu_w
 
-        input_fd = None
-        saved_terminal_mode = None
-        termios_module = None
+            return cols, total_w, cell, pipe_row, table_row, sep, table_sep, cpu_w, ram_w
+
         try:
-            # Termux's buffered TextIO stdin can miss readiness notifications
-            # after the dashboard has been redrawn. Read the TTY directly in
-            # cbreak mode so one Enter key always exits this screen.
-            if os.name == 'posix':
-                import termios
-                import tty
-                candidate_fd = sys.stdin.fileno()
-                if os.isatty(candidate_fd):
-                    saved_terminal_mode = termios.tcgetattr(candidate_fd)
-                    tty.setcbreak(candidate_fd)
-                    input_fd = candidate_fd
-                    termios_module = termios
-
             while self.running:
                 clear_terminal_screen()
 
                 target_w = detect_width(cfg.get('dashboard_width', 40))
-                COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP = build_layout(target_w)
+                COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
+                h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
+                c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
                 cpu = get_cpu_usage()
-                ram_pct, ram_used_mib, ram_total_mib = get_ram_usage()
+                used_ram, total_ram = get_ram_usage()
 
                 # ── Header ────────────────────────────────────────
                 title = "REI REJOIN"
@@ -1104,11 +942,12 @@ class TerminalRejoinLoop:
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
                 out(f"AUTO SORT: {s_st}")
+                out(f"HOME REJOIN: {h_st}")
+                out(f"CLEAR CACHE: {c_st}")
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
-                sampled_at = time.strftime('%Y-%m-%d %H:%M:%S')
-                out(pipe_row([(f"CPU {cpu}% | RAM {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB) | Updated {sampled_at}", TOTAL_W - 3)]))
+                out(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {used_ram:.2f} / {total_ram:.2f} GB", ram_w)]))
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
@@ -1119,13 +958,12 @@ class TerminalRejoinLoop:
                 for idx, p in enumerate(pkgs, 1):
                     info_d  = statuses.get(p, {})
                     st      = info_d.get('status', 'Launching')
-                    uname   = get_roblox_username(p) or p
+                    uname   = f"wu***{idx:02d}"
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
-                    elif st == 'Waiting':                        st_c = f"{YELLOW}Wait{RESET}"
-                    elif st == 'Checking':                       st_c = f"{YELLOW}Check{RESET}"
                     else:                                        st_c = st
 
                     pkg_w = COLS[2][1]
@@ -1137,87 +975,54 @@ class TerminalRejoinLoop:
                     out(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
                 out(SEP)
-                out(f"{BOLD}[Enter] Stop Auto Rejoin & Main Menu{RESET}")
+                out(f"{BOLD}[Enter] Main Menu{RESET}")
                 sys.stdout.flush()
 
-                if input_fd is not None:
-                    rlist, _, _ = select.select([input_fd], [], [], 5.0)
-                    if rlist and os.read(input_fd, 1) in (b'\r', b'\n'):
-                        self.stop()
-                        break
-                elif os.name == 'posix':
-                    # Non-TTY fallback, for redirected input only.
+                if os.name == 'posix':
                     rlist, _, _ = select.select([sys.stdin], [], [], 5.0)
                     if rlist:
                         sys.stdin.readline()
-                        self.stop()
                         break
                 else:
                     time.sleep(5.0)
 
         except (KeyboardInterrupt, Exception):
             pass
-        finally:
-            if input_fd is not None and saved_terminal_mode is not None:
-                try:
-                    termios_module.tcsetattr(input_fd, termios_module.TCSADRAIN, saved_terminal_mode)
-                except Exception:
-                    pass
 
     def _loop(self, packages, cfg):
-        check_interval      = max(5, float(cfg.get('check_interval', 8)))
+        check_interval      = float(cfg.get('check_interval', 8))
+        delay_open_tab      = float(cfg.get('launch_wait', 15))
+        sequential          = cfg.get('sequential_join', False)
+        auto_clear          = cfg.get('clear_cache', False)
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
-        # Launch protection prevents duplicate deep links while Roblox loads.
-        LAUNCH_GRACE        = 30
-        LAUNCH_PROTECTION   = 120
-        ACTIVE_PROCESS_CONFIRM = 10
-        ACTIVE_LAUNCH_TIMEOUT = 60
-        WINDOW_MISS_LIMIT   = 4
+        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
+        # Grace period after launch — avoids false "Home Page" detection during app startup
+        LAUNCH_GRACE        = 20
 
         w, h = get_screen_size()
         total_apps = len(packages)
-        window_seen = {pkg: False for pkg in packages}
-        window_misses = {pkg: 0 for pkg in packages}
 
-        # Startup only classifies packages. The monitor loop owns every launch so
-        # it can enforce one active launch at a time.
-        startup_open_window_packages = get_open_window_packages(packages)
-        for pkg in packages:
-            if is_app_running(pkg):
-                if (startup_open_window_packages is not None and
-                        pkg.lower() in startup_open_window_packages):
-                    window_seen[pkg] = True
-                    self.set_status(pkg, 'Ingame')
-                    self.log(f"[{pkg}] Already open -> monitoring only")
-                elif startup_open_window_packages is None:
-                    self.set_status(pkg, 'Checking')
-                    self.log(f"[{pkg}] Process found; visible-window check unavailable -> checking")
-                else:
-                    self.set_status(pkg, 'Checking')
-                    self.log(f"[{pkg}] Background process without visible window -> checking")
-            else:
-                self.set_status(pkg, 'Waiting')
-                self.log(f"[{pkg}] Closed -> queued for launch")
+        # Initial launch of all packages
+        for i, pkg in enumerate(packages):
+            gid = self._get_game_id(pkg, cfg)
+            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+            self.set_status(pkg, 'Launching')
+            self.last_launch[pkg] = time.time()
+            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+            if sequential and i < len(packages) - 1:
+                time.sleep(delay_open_tab)
 
-        active_launch_pkg = None
+        # Give apps extra time to fully start before monitoring begins
+        time.sleep(8)
+
         while self.running:
             try:
-                # A cached process is not enough: use the actual visible-window
-                # snapshot so closed/background clones are never labeled Ingame.
-                open_window_packages = get_open_window_packages(packages)
-                if active_launch_pkg:
-                    active_key = active_launch_pkg.lower()
-                    active_launch_age = time.time() - self.last_launch.get(active_launch_pkg, 0)
-                    launch_confirmed = (
-                        open_window_packages is not None and
-                        active_key in open_window_packages
-                    )
-                    if is_app_running(active_launch_pkg) and active_launch_age >= ACTIVE_PROCESS_CONFIRM:
-                        launch_confirmed = True
-                    if launch_confirmed:
-                        self.log(f"[{active_launch_pkg}] Open confirmed -> next package may launch")
-                        active_launch_pkg = None
+                # Fetched once per cycle and reused for every package below —
+                # dumpsys activity top is system-wide and identical per package,
+                # so calling it per-package multiplied a heavy su+dumpsys call by
+                # the package count on every poll.
+                activity_dump = get_activity_top_dump()
 
                 for i, pkg in enumerate(packages):
                     if not self.running:
@@ -1226,60 +1031,42 @@ class TerminalRejoinLoop:
                     gid = self._get_game_id(pkg, cfg)
                     now = time.time()
 
-                    time_since_launch = now - self.last_launch.get(pkg, 0)
-                    process_running = is_app_running(pkg)
-                    effective_open_windows = open_window_packages
-                    if (process_running and pkg in self.last_launch and
-                            time_since_launch < LAUNCH_PROTECTION):
-                        effective_open_windows = set(open_window_packages or ())
-                        effective_open_windows.add(pkg.lower())
-
-                    running, window_seen[pkg], window_misses[pkg], waiting_for_window = (
-                        evaluate_package_presence(
-                            pkg,
-                            process_running,
-                            effective_open_windows,
-                            window_seen[pkg],
-                            window_misses[pkg],
-                            time_since_launch,
-                            LAUNCH_GRACE,
-                            WINDOW_MISS_LIMIT,
-                        )
-                    )
-
-                    if waiting_for_window:
-                        if time_since_launch < LAUNCH_GRACE:
-                            self.set_status(pkg, 'Launching')
-                        else:
-                            self.set_status(pkg, 'Checking')
-                        continue
+                    running = is_app_running(pkg)
 
                     if not running:
-                        # A package can briefly have no PID while Android is creating it.
-                        # Do not repeatedly launch it during that window: rapid retries can
-                        # consume enough memory for Android to kill Termux itself.
-                        if time_since_launch < LAUNCH_GRACE:
-                            self.set_status(pkg, 'Launching')
-                        else:
-                            if active_launch_pkg and active_launch_pkg != pkg:
-                                self.set_status(pkg, 'Waiting')
-                                self.log(f"[{pkg}] Waiting for {active_launch_pkg} to finish launching")
-                                continue
-                            if active_launch_pkg == pkg and time_since_launch < ACTIVE_LAUNCH_TIMEOUT:
-                                self.set_status(pkg, 'Checking')
-                                continue
-                            self.log(f"[{pkg}] Process dead -> Rejoining")
-                            self.set_status(pkg, 'Rejoining')
-                            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                            self.last_launch[pkg] = now
-                            window_seen[pkg] = False
-                            window_misses[pkg] = 0
-                            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                            self.set_status(pkg, 'Launching')
-                            active_launch_pkg = pkg
+                        # ★ PROCESS DEAD → REJOIN
+                        self.log(f"[{pkg}] Process dead → Rejoining")
+                        self.set_status(pkg, 'Rejoining')
+                        if auto_clear:
+                            clear_app_cache(pkg)
+                            time.sleep(1)
+                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                        self.last_launch[pkg] = now
+                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+
                     else:
-                        # PROCESS ALIVE -> Monitor only, do not interrupt or force stop
-                        self.set_status(pkg, 'Ingame')
+                        # ★ PROCESS ALIVE → check if in-game or on Home Screen
+                        in_game = is_app_in_game(pkg, content=activity_dump)
+                        if in_game:
+                            self.set_status(pkg, 'Ingame')
+                        else:
+                            # NOT in-game — check if still within launch grace period (20s)
+                            time_since_launch = now - self.last_launch.get(pkg, 0)
+                            if time_since_launch < LAUNCH_GRACE:
+                                self.set_status(pkg, 'Launching')
+                            else:
+                                # HOME SCREEN detected (past 20s grace period)
+                                self.set_status(pkg, 'Home Page')
+                                if home_rejoin_enabled:
+                                    self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
+                                    self.set_status(pkg, 'Rejoining')
+                                    force_stop_app(pkg)
+                                    time.sleep(2)
+                                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
+                                    self.last_launch[pkg] = time.time()
+                                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                                else:
+                                    self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
             except Exception as e:
                 # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
                 # must not silently kill this daemon thread — that would
@@ -1332,11 +1119,10 @@ def show_status():
     print("\n--- [ SYSTEM & APP STATUS ] ---")
     device = get_device_name()
     cpu = get_cpu_usage()
-    ram_pct, ram_used_mib, ram_total_mib = get_ram_usage()
+    used_ram, total_ram = get_ram_usage()
     w, h = get_screen_size()
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
-    print(f"CPU: {cpu}%")
-    print(f"RAM: {ram_pct}% ({ram_used_mib}/{ram_total_mib} MiB)")
+    print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
     print(f"Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
 
     roblox_pkgs = get_roblox_packages()
@@ -1344,9 +1130,10 @@ def show_status():
     for pkg in roblox_pkgs:
         running = is_app_running(pkg)
         status_str = "RUNNING" if running else "STOPPED"
+        ram = get_process_ram(pkg) if running else 0
         selected = "*" if pkg in config.get('selected_packages', []) else " "
         pkg_gname = _resolve_package_game_name(pkg, config)
-        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18}")
+        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18} RAM: {ram}MB")
     print("=" * 60)
 
 def interactive_menu():
@@ -1363,6 +1150,7 @@ def interactive_menu():
         print("6. Auto-Sort / Tile Windows Layout Configuration")
         print("7. Autoexecute Script Manager")
         print("8. START Auto Rejoin Loop & Live Dashboard")
+        print("9. STOP Auto Rejoin Loop")
         print("10. Auto-Sort / Tile Open Windows NOW")
         print("11. Test Launch Selected Package Now")
         print("12. Send Manual Discord Webhook Test")
@@ -1465,14 +1253,14 @@ def interactive_menu():
                             print("  S. Skip (keep current setting)")
 
                             while True:
-                                gchoice = prompt_game_choice(f"Choice for {pkg}: ").strip()
+                                gchoice = prompt(f"Choice for {pkg}: ").strip()
                                 if gchoice.upper() == 'C':
                                     gid = prompt("  Enter Place ID / Link: ").strip()
                                     if not gid:
                                         print("  [!] No Place ID / Link entered. Try again.")
                                         continue
                                     config['package_games'][pkg] = gid
-                                    gname = lookup_roblox_game_name(gid)
+                                    gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
                                     config['package_game_names'][pkg] = gname
                                     break
                                 elif gchoice.upper() == 'S' or not gchoice:
@@ -1495,19 +1283,15 @@ def interactive_menu():
                     for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
                         print(f"  {idx}. {gname} (ID: {gid})")
                     print("  C. Custom Place ID or Private Server Link")
-                    print("  Enter. Keep the current game")
                     while True:
-                        gchoice = prompt_game_choice("\nChoice: ").strip()
-                        if not gchoice:
-                            print("[i] No game choice entered; keeping the current game.")
-                            break
+                        gchoice = prompt("\nChoice: ").strip()
                         if gchoice.upper() == 'C':
                             gid = prompt("Enter Place ID / Link: ").strip()
                             if not gid:
                                 print("[!] No Place ID / Link entered. Try again.")
                                 continue
                             config['game_id'] = gid
-                            config['game_name'] = lookup_roblox_game_name(gid)
+                            config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
                             break
                         elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
                             config['game_name'], config['game_id'] = PRESET_GAMES[int(gchoice) - 1]
@@ -1526,7 +1310,7 @@ def interactive_menu():
             print(f"\nCurrent Webhook: {config.get('webhook_url', 'None')}")
             wurl = prompt("Enter Discord Webhook URL (leave empty to keep current): ").strip()
             if wurl:
-                config['webhook_url'] = normalize_webhook_url(wurl)
+                config['webhook_url'] = wurl
             wenable = prompt("Enable Webhook updates? (y/n): ").strip().lower() == 'y'
             config['webhook_enabled'] = wenable
             wint = prompt("Webhook interval in seconds [default 60]: ").strip()
@@ -1550,8 +1334,14 @@ def interactive_menu():
             seq = prompt(f"Sequential Join? (y/n) [{config.get('sequential_join', False)}]: ").strip().lower()
             if seq in ['y', 'n']: config['sequential_join'] = (seq == 'y')
 
+            clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
+            if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
+
+            hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
+            if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
+
             save_config()
-            print("\n[+] Timing settings updated.")
+            print("\n[+] Timing & Home Screen settings updated.")
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
@@ -1612,6 +1402,15 @@ def interactive_menu():
         elif choice == '8':
             rejoin_engine.start(config)
             rejoin_engine.render_live_dashboard(config)
+            if rejoin_engine.running:
+                print("\n[i] Auto Rejoin is still running in the background.")
+                print("    Use Option 9 to stop it, or Option 8 to reopen the dashboard.")
+
+        elif choice == '9':
+            rejoin_engine.stop()
+            print("\n[+] Auto Rejoin Engine stopped.")
+            prompt("\nPress Enter to return to menu...")
+
         elif choice == '10':
             auto_sort_windows(mode=config.get('window_mode', 'left_stack'))
             prompt("\nPress Enter to return to menu...")
