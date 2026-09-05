@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.68-REI-REJOIN"
-BUILD_TIME = "2026-09-05 06:10:40 UTC"
+BUILD_VERSION = "v6.8.69-REI-REJOIN"
+BUILD_TIME = "2026-09-05 06:17:17 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -456,7 +456,8 @@ def evaluate_package_presence(package, process_running, open_activity_packages,
     if launch_age < launch_grace:
         return True, activity_seen, 0, True
     if not activity_seen:
-        return True, False, 0, False
+        activity_misses += 1
+        return activity_misses < miss_limit, False, activity_misses, activity_misses < miss_limit
 
     activity_misses += 1
     return activity_misses < miss_limit, True, activity_misses, False
@@ -1108,6 +1109,7 @@ class TerminalRejoinLoop:
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
                     elif st == 'Waiting':                        st_c = f"{YELLOW}Wait{RESET}"
+                    elif st == 'Checking':                       st_c = f"{YELLOW}Check{RESET}"
                     else:                                        st_c = st
 
                     pkg_w = COLS[2][1]
@@ -1163,11 +1165,18 @@ class TerminalRejoinLoop:
         # Option 8 startup is monitor-first: never send a new launch intent to a
         # package whose main process is already alive. Reopening every package at
         # once can make Android kill Roblox clones and Termux under memory pressure.
+        startup_open_activity_packages = get_open_activity_packages(packages)
         startup_launches = 0
         for i, pkg in enumerate(packages):
             if is_app_running(pkg):
-                self.set_status(pkg, 'Ingame')
-                self.log(f"[{pkg}] Already running -> monitoring only")
+                if (startup_open_activity_packages is None or
+                        pkg.lower() in startup_open_activity_packages):
+                    activity_seen[pkg] = startup_open_activity_packages is not None
+                    self.set_status(pkg, 'Ingame')
+                    self.log(f"[{pkg}] Already open -> monitoring only")
+                else:
+                    self.set_status(pkg, 'Checking')
+                    self.log(f"[{pkg}] Cached process without open activity -> checking")
                 continue
 
             if startup_launches:
@@ -1212,7 +1221,10 @@ class TerminalRejoinLoop:
                     )
 
                     if waiting_for_activity:
-                        self.set_status(pkg, 'Launching')
+                        if time_since_launch < LAUNCH_GRACE:
+                            self.set_status(pkg, 'Launching')
+                        else:
+                            self.set_status(pkg, 'Checking')
                         continue
 
                     if not running:
