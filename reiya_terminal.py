@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.64-REI-REJOIN"
-BUILD_TIME = "2026-09-05 05:41:32 UTC"
+BUILD_VERSION = "v6.8.65-REI-REJOIN"
+BUILD_TIME = "2026-09-05 05:48:04 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -415,6 +415,29 @@ def is_app_running(package):
             pass
 
     return False
+
+def get_open_activity_packages(packages):
+    """Return packages with an Android activity task, or None when dumpsys is unavailable."""
+    commands = ["su -c 'dumpsys activity activities'", 'dumpsys activity activities']
+    for command in commands:
+        try:
+            res = run_cmd(command, timeout=5)
+            content = (res.stdout or '').strip()
+            content_lower = content.lower()
+            if not content or not any(marker in content_lower for marker in (
+                'activity manager activities', 'activityrecord{', 'task{'
+            )):
+                continue
+
+            open_packages = set()
+            for package in packages:
+                pkg = str(package or '').strip().lower()
+                if pkg and re.search(rf'(?<![a-z0-9_.]){re.escape(pkg)}/', content_lower):
+                    open_packages.add(pkg)
+            return open_packages
+        except Exception:
+            pass
+    return None
 
 def get_roblox_home_page_event(package):
     """Return the latest Android Home-route event for this Roblox clone."""
@@ -1320,6 +1343,10 @@ class TerminalRejoinLoop:
 
         while self.running:
             try:
+                # Android can keep a clone's main process cached after its window
+                # is manually closed. Read all activity tasks once, then evaluate
+                # every selected package independently against that same snapshot.
+                open_activity_packages = get_open_activity_packages(packages)
                 for i, pkg in enumerate(packages):
                     if not self.running:
                         break
@@ -1328,6 +1355,8 @@ class TerminalRejoinLoop:
                     now = time.time()
 
                     running = is_app_running(pkg)
+                    if running and open_activity_packages is not None:
+                        running = pkg.lower() in open_activity_packages
 
                     if not running:
                         # A package can briefly have no PID while Android is creating it.
