@@ -33,10 +33,11 @@ import urllib.request
 import urllib.parse
 import mimetypes
 import select
+import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.72-REI-REJOIN"
-BUILD_TIME = "2026-09-05 06:35:18 UTC"
+BUILD_VERSION = "v6.8.73-REI-REJOIN"
+BUILD_TIME = "2026-09-05 09:26:29 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -610,21 +611,40 @@ def format_uptime(seconds):
     s = int(seconds % 60)
     return f"{h:02d}h:{m:02d}m:{s:02d}s"
 
-def take_screenshot(output_path='/sdcard/roblox_mgr_shot.png'):
+def take_screenshot(output_path=None):
+    """Capture as root, then copy the PNG into a Termux-owned file."""
+    output_path = output_path or os.path.join(os.path.expanduser('~'), '.rei_rejoin_screenshot.png')
+    root_path = '/sdcard/rei_rejoin_webhook.png'
     try:
-        run_cmd(f"su -c 'screencap -p {output_path}'", timeout=8)
-        if os.path.exists(output_path):
+        command = f"su -c 'screencap -p {root_path} && base64 {root_path}'"
+        result = subprocess.run(command, shell=True, capture_output=True, timeout=15)
+        image_data = base64.b64decode(result.stdout, validate=False)
+        if result.returncode == 0 and image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+            with open(output_path, 'wb') as image_file:
+                image_file.write(image_data)
             return output_path
-    except Exception:
-        pass
+        print(f'[!] Screenshot capture did not produce a PNG (exit {result.returncode}).')
+    except Exception as e:
+        print(f'[!] Screenshot capture error: {e}')
     return None
+
+def normalize_webhook_url(webhook_url):
+    """Normalize pasted webhook links and reject malformed URLs."""
+    url = str(webhook_url or '').strip().replace('https>://', 'https://').replace('http>://', 'http://').replace('https>', 'https:').replace('http>', 'http:')
+    markdown_match = re.fullmatch(r'\[(https?://[^\]]+)\]\(https?://[^)]+\)', url)
+    if markdown_match:
+        url = markdown_match.group(1)
+    parsed = urllib.parse.urlparse(url)
+    return url if parsed.scheme in ('https', 'http') and parsed.netloc else ''
 
 # ==============================================================================
 # 3. DISCORD WEBHOOK SENDER
 # ==============================================================================
 
 def send_discord_webhook(webhook_url, statuses=None, start_time=None):
+    webhook_url = normalize_webhook_url(webhook_url)
     if not webhook_url:
+        print('[!] Invalid Discord webhook URL. Paste the full https://discord.com/api/webhooks/... URL.')
         return
 
     cpu = get_cpu_usage()
@@ -663,7 +683,28 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     }
 
     payload = {'embeds': [embed]}
+    # Ignore malformed Android/Termux proxy environment variables.
+    webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     screenshot_path = take_screenshot()
+
+    if screenshot_path and os.path.exists(screenshot_path):
+        embed['image'] = {'url': 'attachment://screenshot.png'}
+        payload['attachments'] = [{'id': 0, 'filename': 'screenshot.png'}]
+
+    # curl is the most reliable Discord transport on Termux; urllib remains a fallback.
+    try:
+        curl_args = ['curl', '--noproxy', '*', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
+                     '-F', 'payload_json=' + json.dumps(payload)]
+        if screenshot_path and os.path.exists(screenshot_path):
+            curl_args += ['-F', 'files[0]=@' + screenshot_path + ';type=image/png']
+        curl_args.append(webhook_url)
+        curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
+        if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
+            print('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
+            return
+        print(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
+    except Exception as e:
+        print(f"[!] curl webhook send error: {e}")
 
     if screenshot_path and os.path.exists(screenshot_path):
         try:
@@ -695,7 +736,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
                 headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
                 method='POST'
             )
-            urllib.request.urlopen(req, timeout=20)
+            webhook_opener.open(req, timeout=20)
             print("[+] Webhook sent with screenshot.")
             return
         except Exception as e:
@@ -709,7 +750,7 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
             headers={'Content-Type': 'application/json'},
             method='POST'
         )
-        urllib.request.urlopen(req, timeout=15)
+        webhook_opener.open(req, timeout=15)
         print("[+] Webhook JSON sent.")
     except Exception as e:
         print(f"[!] Webhook JSON send error: {e}")
@@ -1310,7 +1351,7 @@ def interactive_menu():
             print(f"\nCurrent Webhook: {config.get('webhook_url', 'None')}")
             wurl = prompt("Enter Discord Webhook URL (leave empty to keep current): ").strip()
             if wurl:
-                config['webhook_url'] = wurl
+                config['webhook_url'] = normalize_webhook_url(wurl)
             wenable = prompt("Enable Webhook updates? (y/n): ").strip().lower() == 'y'
             config['webhook_enabled'] = wenable
             wint = prompt("Webhook interval in seconds [default 60]: ").strip()
