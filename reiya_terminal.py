@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.78-REI-REJOIN"
-BUILD_TIME = "2026-09-06 15:58:00 UTC"
+BUILD_VERSION = "v6.8.79-REI-REJOIN"
+BUILD_TIME = "2026-09-06 16:00:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -431,6 +431,16 @@ def _resolve_package_game_name(pkg, cfg):
 
 _user_name_cache = {}
 
+def _is_valid_roblox_username(name):
+    if not name or not isinstance(name, str):
+        return False
+    name = name.strip()
+    if re.match(r'^[a-zA-Z0-9_]{3,20}$', name):
+        lower = name.lower()
+        if lower not in ('null', 'true', 'false', 'system', 'default', 'config', 'user', 'string', 'boolean', 'integer', 'roblox'):
+            return True
+    return False
+
 def get_package_username(package, cfg, idx):
     """
     Resolve active Roblox username/account name for a specific package.
@@ -446,13 +456,16 @@ def get_package_username(package, cfg, idx):
         return _user_name_cache[package]
 
     try:
-        cmd = f"su -c 'grep -h -i -oP \"(?<=username\\\\\">)[^<\"]+\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
+        cmd = f"su -c 'grep -h -i -E \"<string name=\\\"[^\"]*(username|user_name|account_name|display_name|displayName)[^\"]*\\\">[^<]+</string>\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
         res = run_cmd(cmd, timeout=2)
         if res.stdout and res.stdout.strip():
-            found_name = res.stdout.strip().split('\n')[0].strip()
-            if found_name and len(found_name) >= 2:
-                _user_name_cache[package] = found_name
-                return found_name
+            for line in res.stdout.strip().split('\n'):
+                m = re.search(r'>([^<]+)<', line)
+                if m:
+                    cand = m.group(1).strip()
+                    if _is_valid_roblox_username(cand):
+                        _user_name_cache[package] = cand
+                        return cand
     except Exception:
         pass
 
@@ -460,6 +473,8 @@ def get_package_username(package, cfg, idx):
     short_alias = parts[-1] if len(parts) > 1 else package
     if short_alias.lower() == 'client' and len(parts) > 1:
         short_alias = parts[-2]
+    if short_alias.lower() == 'roblox':
+        short_alias = 'Roblox'
     if short_alias and len(short_alias) >= 2:
         _user_name_cache[package] = short_alias
         return short_alias
@@ -983,7 +998,7 @@ class TerminalRejoinLoop:
             columns is target - (3*N + 1)."""
             N = 5
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, status_w = 2, 7, 6
+            no_w, user_w, status_w = 2, 8, 6
             remaining = max(8, budget - no_w - user_w - status_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
