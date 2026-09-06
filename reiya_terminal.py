@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.73-REI-REJOIN"
-BUILD_TIME = "2026-09-05 09:26:29 UTC"
+BUILD_VERSION = "v6.8.74-REI-REJOIN"
+BUILD_TIME = "2026-09-06 12:56:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -556,18 +556,15 @@ def get_cpu_usage():
     except Exception:
         return _last_cpu_pct
 
-def get_ram_usage():
-    """Same PermissionError trap as get_cpu_usage() — falls back to su (once
-    per session, see _read_proc_file) if /proc/meminfo can't be opened
-    directly on this device.
+_last_ram_usage = (0.0, 0.0)
 
-    Some older Android kernels don't expose 'MemAvailable' in /proc/meminfo
-    at all. meminfo.get(..., 0) silently defaulted that to 0, which made
-    used_kb = total_kb - 0 = total_kb on every single read — i.e. "used"
-    pinned to the exact same value as "total" forever, reading as frozen
-    RAM rather than a permission/throttle issue like CPU had. Fall back to
-    the pre-3.14-kernel approximation (MemFree + Buffers + Cached) so usage
-    actually reflects live state on those devices too."""
+def get_ram_usage():
+    """
+    Retrieves live system RAM usage (used_gb, total_gb).
+    Includes fallbacks for cloudphone / VSPhone / VPhone / VMOS environments where
+    containerized /proc/meminfo may be static or missing MemAvailable.
+    """
+    global _last_ram_usage
     try:
         meminfo = {}
         content = _read_proc_file('/proc/meminfo') or ''
@@ -577,14 +574,34 @@ def get_ram_usage():
             if len(parts) >= 2:
                 meminfo[parts[0].rstrip(':')] = int(parts[1])
         total_kb = meminfo.get('MemTotal', 0)
-        if 'MemAvailable' in meminfo:
-            avail_kb = meminfo['MemAvailable']
-        else:
-            avail_kb = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0)
-        used_kb = max(0, total_kb - avail_kb)
-        return used_kb / 1024 / 1024, total_kb / 1024 / 1024  # GB
+        if total_kb > 0:
+            if 'MemAvailable' in meminfo and meminfo['MemAvailable'] > 0:
+                avail_kb = meminfo['MemAvailable']
+            else:
+                avail_kb = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0) + meminfo.get('SReclaimable', 0)
+            used_kb = max(0, total_kb - avail_kb)
+            u_gb = round(used_kb / 1024 / 1024, 2)
+            t_gb = round(total_kb / 1024 / 1024, 2)
+            if u_gb > 0 and t_gb > 0:
+                _last_ram_usage = (u_gb, t_gb)
+                return _last_ram_usage
+
+        # Fallback for cloudphones (VSPhone/VMOS) where /proc/meminfo is static/virtualized
+        for free_cmd in ['free', 'free -m', "su -c 'free'"]:
+            res = run_cmd(free_cmd, timeout=2)
+            if res.returncode == 0 and res.stdout.strip():
+                for line in res.stdout.strip().split('\n'):
+                    if line.startswith('Mem:') or line.lower().startswith('mem:'):
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[1].isdigit():
+                            tot = int(parts[1])
+                            used = int(parts[2])
+                            mult = 1 / 1024 / 1024 if tot > 100000 else 1 / 1024
+                            _last_ram_usage = (round(used * mult, 2), round(tot * mult, 2))
+                            return _last_ram_usage
     except Exception:
-        return 0.0, 0.0
+        pass
+    return _last_ram_usage
 
 def get_process_ram(package):
     try:
