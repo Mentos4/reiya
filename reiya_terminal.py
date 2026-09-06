@@ -36,7 +36,7 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.76-REI-REJOIN"
+BUILD_VERSION = "v6.8.77-REI-REJOIN"
 BUILD_TIME = "2026-09-06 13:10:00 UTC"
 
 # ==============================================================================
@@ -815,18 +815,14 @@ class TerminalRejoinLoop:
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
+        self.recent_logs = []
 
     def log(self, msg):
-        """Writes explicit \\r\\n like render_live_dashboard's out() — this
-        runs on the background _loop thread, which keeps emitting log lines
-        after the user leaves the dashboard (Option 8 only stops the display,
-        not the engine — Option 9 does that). A bare print()'s '\\n' doesn't
-        always get translated to CRLF on Termux ptys, so without this the
-        background thread's output staircases and corrupts every menu screen
-        drawn afterward, making the CLI look frozen/unresponsive."""
         ts = time.strftime('%H:%M:%S')
-        sys.stdout.write(f"[{ts}] {msg}\r\n")
-        sys.stdout.flush()
+        entry = f"[{ts}] {msg}"
+        self.recent_logs.append(entry)
+        if len(self.recent_logs) > 15:
+            self.recent_logs.pop(0)
 
     def set_status(self, pkg, status_str):
         self.status[pkg] = {'status': status_str, 'time': time.time()}
@@ -1044,6 +1040,11 @@ class TerminalRejoinLoop:
                     out(table_row([idx, uname, pkg_t, st_c, gname_t]))
 
                 out(SEP)
+                out(f"{BOLD}[Recent Activity Log]{RESET}")
+                logs_to_show = self.recent_logs[-3:] if self.recent_logs else ["[i] Monitoring active packages..."]
+                for l in logs_to_show:
+                    out(f"  {l}")
+                out(SEP)
                 out(f"{BOLD}[Enter] Main Menu{RESET}")
                 sys.stdout.flush()
 
@@ -1074,8 +1075,8 @@ class TerminalRejoinLoop:
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
-        # Grace period after launch — avoids false "Home Page" detection during app startup
-        LAUNCH_GRACE        = 20
+        # Grace period after launch — gives Roblox 45s to load place before checking Home Screen
+        LAUNCH_GRACE        = 45
 
         w, h = get_screen_size()
         total_apps = len(packages)
