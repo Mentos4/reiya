@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.84-REI-REJOIN"
-BUILD_TIME = "2026-09-06 16:15:00 UTC"
+BUILD_VERSION = "v6.8.85-REI-REJOIN"
+BUILD_TIME = "2026-09-06 16:18:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -429,66 +429,100 @@ def _resolve_package_game_name(pkg, cfg):
     gid = cfg.get('game_id')
     return f"Place:{gid[:12]}" if gid else 'No Game Set'
 
-_user_name_cache = {}
+_roblox_username_cache = {}
 
-def _is_valid_roblox_username(name):
-    if not name or not isinstance(name, str):
-        return False
-    name = name.strip()
-    if re.match(r'^[a-zA-Z0-9_]{3,20}$', name):
-        lower = name.lower()
-        blacklist = (
-            'null', 'true', 'false', 'system', 'default', 'config', 'user', 'string',
-            'boolean', 'integer', 'roblox', 'client', 'package', 'app', 'android',
-            'device', 'status', 'token', 'session', 'account', 'guest', 'unknown',
-            'none', 'active', 'main', 'test', 'launch', 'rejoin', 'delta', 'noka',
-            'nokaa', 'nokab', 'nokac', 'nokad', 'value', 'key', 'id', 'type', 'mode'
-        )
-        if lower not in blacklist and not lower.startswith(('noka', 'roblox', 'delta', 'client')):
-            return True
-    return False
+def _extract_roblox_identity(text):
+    """Read a Roblox username or user ID from logs, preferences, or JSON data (from commit f55b982)."""
+    if not text:
+        return '', ''
+
+    username_patterns = [
+        r'name=["\'](?:username|user_name|UserName|last_username|account_name|logged_in_user|ROBLOX_USERNAME)["\'][^>]*>\s*([A-Za-z0-9_]{3,20})\s*</',
+        r'["\']?(?:username|user_name|UserName|last_username|account_name|logged_in_user|ROBLOX_USERNAME)["\']?\s*[:=]\s*["\']([A-Za-z0-9_]{3,20})["\']',
+        r'\b(?:Username|user_name|UserName|Logged\s+in\s+as|LocalPlayer\s+UserName)\s*[:=]?\s*["\']?([A-Za-z0-9_]{3,20})["\']?',
+        r'\[FLog::[^\]]+\]\s*(?:Username|User):\s*([A-Za-z0-9_]{3,20})',
+    ]
+    for pattern in username_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            uname = match.group(1).strip()
+            if uname.lower() not in ('system', 'null', 'undefined', 'default', 'unknown', 'true', 'false', 'none', 'string', 'userid', 'username'):
+                return uname, ''
+
+    user_id_patterns = [
+        r'name=["\'](?:userId|user_id|UserId|ROBLOX_USER_ID)["\'][^>]*>\s*(\d{4,15})\s*</',
+        r'name=["\'](?:userId|user_id|UserId|ROBLOX_USER_ID)["\'][^>]*value=["\'](\d{4,15})["\']',
+        r'["\']?(?:userId|user_id|UserId|ROBLOX_USER_ID)["\']?\s*[:=]\s*["\']?(\d{4,15})["\']?',
+        r'\b(?:User\s*ID|userId|user_id)\s*[:=]?\s*["\']?(\d{4,15})["\']?',
+    ]
+    for pattern in user_id_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            uid = match.group(1).strip()
+            if uid != '0':
+                return '', uid
+
+    return '', ''
+
+def get_roblox_username(package):
+    """Detect the logged-in Roblox account for a clone from its Player logs and shared_prefs (from commit f55b982)."""
+    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
+        return ''
+
+    now = time.time()
+    cached = _roblox_username_cache.get(package)
+    if cached:
+        name, ts = cached
+        ttl = 3600 if name else 10
+        if now - ts < ttl:
+            return name
+
+    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
+    prefs_dir = f"/data/data/{package}/shared_prefs"
+
+    cmd = (
+        f"su -c '"
+        f"LOGFILES=$(ls -t {log_dirs}/*.log {log_dirs}/*Player*.log 2>/dev/null | head -n 3); "
+        f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
+        f"if [ -d \"{prefs_dir}\" ]; then grep -h -E -i \"(user(name|_name)|user(id|_id))\" {prefs_dir}/*.xml 2>/dev/null | head -n 200; fi"
+        f"'"
+    )
+
+    res = run_cmd(cmd, timeout=4)
+    combined_text = res.stdout or ''
+
+    username, user_id = _extract_roblox_identity(combined_text)
+
+    if username:
+        _roblox_username_cache[package] = (username, now)
+        return username
+
+    if user_id:
+        try:
+            req = urllib.request.Request(
+                f'https://users.roblox.com/v1/users/{urllib.parse.quote(user_id)}',
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                api_name = str(json.loads(response.read().decode('utf-8')).get('name') or '').strip()
+            if api_name:
+                _roblox_username_cache[package] = (api_name, now)
+                return api_name
+        except Exception:
+            pass
+
+    _roblox_username_cache[package] = ('', now)
+    return ''
 
 def get_package_username(package, cfg, idx):
-    """
-    Resolve active Roblox username/account name for a specific package.
-    Automatically parses logged-in Roblox username from /data/data/{package}/ XML & JSON files via root su.
-    Results are cached to ensure live dashboard remains 100% fast & responsive.
-    """
+    """Resolve active Roblox username for package using commit f55b982 logic."""
     pkg_users = cfg.get('package_account_names', {})
     if package in pkg_users and pkg_users[package]:
         return pkg_users[package]
 
-    if package in _user_name_cache:
-        return _user_name_cache[package]
-
-    try:
-        # Strategy 1: Parse all XML <string name="KEY">VALUE</string> tags in shared_prefs
-        cmd_xml = f"su -c 'grep -h -E \"<string\\s+name=\\\"\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
-        res_xml = run_cmd(cmd_xml, timeout=2)
-        if res_xml.stdout and res_xml.stdout.strip():
-            lines = res_xml.stdout.strip().split('\n')
-            pattern = r'<string\s+name="([^"]+)">([^<]+)</string>'
-            for line in lines:
-                for key, val in re.findall(pattern, line):
-                    key_l = key.lower()
-                    val_s = val.strip()
-                    if any(k in key_l for k in ('user', 'account', 'name', 'auth', 'profile', 'login', 'roblox', 'display')):
-                        if _is_valid_roblox_username(val_s):
-                            _user_name_cache[package] = val_s
-                            return val_s
-
-        # Strategy 2: Fast grep for JSON "username":"VAL" or "displayName":"VAL" in app files
-        cmd_json = f"su -c 'grep -h -a -i -oP \"(?<=\\\"(username|Username|account_name|displayName|user_name)\\\":\\\")[a-zA-Z0-9_]{{3,20}}\" /data/data/{package}/files/*.json /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
-        res_json = run_cmd(cmd_json, timeout=1)
-        if res_json.stdout and res_json.stdout.strip():
-            for cand in res_json.stdout.strip().split('\n'):
-                cand = cand.strip()
-                if _is_valid_roblox_username(cand):
-                    _user_name_cache[package] = cand
-                    return cand
-
-    except Exception:
-        pass
+    detected = get_roblox_username(package)
+    if detected:
+        return detected
 
     parts = package.split('.')
     short_alias = parts[-1] if len(parts) > 1 else package
@@ -497,12 +531,9 @@ def get_package_username(package, cfg, idx):
     if short_alias.lower() == 'roblox':
         short_alias = 'Roblox'
     if short_alias and len(short_alias) >= 2:
-        _user_name_cache[package] = short_alias
         return short_alias
 
-    fallback = f"Acc_{idx:02d}"
-    _user_name_cache[package] = fallback
-    return fallback
+    return f"Acc_{idx:02d}"
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
@@ -1063,7 +1094,20 @@ class TerminalRejoinLoop:
 
             return cols, total_w, cell, pipe_row, table_row, sep, table_sep, cpu_w, ram_w
 
+        input_fd = None
+        saved_terminal_mode = None
+        termios_module = None
         try:
+            if os.name == 'posix':
+                import termios
+                import tty
+                candidate_fd = sys.stdin.fileno()
+                if os.isatty(candidate_fd):
+                    saved_terminal_mode = termios.tcgetattr(candidate_fd)
+                    tty.setcbreak(candidate_fd)
+                    input_fd = candidate_fd
+                    termios_module = termios
+
             while self.running:
                 clear_terminal_screen()
 
@@ -1131,24 +1175,28 @@ class TerminalRejoinLoop:
                 out(f"{BOLD}[Enter] Stop & Main Menu{RESET}")
                 sys.stdout.flush()
 
-                if os.name == 'posix':
+                if input_fd is not None:
+                    rlist, _, _ = select.select([input_fd], [], [], 0.5)
+                    if rlist and os.read(input_fd, 1) in (b'\r', b'\n'):
+                        self.stop()
+                        break
+                elif os.name == 'posix':
                     rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
                     if rlist:
-                        try:
-                            sys.stdin.readline()
-                        except Exception:
-                            pass
-                        try:
-                            import termios
-                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                        except Exception:
-                            pass
+                        sys.stdin.readline()
+                        self.stop()
                         break
                 else:
                     time.sleep(0.5)
 
         except (KeyboardInterrupt, Exception):
             pass
+        finally:
+            if input_fd is not None and saved_terminal_mode is not None:
+                try:
+                    termios_module.tcsetattr(input_fd, termios_module.TCSADRAIN, saved_terminal_mode)
+                except Exception:
+                    pass
 
     def _loop(self, packages, cfg):
         check_interval      = float(cfg.get('check_interval', 8))
