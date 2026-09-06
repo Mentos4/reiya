@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.79-REI-REJOIN"
-BUILD_TIME = "2026-09-06 16:00:00 UTC"
+BUILD_VERSION = "v6.8.80-REI-REJOIN"
+BUILD_TIME = "2026-09-06 16:05:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1102,7 +1102,7 @@ class TerminalRejoinLoop:
                 for l in logs_to_show:
                     out(f"  {l}")
                 out(SEP)
-                out(f"{BOLD}[Enter] Main Menu{RESET}")
+                out(f"{BOLD}[Enter] Stop & Main Menu{RESET}")
                 sys.stdout.flush()
 
                 if os.name == 'posix':
@@ -1112,11 +1112,11 @@ class TerminalRejoinLoop:
                             sys.stdin.readline()
                         except Exception:
                             pass
-                        while select.select([sys.stdin], [], [], 0)[0]:
-                            try:
-                                sys.stdin.readline()
-                            except Exception:
-                                break
+                        try:
+                            import termios
+                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                        except Exception:
+                            pass
                         break
                 else:
                     time.sleep(1.0)
@@ -1554,9 +1554,14 @@ def interactive_menu():
         elif choice == '8':
             rejoin_engine.start(config)
             rejoin_engine.render_live_dashboard(config)
-            if rejoin_engine.running:
-                print("\n[i] Auto Rejoin is still running in the background.")
-                print("    Use Option 9 to stop it, or Option 8 to reopen the dashboard.")
+            rejoin_engine.stop()
+            try:
+                import termios
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            except Exception:
+                pass
+            print("\n[+] Stopped Auto Rejoin and returned to Main Menu.")
+            time.sleep(0.5)
 
         elif choice == '9':
             rejoin_engine.stop()
