@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.77-REI-REJOIN"
-BUILD_TIME = "2026-09-06 13:10:00 UTC"
+BUILD_VERSION = "v6.8.78-REI-REJOIN"
+BUILD_TIME = "2026-09-06 15:58:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -72,6 +72,7 @@ DEFAULT_CONFIG = {
     'game_name': '',
     'package_games': {},
     'package_game_names': {},
+    'package_account_names': {},
     'webhook_url': '',
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
@@ -427,6 +428,45 @@ def _resolve_package_game_name(pkg, cfg):
         return gname
     gid = cfg.get('game_id')
     return f"Place:{gid[:12]}" if gid else 'No Game Set'
+
+_user_name_cache = {}
+
+def get_package_username(package, cfg, idx):
+    """
+    Resolve active Roblox username/account name for a specific package.
+    1. Checks user-configured custom username in config['package_account_names']
+    2. Reads logged-in username from Android app shared_prefs via root su shell
+    3. Fallback to clean short package alias (e.g. free.nokaA -> nokaA)
+    """
+    pkg_users = cfg.get('package_account_names', {})
+    if package in pkg_users and pkg_users[package]:
+        return pkg_users[package]
+
+    if package in _user_name_cache:
+        return _user_name_cache[package]
+
+    try:
+        cmd = f"su -c 'grep -h -i -oP \"(?<=username\\\\\">)[^<\"]+\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
+        res = run_cmd(cmd, timeout=2)
+        if res.stdout and res.stdout.strip():
+            found_name = res.stdout.strip().split('\n')[0].strip()
+            if found_name and len(found_name) >= 2:
+                _user_name_cache[package] = found_name
+                return found_name
+    except Exception:
+        pass
+
+    parts = package.split('.')
+    short_alias = parts[-1] if len(parts) > 1 else package
+    if short_alias.lower() == 'client' and len(parts) > 1:
+        short_alias = parts[-2]
+    if short_alias and len(short_alias) >= 2:
+        _user_name_cache[package] = short_alias
+        return short_alias
+
+    fallback = f"Acc_{idx:02d}"
+    _user_name_cache[package] = fallback
+    return fallback
 
 def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
     """Auto-arrange/tile running Roblox app windows on screen."""
@@ -1021,9 +1061,11 @@ class TerminalRejoinLoop:
 
                 statuses = self.get_status()
                 for idx, p in enumerate(pkgs, 1):
-                    info_d  = statuses.get(p, {})
-                    st      = info_d.get('status', 'Launching')
-                    uname   = f"wu***{idx:02d}"
+                    info_d    = statuses.get(p, {})
+                    st        = info_d.get('status', 'Launching')
+                    uname_raw = get_package_username(p, cfg, idx)
+                    user_w    = COLS[1][1]
+                    uname     = uname_raw if len(uname_raw) <= user_w else uname_raw[:max(1, user_w - 1)] + '.'
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
@@ -1256,6 +1298,7 @@ def interactive_menu():
                 print("  - Type 'ALL' to select ALL detected Roblox packages")
                 print("  - Type 'CLEAR' to deselect all packages")
                 print("  - Type 'M' to enter custom package name manually")
+                print("  - Type 'U' to set custom account names / usernames per package")
                 print("  - Press Enter to keep current selection")
                 indices = prompt("\nChoice: ").strip()
 
@@ -1265,6 +1308,22 @@ def interactive_menu():
                 elif indices.upper() == 'CLEAR':
                     config['selected_packages'] = []
                     save_config()
+                elif indices.upper() == 'U':
+                    pkgs = config.get('selected_packages') or roblox_pkgs
+                    print("\n[+] Configure custom account name / username for package:")
+                    for p_i, p_name in enumerate(pkgs, 1):
+                        curr_u = get_package_username(p_name, config, p_i)
+                        print(f"  {p_i}. {p_name:<32} -> Current Name: {curr_u}")
+                    uch = prompt("\nSelect Package Number: ").strip()
+                    if uch.isdigit() and 1 <= int(uch) <= len(pkgs):
+                        target_p = pkgs[int(uch) - 1]
+                        new_u = prompt(f"Enter Account Username / Nickname for '{target_p}': ").strip()
+                        if new_u:
+                            if 'package_account_names' not in config: config['package_account_names'] = {}
+                            config['package_account_names'][target_p] = new_u
+                            _user_name_cache[target_p] = new_u
+                            save_config()
+                            print(f"[+] Account name for {target_p} set to '{new_u}'")
                 elif indices.upper() == 'M':
                     custom_pkg = prompt("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
                     if custom_pkg:
