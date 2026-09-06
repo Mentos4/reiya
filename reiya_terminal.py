@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.83-REI-REJOIN"
-BUILD_TIME = "2026-09-06 16:12:00 UTC"
+BUILD_VERSION = "v6.8.84-REI-REJOIN"
+BUILD_TIME = "2026-09-06 16:15:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -442,7 +442,7 @@ def _is_valid_roblox_username(name):
             'boolean', 'integer', 'roblox', 'client', 'package', 'app', 'android',
             'device', 'status', 'token', 'session', 'account', 'guest', 'unknown',
             'none', 'active', 'main', 'test', 'launch', 'rejoin', 'delta', 'noka',
-            'nokaa', 'nokab', 'nokac', 'nokad'
+            'nokaa', 'nokab', 'nokac', 'nokad', 'value', 'key', 'id', 'type', 'mode'
         )
         if lower not in blacklist and not lower.startswith(('noka', 'roblox', 'delta', 'client')):
             return True
@@ -451,7 +451,8 @@ def _is_valid_roblox_username(name):
 def get_package_username(package, cfg, idx):
     """
     Resolve active Roblox username/account name for a specific package.
-    Cached instantly after first lookup so dashboard render loop stays 100% responsive.
+    Automatically parses logged-in Roblox username from /data/data/{package}/ XML & JSON files via root su.
+    Results are cached to ensure live dashboard remains 100% fast & responsive.
     """
     pkg_users = cfg.get('package_account_names', {})
     if package in pkg_users and pkg_users[package]:
@@ -461,17 +462,31 @@ def get_package_username(package, cfg, idx):
         return _user_name_cache[package]
 
     try:
-        cmd = f"su -c 'grep -h -i -E \"(username|user_name|account_name|displayName)\" /data/data/{package}/shared_prefs/*.xml /data/data/{package}/files/*.json 2>/dev/null'"
-        res = run_cmd(cmd, timeout=1)
-        if res.stdout and res.stdout.strip():
-            for line in res.stdout.strip().split('\n'):
-                matches = re.findall(r'>([a-zA-Z0-9_]{3,20})<|: *"([a-zA-Z0-9_]{3,20})"', line)
-                if matches:
-                    for m in matches:
-                        cand = (m[0] or m[1]).strip()
-                        if _is_valid_roblox_username(cand):
-                            _user_name_cache[package] = cand
-                            return cand
+        # Strategy 1: Parse all XML <string name="KEY">VALUE</string> tags in shared_prefs
+        cmd_xml = f"su -c 'grep -h -E \"<string\\s+name=\\\"\" /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
+        res_xml = run_cmd(cmd_xml, timeout=2)
+        if res_xml.stdout and res_xml.stdout.strip():
+            lines = res_xml.stdout.strip().split('\n')
+            pattern = r'<string\s+name="([^"]+)">([^<]+)</string>'
+            for line in lines:
+                for key, val in re.findall(pattern, line):
+                    key_l = key.lower()
+                    val_s = val.strip()
+                    if any(k in key_l for k in ('user', 'account', 'name', 'auth', 'profile', 'login', 'roblox', 'display')):
+                        if _is_valid_roblox_username(val_s):
+                            _user_name_cache[package] = val_s
+                            return val_s
+
+        # Strategy 2: Fast grep for JSON "username":"VAL" or "displayName":"VAL" in app files
+        cmd_json = f"su -c 'grep -h -a -i -oP \"(?<=\\\"(username|Username|account_name|displayName|user_name)\\\":\\\")[a-zA-Z0-9_]{{3,20}}\" /data/data/{package}/files/*.json /data/data/{package}/shared_prefs/*.xml 2>/dev/null'"
+        res_json = run_cmd(cmd_json, timeout=1)
+        if res_json.stdout and res_json.stdout.strip():
+            for cand in res_json.stdout.strip().split('\n'):
+                cand = cand.strip()
+                if _is_valid_roblox_username(cand):
+                    _user_name_cache[package] = cand
+                    return cand
+
     except Exception:
         pass
 
