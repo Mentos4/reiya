@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.75-REI-REJOIN"
-BUILD_TIME = "2026-09-06 13:07:00 UTC"
+BUILD_VERSION = "v6.8.76-REI-REJOIN"
+BUILD_TIME = "2026-09-06 13:10:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1048,12 +1048,20 @@ class TerminalRejoinLoop:
                 sys.stdout.flush()
 
                 if os.name == 'posix':
-                    rlist, _, _ = select.select([sys.stdin], [], [], 5.0)
+                    rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
                     if rlist:
-                        sys.stdin.readline()
+                        try:
+                            sys.stdin.readline()
+                        except Exception:
+                            pass
+                        while select.select([sys.stdin], [], [], 0)[0]:
+                            try:
+                                sys.stdin.readline()
+                            except Exception:
+                                break
                         break
                 else:
-                    time.sleep(5.0)
+                    time.sleep(1.0)
 
         except (KeyboardInterrupt, Exception):
             pass
