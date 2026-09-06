@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.81-REI-REJOIN"
-BUILD_TIME = "2026-09-06 16:08:00 UTC"
+BUILD_VERSION = "v6.8.82-REI-REJOIN"
+BUILD_TIME = "2026-09-06 16:10:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -451,9 +451,7 @@ def _is_valid_roblox_username(name):
 def get_package_username(package, cfg, idx):
     """
     Resolve active Roblox username/account name for a specific package.
-    1. Checks user-configured custom username in config['package_account_names']
-    2. Searches logged-in username from Android app data (/data/data/{package}/) via root su shell
-    3. Fallback to clean short package alias (e.g. free.nokaA -> nokaA)
+    Cached instantly after first lookup so dashboard render loop stays 100% responsive.
     """
     pkg_users = cfg.get('package_account_names', {})
     if package in pkg_users and pkg_users[package]:
@@ -462,33 +460,20 @@ def get_package_username(package, cfg, idx):
     if package in _user_name_cache:
         return _user_name_cache[package]
 
-    cmds = [
-        # Strategy A: XML string elements with username/account keywords
-        f"su -c 'grep -h -r -a -i -E \"<string [^>]*>[a-zA-Z0-9_]{{3,20}}</string>\" /data/data/{package}/shared_prefs/ 2>/dev/null'",
-        # Strategy B: JSON key-value pairs "username":"..." / "name":"..." / "account_name":"..."
-        f"su -c 'grep -h -r -a -i -oP \"(?<=\\\"username\\\":\\\")[a-zA-Z0-9_]{{3,20}}|(?<=\\\"Username\\\":\\\")[a-zA-Z0-9_]{{3,20}}|(?<=\\\"displayName\\\":\\\")[a-zA-Z0-9_]{{3,20}}|(?<=\\\"account_name\\\":\\\")[a-zA-Z0-9_]{{3,20}}\" /data/data/{package}/ 2>/dev/null'",
-        # Strategy C: General grep for string tags in XML files
-        f"su -c 'grep -h -r -a -i -E \"(username|user_name|account_name|displayName|guest_name)\" /data/data/{package}/shared_prefs/ /data/data/{package}/files/ 2>/dev/null'",
-    ]
-
-    for cmd in cmds:
-        try:
-            res = run_cmd(cmd, timeout=3)
-            if res.stdout and res.stdout.strip():
-                for line in res.stdout.strip().split('\n'):
-                    matches = re.findall(r'>([a-zA-Z0-9_]{3,20})<|: *"([a-zA-Z0-9_]{3,20})"', line)
-                    if matches:
-                        for m in matches:
-                            cand = (m[0] or m[1]).strip()
-                            if _is_valid_roblox_username(cand):
-                                _user_name_cache[package] = cand
-                                return cand
-                    cand = line.strip()
-                    if _is_valid_roblox_username(cand):
-                        _user_name_cache[package] = cand
-                        return cand
-        except Exception:
-            pass
+    try:
+        cmd = f"su -c 'grep -h -i -E \"(username|user_name|account_name|displayName)\" /data/data/{package}/shared_prefs/*.xml /data/data/{package}/files/*.json 2>/dev/null'"
+        res = run_cmd(cmd, timeout=1)
+        if res.stdout and res.stdout.strip():
+            for line in res.stdout.strip().split('\n'):
+                matches = re.findall(r'>([a-zA-Z0-9_]{3,20})<|: *"([a-zA-Z0-9_]{3,20})"', line)
+                if matches:
+                    for m in matches:
+                        cand = (m[0] or m[1]).strip()
+                        if _is_valid_roblox_username(cand):
+                            _user_name_cache[package] = cand
+                            return cand
+    except Exception:
+        pass
 
     parts = package.split('.')
     short_alias = parts[-1] if len(parts) > 1 else package
@@ -1127,7 +1112,7 @@ class TerminalRejoinLoop:
                 sys.stdout.flush()
 
                 if os.name == 'posix':
-                    rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
                     if rlist:
                         try:
                             sys.stdin.readline()
@@ -1140,7 +1125,7 @@ class TerminalRejoinLoop:
                             pass
                         break
                 else:
-                    time.sleep(1.0)
+                    time.sleep(0.5)
 
         except (KeyboardInterrupt, Exception):
             pass
