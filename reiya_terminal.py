@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.74-REI-REJOIN"
-BUILD_TIME = "2026-09-06 12:56:00 UTC"
+BUILD_VERSION = "v6.8.75-REI-REJOIN"
+BUILD_TIME = "2026-09-06 13:07:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -561,44 +561,55 @@ _last_ram_usage = (0.0, 0.0)
 def get_ram_usage():
     """
     Retrieves live system RAM usage (used_gb, total_gb).
-    Includes fallbacks for cloudphone / VSPhone / VPhone / VMOS environments where
-    containerized /proc/meminfo may be static or missing MemAvailable.
+    Prioritizes 'dumpsys meminfo' for dynamic accuracy on cloudphones (VSPhone / VMOS / VPhone)
+    where containerized /proc/meminfo and 'free' report static stub memory.
     """
     global _last_ram_usage
     try:
-        meminfo = {}
-        content = _read_proc_file('/proc/meminfo') or ''
-
-        for line in content.split('\n'):
-            parts = line.split()
-            if len(parts) >= 2:
-                meminfo[parts[0].rstrip(':')] = int(parts[1])
-        total_kb = meminfo.get('MemTotal', 0)
-        if total_kb > 0:
-            if 'MemAvailable' in meminfo and meminfo['MemAvailable'] > 0:
-                avail_kb = meminfo['MemAvailable']
-            else:
-                avail_kb = meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0) + meminfo.get('SReclaimable', 0)
-            used_kb = max(0, total_kb - avail_kb)
-            u_gb = round(used_kb / 1024 / 1024, 2)
-            t_gb = round(total_kb / 1024 / 1024, 2)
-            if u_gb > 0 and t_gb > 0:
-                _last_ram_usage = (u_gb, t_gb)
-                return _last_ram_usage
-
-        # Fallback for cloudphones (VSPhone/VMOS) where /proc/meminfo is static/virtualized
-        for free_cmd in ['free', 'free -m', "su -c 'free'"]:
-            res = run_cmd(free_cmd, timeout=2)
+        # Layer 1: dumpsys meminfo (dynamic live stats on Android / Cloudphones)
+        for dump_cmd in ["su -c 'dumpsys meminfo'", 'dumpsys meminfo']:
+            res = run_cmd(dump_cmd, timeout=3)
             if res.returncode == 0 and res.stdout.strip():
-                for line in res.stdout.strip().split('\n'):
-                    if line.startswith('Mem:') or line.lower().startswith('mem:'):
-                        parts = line.split()
-                        if len(parts) >= 3 and parts[1].isdigit():
-                            tot = int(parts[1])
-                            used = int(parts[2])
-                            mult = 1 / 1024 / 1024 if tot > 100000 else 1 / 1024
-                            _last_ram_usage = (round(used * mult, 2), round(tot * mult, 2))
-                            return _last_ram_usage
+                tot_kb, free_kb, used_kb = 0, 0, 0
+                for line in res.stdout.split('\n'):
+                    if 'Total RAM:' in line:
+                        m = re.search(r'([\d,]+)\s*K', line)
+                        if m:
+                            tot_kb = int(m.group(1).replace(',', ''))
+                    elif 'Free RAM:' in line:
+                        m = re.search(r'([\d,]+)\s*K', line)
+                        if m:
+                            free_kb = int(m.group(1).replace(',', ''))
+                    elif 'Used RAM:' in line:
+                        m = re.search(r'([\d,]+)\s*K', line)
+                        if m:
+                            used_kb = int(m.group(1).replace(',', ''))
+                if tot_kb > 0:
+                    if used_kb == 0 and free_kb > 0:
+                        used_kb = max(0, tot_kb - free_kb)
+                    u_gb = round(used_kb / 1024 / 1024, 2)
+                    t_gb = round(tot_kb / 1024 / 1024, 2)
+                    if t_gb > 0:
+                        _last_ram_usage = (u_gb, t_gb)
+                        return _last_ram_usage
+
+        # Layer 2: /proc/meminfo fallback
+        content = _read_proc_file('/proc/meminfo') or ''
+        if content:
+            meminfo = {}
+            for line in content.split('\n'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(':')] = int(parts[1])
+            total_kb = meminfo.get('MemTotal', 0)
+            if total_kb > 0:
+                avail_kb = meminfo.get('MemAvailable', 0) or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
+                used_kb = max(0, total_kb - avail_kb)
+                u_gb = round(used_kb / 1024 / 1024, 2)
+                t_gb = round(total_kb / 1024 / 1024, 2)
+                if u_gb > 0 and t_gb > 0:
+                    _last_ram_usage = (u_gb, t_gb)
+                    return _last_ram_usage
     except Exception:
         pass
     return _last_ram_usage
