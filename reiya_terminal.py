@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.82-REI-REJOIN"
-BUILD_TIME = "2026-09-06 16:10:00 UTC"
+BUILD_VERSION = "v6.8.83-REI-REJOIN"
+BUILD_TIME = "2026-09-06 16:12:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -618,18 +618,23 @@ def get_cpu_usage():
         return _last_cpu_pct
 
 _last_ram_usage = (0.0, 0.0)
+_last_ram_check_time = 0.0
 
 def get_ram_usage():
     """
     Retrieves live system RAM usage (used_gb, total_gb).
-    Prioritizes 'dumpsys meminfo' for dynamic accuracy on cloudphones (VSPhone / VMOS / VPhone)
-    where containerized /proc/meminfo and 'free' report static stub memory.
+    Cached for 10s so dumpsys meminfo su shell calls never block dashboard key inputs.
     """
-    global _last_ram_usage
+    global _last_ram_usage, _last_ram_check_time
+    now = time.time()
+    if _last_ram_usage != (0.0, 0.0) and (now - _last_ram_check_time) < 10.0:
+        return _last_ram_usage
+
+    _last_ram_check_time = now
     try:
         # Layer 1: dumpsys meminfo (dynamic live stats on Android / Cloudphones)
         for dump_cmd in ["su -c 'dumpsys meminfo'", 'dumpsys meminfo']:
-            res = run_cmd(dump_cmd, timeout=3)
+            res = run_cmd(dump_cmd, timeout=2)
             if res.returncode == 0 and res.stdout.strip():
                 tot_kb, free_kb, used_kb = 0, 0, 0
                 for line in res.stdout.split('\n'):
