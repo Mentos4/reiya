@@ -154,7 +154,13 @@ def clear_terminal_screen():
     except Exception:
         print("\033[H\033[2J\033[3J", end="")
 
-def prompt(text):
+def prompt(text=''):
+    try:
+        if os.name == 'posix':
+            import termios
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
     return input(text)
 
 def get_installed_packages():
