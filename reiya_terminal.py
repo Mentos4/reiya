@@ -36,7 +36,7 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.85-REI-REJOIN"
+BUILD_VERSION = "v6.8.87-REI-REJOIN"
 BUILD_TIME = "2026-09-06 16:18:00 UTC"
 
 # ==============================================================================
@@ -49,8 +49,10 @@ PRESET_GAMES = [
     ('Anime Expedition',   '84515722934860'),
     ('Run a Restaurant',   '77843161404023'),
     ('World Zero',         '2727067538'),
-    ('Blue Heater 2',      '16893821047'),
-    ('Grow a Garden 2',    '126884695'),
+    ('Blue Heater 2',         '16893821047'),
+    ('Grow a Garden 2',       '126884695'),
+    ('Steal an Egg',          '107778070777162'),
+    ('Anime Astral Simulator','102072869879193'),
 ]
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'config.json')
