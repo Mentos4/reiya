@@ -36,8 +36,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.87-REI-REJOIN"
-BUILD_TIME = "2026-09-06 16:18:00 UTC"
+BUILD_VERSION = "v6.8.88-REI-REJOIN"
+BUILD_TIME = "2026-09-17 09:10:50 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -63,6 +63,9 @@ DEFAULT_CONFIG = {
     'retry_count': 3,
     'retry_delay': 30,
     'check_interval': 10,
+    'activity_check_interval': 30,
+    'dashboard_refresh_interval': 2,
+    'ram_refresh_interval': 30,
     'launch_wait': 15,
     'rejoin_cooldown': 10,
     'sequential_join': False,
@@ -252,6 +255,28 @@ def is_app_running(package):
         except Exception:
             pass
     return False
+
+def get_running_packages(packages):
+    """Return live packages with one shell instead of two pidof calls per app."""
+    safe_packages = [
+        str(pkg) for pkg in packages
+        if re.fullmatch(r'[A-Za-z0-9._]+', str(pkg))
+    ]
+    if not safe_packages:
+        return set()
+
+    checks = '; '.join(
+        f'pids=$(pidof {pkg} 2>/dev/null); '
+        f'case "$pids" in *[!0-9\\ ]*|"") ;; *) echo {pkg} ;; esac'
+        for pkg in safe_packages
+    )
+    script = checks + '; exit 0'
+    for cmd in [f"su -c '{script}'", script]:
+        result = run_cmd(cmd, timeout=max(3, len(safe_packages)))
+        if result.returncode == 0:
+            found = set(result.stdout.split())
+            return {pkg for pkg in safe_packages if pkg in found}
+    return set()
 
 def get_package_activity_dump(package, content):
     """
@@ -677,16 +702,33 @@ _last_ram_check_time = 0.0
 def get_ram_usage():
     """
     Retrieves live system RAM usage (used_gb, total_gb).
-    Cached for 10s so dumpsys meminfo su shell calls never block dashboard key inputs.
+    Cached so RAM sampling cannot repeatedly compete with Roblox rendering.
+    The lightweight /proc/meminfo source is preferred; dumpsys is fallback-only.
     """
     global _last_ram_usage, _last_ram_check_time
     now = time.time()
-    if _last_ram_usage != (0.0, 0.0) and (now - _last_ram_check_time) < 10.0:
+    refresh_interval = max(10.0, float(config.get('ram_refresh_interval', 30)))
+    if _last_ram_usage != (0.0, 0.0) and (now - _last_ram_check_time) < refresh_interval:
         return _last_ram_usage
 
     _last_ram_check_time = now
     try:
-        # Layer 1: dumpsys meminfo (dynamic live stats on Android / Cloudphones)
+        # Layer 1: /proc/meminfo avoids a heavyweight Android service dump.
+        content = _read_proc_file('/proc/meminfo') or ''
+        if content:
+            meminfo = {}
+            for line in content.split('\n'):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    meminfo[parts[0].rstrip(':')] = int(parts[1])
+            total_kb = meminfo.get('MemTotal', 0)
+            if total_kb > 0:
+                avail_kb = meminfo.get('MemAvailable', 0) or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
+                used_kb = max(0, total_kb - avail_kb)
+                _last_ram_usage = (round(used_kb / 1024 / 1024, 2), round(total_kb / 1024 / 1024, 2))
+                return _last_ram_usage
+
+        # Layer 2: dumpsys fallback for devices that hide /proc/meminfo.
         for dump_cmd in ["su -c 'dumpsys meminfo'", 'dumpsys meminfo']:
             res = run_cmd(dump_cmd, timeout=2)
             if res.returncode == 0 and res.stdout.strip():
@@ -713,23 +755,6 @@ def get_ram_usage():
                         _last_ram_usage = (u_gb, t_gb)
                         return _last_ram_usage
 
-        # Layer 2: /proc/meminfo fallback
-        content = _read_proc_file('/proc/meminfo') or ''
-        if content:
-            meminfo = {}
-            for line in content.split('\n'):
-                parts = line.split()
-                if len(parts) >= 2:
-                    meminfo[parts[0].rstrip(':')] = int(parts[1])
-            total_kb = meminfo.get('MemTotal', 0)
-            if total_kb > 0:
-                avail_kb = meminfo.get('MemAvailable', 0) or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
-                used_kb = max(0, total_kb - avail_kb)
-                u_gb = round(used_kb / 1024 / 1024, 2)
-                t_gb = round(total_kb / 1024 / 1024, 2)
-                if u_gb > 0 and t_gb > 0:
-                    _last_ram_usage = (u_gb, t_gb)
-                    return _last_ram_usage
     except Exception:
         pass
     return _last_ram_usage
@@ -1117,6 +1142,7 @@ class TerminalRejoinLoop:
                     termios_module = termios
 
             while self.running:
+                frame_started = time.monotonic()
                 clear_terminal_screen()
 
                 target_w = detect_width(cfg.get('dashboard_width', 40))
@@ -1183,19 +1209,23 @@ class TerminalRejoinLoop:
                 out(f"{BOLD}[Enter] Stop & Main Menu{RESET}")
                 sys.stdout.flush()
 
-                if input_fd is not None:
-                    rlist, _, _ = select.select([input_fd], [], [], 0.5)
-                    if rlist and os.read(input_fd, 1) in (b'\r', b'\n'):
-                        self.stop()
-                        break
-                elif os.name == 'posix':
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
-                    if rlist:
-                        sys.stdin.readline()
-                        self.stop()
-                        break
-                else:
-                    time.sleep(0.5)
+                refresh_interval = max(0.5, float(cfg.get('dashboard_refresh_interval', 2)))
+                deadline = frame_started + refresh_interval
+                while self.running and time.monotonic() < deadline:
+                    wait_time = min(0.1, max(0.0, deadline - time.monotonic()))
+                    if input_fd is not None:
+                        rlist, _, _ = select.select([input_fd], [], [], wait_time)
+                        if rlist and os.read(input_fd, 1) in (b'\r', b'\n'):
+                            self.stop()
+                            break
+                    elif os.name == 'posix':
+                        rlist, _, _ = select.select([sys.stdin], [], [], wait_time)
+                        if rlist:
+                            sys.stdin.readline()
+                            self.stop()
+                            break
+                    else:
+                        time.sleep(wait_time)
 
         except (KeyboardInterrupt, Exception):
             pass
@@ -1208,6 +1238,7 @@ class TerminalRejoinLoop:
 
     def _loop(self, packages, cfg):
         check_interval      = float(cfg.get('check_interval', 8))
+        activity_interval   = max(check_interval, float(cfg.get('activity_check_interval', 30)))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
         sequential          = cfg.get('sequential_join', False)
         auto_clear          = cfg.get('clear_cache', False)
@@ -1233,13 +1264,26 @@ class TerminalRejoinLoop:
         # Give apps extra time to fully start before monitoring begins
         time.sleep(8)
 
+        activity_dump = ''
+        last_activity_check = 0.0
+
         while self.running:
             try:
                 # Fetched once per cycle and reused for every package below —
                 # dumpsys activity top is system-wide and identical per package,
                 # so calling it per-package multiplied a heavy su+dumpsys call by
                 # the package count on every poll.
-                activity_dump = get_activity_top_dump()
+                cycle_now = time.time()
+                running_packages = get_running_packages(packages)
+                activity_due = (cycle_now - last_activity_check) >= activity_interval
+                needs_activity = any(
+                    pkg in running_packages and
+                    (cycle_now - self.last_launch.get(pkg, 0)) >= LAUNCH_GRACE
+                    for pkg in packages
+                )
+                if activity_due and needs_activity:
+                    activity_dump = get_activity_top_dump()
+                    last_activity_check = cycle_now
 
                 for i, pkg in enumerate(packages):
                     if not self.running:
@@ -1248,7 +1292,7 @@ class TerminalRejoinLoop:
                     gid = self._get_game_id(pkg, cfg)
                     now = time.time()
 
-                    running = is_app_running(pkg)
+                    running = pkg in running_packages
 
                     if not running:
                         # ★ PROCESS DEAD → REJOIN
@@ -1263,14 +1307,12 @@ class TerminalRejoinLoop:
 
                     else:
                         # ★ PROCESS ALIVE → check if in-game or on Home Screen
-                        in_game = is_app_in_game(pkg, content=activity_dump)
-                        if in_game:
-                            self.set_status(pkg, 'Ingame')
-                        else:
-                            # NOT in-game — check if still within launch grace period (20s)
-                            time_since_launch = now - self.last_launch.get(pkg, 0)
-                            if time_since_launch < LAUNCH_GRACE:
-                                self.set_status(pkg, 'Launching')
+                        time_since_launch = now - self.last_launch.get(pkg, 0)
+                        if time_since_launch < LAUNCH_GRACE:
+                            self.set_status(pkg, 'Launching')
+                        elif activity_due and needs_activity:
+                            if is_app_in_game(pkg, content=activity_dump):
+                                self.set_status(pkg, 'Ingame')
                             else:
                                 # HOME SCREEN detected (past 20s grace period)
                                 self.set_status(pkg, 'Home Page')
