@@ -29,6 +29,7 @@ import math
 import argparse
 import subprocess
 import threading
+import shutil
 import urllib.request
 import urllib.parse
 import mimetypes
@@ -36,8 +37,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.88-REI-REJOIN"
-BUILD_TIME = "2026-09-17 09:10:50 UTC"
+BUILD_VERSION = "v6.8.89-REI-REJOIN"
+BUILD_TIME = "2026-09-17 17:33:30 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -53,12 +54,12 @@ PRESET_GAMES = [
     ('Grow a Garden 2',       '126884695'),
     ('Steal an Egg',          '107778070777162'),
     ('Anime Astral Simulator','102072869879193'),
+    ('Anime Dice',             '113290951185459'),
 ]
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'config.json')
 
 DEFAULT_CONFIG = {
-    'rejoin_interval': 9999999,
     'offline_wait': 15,
     'retry_count': 3,
     'retry_delay': 30,
@@ -84,28 +85,100 @@ DEFAULT_CONFIG = {
     'auto_sort': True,
     'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
     'home_rejoin_enabled': True,
+    'home_confirmation_count': 2,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
 # Global config state
 config = DEFAULT_CONFIG.copy()
 
+_CONFIG_RANGES = {
+    'check_interval': (1.0, 300.0),
+    'activity_check_interval': (5.0, 600.0),
+    'dashboard_refresh_interval': (0.5, 60.0),
+    'ram_refresh_interval': (10.0, 3600.0),
+    'launch_wait': (0.0, 300.0),
+    'offline_wait': (0.0, 300.0),
+    'retry_delay': (1.0, 3600.0),
+    'rejoin_cooldown': (1.0, 3600.0),
+    'webhook_interval': (10.0, 86400.0),
+    'dashboard_width': (30, 300),
+    'retry_count': (1, 100),
+    'home_confirmation_count': (1, 10),
+}
+
+def validate_config(values):
+    """Return a normalized config while retaining forward-compatible keys."""
+    clean = DEFAULT_CONFIG.copy()
+    if isinstance(values, dict):
+        clean.update(values)
+
+    for key, (minimum, maximum) in _CONFIG_RANGES.items():
+        default = DEFAULT_CONFIG[key]
+        try:
+            number = float(clean.get(key, default))
+            number = max(minimum, min(maximum, number))
+            clean[key] = int(number) if isinstance(default, int) and not isinstance(default, bool) else number
+        except (TypeError, ValueError):
+            clean[key] = default
+
+    for key in ('selected_packages',):
+        value = clean.get(key)
+        if not isinstance(value, list):
+            value = []
+        clean[key] = list(dict.fromkeys(
+            str(pkg) for pkg in value
+            if re.fullmatch(r'[A-Za-z0-9._]+', str(pkg))
+        ))
+
+    for key in ('package_games', 'package_game_names', 'package_account_names'):
+        if not isinstance(clean.get(key), dict):
+            clean[key] = {}
+
+    if clean.get('game_method') not in ('all', 'each'):
+        clean['game_method'] = 'all'
+    if clean.get('window_mode') not in ('left_stack', 'grid'):
+        clean['window_mode'] = 'left_stack'
+    clean.pop('rejoin_interval', None)  # retired legacy field
+    return clean
+
 def load_config():
     global config
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    if os.path.exists(CONFIG_FILE):
+    saved = {}
+    for candidate in (CONFIG_FILE, CONFIG_FILE + '.bak'):
+        if not os.path.exists(candidate):
+            continue
         try:
-            with open(CONFIG_FILE, 'r') as f:
+            with open(candidate, 'r', encoding='utf-8') as f:
                 saved = json.load(f)
-            config.update(saved)
+            break
         except Exception as e:
-            print(f"[!] Warning loading config: {e}")
+            print(f"[!] Warning loading config from {candidate}: {e}")
+    config = validate_config(saved)
     return config
 
 def save_config():
+    global config
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2, default=str)
+    config = validate_config(config)
+    temp_path = CONFIG_FILE + '.tmp'
+    backup_path = CONFIG_FILE + '.bak'
+    try:
+        with open(temp_path, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump(config, f, indent=2, default=str)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(CONFIG_FILE):
+            shutil.copy2(CONFIG_FILE, backup_path)
+        os.replace(temp_path, CONFIG_FILE)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
 # ==============================================================================
 # 1. ORIENTATION, APP LAUNCHER, WINDOW TILING & PACKAGE MANAGEMENT
@@ -314,10 +387,10 @@ def get_activity_top_dump():
             pass
     return ''
 
-def is_app_in_game(package, content=None):
+def get_app_activity_state(package, content=None):
     """
     Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
-    Rule-compliant: Checks HOME_SIGNALS vs GAME_SIGNALS, fallbacks to False if package not found in dump.
+    Returns True for game evidence, False for Home evidence, and None when evidence is unavailable.
     `content` may be passed in (a dump already fetched via get_activity_top_dump())
     to avoid re-running the heavy dumpsys command per package; if omitted, it is
     fetched here for backwards compatibility.
@@ -349,11 +422,14 @@ def is_app_in_game(package, content=None):
             # 2. Check for explicit 3D Game rendering signals
             if any(sig in block_text for sig in GAME_SIGNALS):
                 return True
-            # 3. Default fallback if ambiguous
-            return False
+            # 3. Ambiguous evidence is not the same thing as a confirmed Home page.
+            return None
 
-    # Default fallback when package is not found in activity dump: False (safe rejoin as mandated by AGENTS.md)
-    return False
+    return None
+
+def is_app_in_game(package, content=None):
+    """Backwards-compatible Boolean view of the tri-state activity detector."""
+    return get_app_activity_state(package, content=content) is True
 
 
 
@@ -379,37 +455,101 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
 
     total_apps = max(1, total_apps)
 
-    half_w = int(screen_w * 0.5)
-    cell_h = int(screen_h / total_apps)
-    left = half_w
-    top = index * cell_h
-    right = screen_w
-    bottom = (index + 1) * cell_h
+    index = max(0, min(int(index), total_apps - 1))
+    if mode == 'grid':
+        columns = max(1, math.ceil(math.sqrt(total_apps)))
+        rows = max(1, math.ceil(total_apps / columns))
+        column = index % columns
+        row = index // columns
+        left = column * screen_w // columns
+        top = row * screen_h // rows
+        right = (column + 1) * screen_w // columns
+        bottom = (row + 1) * screen_h // rows
+    else:
+        half_w = int(screen_w * 0.5)
+        cell_h = int(screen_h / total_apps)
+        left = half_w
+        top = index * cell_h
+        right = screen_w
+        bottom = (index + 1) * cell_h
     return left, top, right, bottom
+
+def apply_window_bounds(package, bounds):
+    """Best-effort freeform resize for Android builds that expose `am task resize`."""
+    if not re.fullmatch(r'[A-Za-z0-9._]+', str(package)) or not bounds or len(bounds) != 4:
+        return False
+    try:
+        left, top, right, bottom = (max(0, int(value)) for value in bounds)
+    except (TypeError, ValueError):
+        return False
+    if right <= left or bottom <= top:
+        return False
+
+    dump = run_cmd("su -c 'dumpsys activity activities'", timeout=4)
+    content = dump.stdout or ''
+    task_id = None
+    for line in content.splitlines():
+        if package not in line:
+            continue
+        for pattern in (r'Task\{[^#]*#(\d+)', r'taskId=(\d+)', r'\bt(\d+)\b'):
+            match = re.search(pattern, line)
+            if match:
+                task_id = match.group(1)
+                break
+        if task_id:
+            break
+    if not task_id:
+        return False
+
+    rectangle = f'{left} {top} {right} {bottom}'
+    for command in (
+        f"su -c 'am task resize {task_id} {rectangle}'",
+        f'am task resize {task_id} {rectangle}',
+    ):
+        result = run_cmd(command, timeout=5)
+        combined = (result.stdout or '') + (result.stderr or '')
+        if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
+            return True
+    return False
 
 def launch_game(package, game_id, bounds=None, freeform=True):
     """Launch Roblox game directly into place ID for targeted clone package."""
+    package = str(package).strip()
+    if not re.fullmatch(r'[A-Za-z0-9._]+', package):
+        return False
     game_id = str(game_id).strip()
     if not game_id:
         game_id = '2753915549'
 
     if '?privateServerLinkCode=' in game_id:
         parts = game_id.split('?privateServerLinkCode=', 1)
-        place_id = parts[0]
-        link_code = parts[1]
+        place_match = re.search(r'(?:/games/)?(\d+)', parts[0])
+        place_id = place_match.group(1) if place_match else ''
+        link_code = parts[1].split('&', 1)[0]
+        if not place_id or not re.fullmatch(r'[A-Za-z0-9_-]+', link_code):
+            return False
         url = f'roblox://placeId={place_id}&linkCode={link_code}'
         web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
     elif game_id.startswith('http'):
-        match = re.search(r'/games/(\d+)', game_id)
-        place_id = match.group(1) if match else game_id
+        parsed = urllib.parse.urlparse(game_id)
+        host = (parsed.hostname or '').lower()
+        match = re.search(r'/games/(\d+)', parsed.path)
+        if parsed.scheme not in ('http', 'https') or not (host == 'roblox.com' or host.endswith('.roblox.com')) or not match:
+            return False
+        place_id = match.group(1)
         ps_match = re.search(r'privateServerLinkCode=([^&]+)', game_id)
         if ps_match:
-            url = f'roblox://placeId={place_id}&linkCode={ps_match.group(1)}'
-            web_url = game_id
+            link_code = urllib.parse.unquote(ps_match.group(1))
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', link_code):
+                return False
+            url = f'roblox://placeId={place_id}&linkCode={link_code}'
+            web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
         else:
             url = f'roblox://placeId={place_id}'
             web_url = f'https://www.roblox.com/games/{place_id}'
     else:
+        if not game_id.isdigit():
+            return False
         url = f'roblox://placeId={game_id}'
         web_url = f'https://www.roblox.com/games/{game_id}'
 
@@ -429,6 +569,8 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         try:
             res = run_cmd(cmd, timeout=6)
             if res.returncode == 0 and "Error" not in res.stdout:
+                if freeform and bounds:
+                    apply_window_bounds(package, bounds)
                 return True
         except Exception:
             pass
@@ -597,7 +739,7 @@ def force_stop_app(package):
         return False
 
 def clear_app_cache(package):
-    """Clear app data/cache using pm clear."""
+    """Clear all app data using Android `pm clear` (legacy function name)."""
     try:
         run_cmd(f"su -c 'pm clear {package}'", timeout=10)
         return True
@@ -935,18 +1077,18 @@ class WebhookThread(threading.Thread):
         self.interval = interval
         self.get_status_fn = get_status_fn
         self.start_time = start_time
-        self.running = True
+        self.stop_event = threading.Event()
 
     def run(self):
-        while self.running:
+        while not self.stop_event.is_set():
             try:
                 send_discord_webhook(self.webhook_url, self.get_status_fn(), self.start_time)
             except Exception as e:
                 print(f"[!] Webhook thread error: {e}")
-            time.sleep(max(10, self.interval))
+            self.stop_event.wait(max(10, self.interval))
 
     def stop(self):
-        self.running = False
+        self.stop_event.set()
 
 # ==============================================================================
 # 4. AUTO REJOIN MONITORING LOOP & LIVE DASHBOARD
@@ -961,19 +1103,27 @@ class TerminalRejoinLoop:
         self.start_time = None
         self.webhook_thread = None
         self.recent_logs = []
+        self.stop_event = None
+        self.state_lock = threading.RLock()
 
     def log(self, msg):
         ts = time.strftime('%H:%M:%S')
         entry = f"[{ts}] {msg}"
-        self.recent_logs.append(entry)
-        if len(self.recent_logs) > 15:
-            self.recent_logs.pop(0)
+        with self.state_lock:
+            self.recent_logs.append(entry)
+            if len(self.recent_logs) > 15:
+                self.recent_logs.pop(0)
 
-    def set_status(self, pkg, status_str):
-        self.status[pkg] = {'status': status_str, 'time': time.time()}
+    def set_status(self, pkg, status_str, **details):
+        with self.state_lock:
+            current = dict(self.status.get(pkg, {}))
+            current.update({'status': status_str, 'time': time.time()})
+            current.update(details)
+            self.status[pkg] = current
 
     def get_status(self):
-        return dict(self.status)
+        with self.state_lock:
+            return {pkg: dict(info) for pkg, info in self.status.items()}
 
     def _get_game_id(self, pkg, cfg):
         return _resolve_package_game_id(pkg, cfg)
@@ -982,7 +1132,7 @@ class TerminalRejoinLoop:
         return _resolve_package_game_name(pkg, cfg)
 
     def start(self, cfg):
-        if self.running:
+        if self.running or (self.thread and self.thread.is_alive()):
             print("[!] Auto rejoin is already running.")
             return False
 
@@ -998,6 +1148,7 @@ class TerminalRejoinLoop:
 
         self.running = True
         self.start_time = time.time()
+        self.stop_event = threading.Event()
 
         if cfg.get('webhook_enabled') and cfg.get('webhook_url'):
             self.webhook_thread = WebhookThread(
@@ -1010,7 +1161,7 @@ class TerminalRejoinLoop:
 
         self.thread = threading.Thread(
             target=self._loop,
-            args=(list(packages), dict(cfg)),
+            args=(list(packages), dict(cfg), self.stop_event),
             daemon=True
         )
         self.thread.start()
@@ -1018,8 +1169,15 @@ class TerminalRejoinLoop:
 
     def stop(self):
         self.running = False
+        if self.stop_event:
+            self.stop_event.set()
         if self.webhook_thread:
             self.webhook_thread.stop()
+            if self.webhook_thread is not threading.current_thread():
+                self.webhook_thread.join(timeout=2)
+            self.webhook_thread = None
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=8)
         self.log("Auto rejoin loop stopped.")
 
     def render_live_dashboard(self, cfg):
@@ -1190,6 +1348,9 @@ class TerminalRejoinLoop:
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
                     elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
+                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wait{RESET}"
+                    elif st == 'Launch Failed':                  st_c = f"{RED}Failed{RESET}"
+                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unkwn{RESET}"
                     else:                                        st_c = st
 
                     pkg_w = COLS[2][1]
@@ -1236,43 +1397,63 @@ class TerminalRejoinLoop:
                 except Exception:
                     pass
 
-    def _loop(self, packages, cfg):
+    def _loop(self, packages, cfg, stop_event):
         check_interval      = float(cfg.get('check_interval', 8))
         activity_interval   = max(check_interval, float(cfg.get('activity_check_interval', 30)))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
+        offline_wait        = float(cfg.get('offline_wait', 15))
+        retry_limit         = int(cfg.get('retry_count', 3))
+        retry_delay         = float(cfg.get('retry_delay', 30))
+        rejoin_cooldown     = float(cfg.get('rejoin_cooldown', 10))
+        home_confirmations  = int(cfg.get('home_confirmation_count', 2))
         sequential          = cfg.get('sequential_join', False)
         auto_clear          = cfg.get('clear_cache', False)
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
-        # Grace period after launch — gives Roblox 45s to load place before checking Home Screen
         LAUNCH_GRACE        = 45
 
         w, h = get_screen_size()
         total_apps = len(packages)
+        retry_attempts = {pkg: 0 for pkg in packages}
+        next_retry = {pkg: 0.0 for pkg in packages}
+        home_hits = {pkg: 0 for pkg in packages}
 
-        # Initial launch of all packages
-        for i, pkg in enumerate(packages):
+        def launch_package(pkg, index, reason):
             gid = self._get_game_id(pkg, cfg)
-            bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-            self.set_status(pkg, 'Launching')
+            bounds = calculate_window_bounds(index, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.last_launch[pkg] = time.time()
-            launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-            if sequential and i < len(packages) - 1:
-                time.sleep(delay_open_tab)
+            launched = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+            retry_attempts[pkg] += 1
+            next_retry[pkg] = time.time() + max(offline_wait, rejoin_cooldown)
+            self.set_status(
+                pkg,
+                'Launching' if launched else 'Launch Failed',
+                attempts=retry_attempts[pkg],
+                next_retry=next_retry[pkg],
+                last_result=reason,
+            )
+            self.log(f"[{pkg}] {reason}: {'accepted' if launched else 'failed'}")
+            return launched
 
-        # Give apps extra time to fully start before monitoring begins
-        time.sleep(8)
+        # Preserve the established initial behavior: launch each selected package.
+        for i, pkg in enumerate(packages):
+            if stop_event.is_set():
+                break
+            launch_package(pkg, i, 'Initial launch')
+            if sequential and i < len(packages) - 1 and stop_event.wait(delay_open_tab):
+                break
+
+        if stop_event.wait(8):
+            for pkg in packages:
+                self.set_status(pkg, 'Stopped')
+            return
 
         activity_dump = ''
         last_activity_check = 0.0
 
-        while self.running:
+        while self.running and not stop_event.is_set():
             try:
-                # Fetched once per cycle and reused for every package below —
-                # dumpsys activity top is system-wide and identical per package,
-                # so calling it per-package multiplied a heavy su+dumpsys call by
-                # the package count on every poll.
                 cycle_now = time.time()
                 running_packages = get_running_packages(packages)
                 activity_due = (cycle_now - last_activity_check) >= activity_interval
@@ -1286,54 +1467,76 @@ class TerminalRejoinLoop:
                     last_activity_check = cycle_now
 
                 for i, pkg in enumerate(packages):
-                    if not self.running:
+                    if stop_event.is_set():
                         break
 
-                    gid = self._get_game_id(pkg, cfg)
                     now = time.time()
+                    if pkg not in running_packages:
+                        home_hits[pkg] = 0
+                        if now < next_retry[pkg]:
+                            self.set_status(
+                                pkg, 'Retry Wait', attempts=retry_attempts[pkg],
+                                next_retry=next_retry[pkg], last_result='Process not running',
+                            )
+                            continue
+                        if retry_attempts[pkg] >= retry_limit:
+                            retry_attempts[pkg] = 0
+                            next_retry[pkg] = now + retry_delay
+                            self.log(f"[{pkg}] Retry batch exhausted; waiting {int(retry_delay)}s")
+                            self.set_status(
+                                pkg, 'Retry Wait', attempts=retry_limit,
+                                next_retry=next_retry[pkg], last_result='Retry batch exhausted',
+                            )
+                            continue
 
-                    running = pkg in running_packages
-
-                    if not running:
-                        # ★ PROCESS DEAD → REJOIN
-                        self.log(f"[{pkg}] Process dead → Rejoining")
-                        self.set_status(pkg, 'Rejoining')
+                        self.set_status(pkg, 'Rejoining', attempts=retry_attempts[pkg] + 1)
                         if auto_clear:
                             clear_app_cache(pkg)
-                            time.sleep(1)
-                        bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                        self.last_launch[pkg] = now
-                        launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+                            if stop_event.wait(1):
+                                break
+                        launch_package(pkg, i, f"Rejoin attempt {retry_attempts[pkg] + 1}/{retry_limit}")
+                        continue
 
+                    retry_attempts[pkg] = 0
+                    next_retry[pkg] = 0.0
+                    time_since_launch = now - self.last_launch.get(pkg, 0)
+                    if time_since_launch < LAUNCH_GRACE:
+                        self.set_status(pkg, 'Launching', attempts=0)
+                        continue
+                    if not (activity_due and needs_activity):
+                        continue
+
+                    activity_state = get_app_activity_state(pkg, content=activity_dump)
+                    if activity_state is True:
+                        home_hits[pkg] = 0
+                        self.set_status(pkg, 'Ingame', attempts=0, last_result='Activity confirmed')
+                    elif activity_state is False:
+                        home_hits[pkg] += 1
+                        self.set_status(
+                            pkg, 'Home Page', confirmations=home_hits[pkg],
+                            last_result=f"Home confirmation {home_hits[pkg]}/{home_confirmations}",
+                        )
+                        if not home_rejoin_enabled:
+                            continue
+                        if home_hits[pkg] < home_confirmations:
+                            self.log(f"[{pkg}] Home confirmation {home_hits[pkg]}/{home_confirmations}")
+                            continue
+
+                        self.log(f"[{pkg}] Confirmed Home Screen; force stopping and rejoining")
+                        self.set_status(pkg, 'Rejoining')
+                        force_stop_app(pkg)
+                        if stop_event.wait(2):
+                            break
+                        home_hits[pkg] = 0
+                        retry_attempts[pkg] = 0
+                        launch_package(pkg, i, 'Confirmed Home rejoin')
                     else:
-                        # ★ PROCESS ALIVE → check if in-game or on Home Screen
-                        time_since_launch = now - self.last_launch.get(pkg, 0)
-                        if time_since_launch < LAUNCH_GRACE:
-                            self.set_status(pkg, 'Launching')
-                        elif activity_due and needs_activity:
-                            if is_app_in_game(pkg, content=activity_dump):
-                                self.set_status(pkg, 'Ingame')
-                            else:
-                                # HOME SCREEN detected (past 20s grace period)
-                                self.set_status(pkg, 'Home Page')
-                                if home_rejoin_enabled:
-                                    self.log(f"[{pkg}] Home Screen detected → Force stopping & rejoining place")
-                                    self.set_status(pkg, 'Rejoining')
-                                    force_stop_app(pkg)
-                                    time.sleep(2)
-                                    bounds = calculate_window_bounds(i, total_apps, w, h, mode=window_mode) if auto_sort else None
-                                    self.last_launch[pkg] = time.time()
-                                    launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
-                                else:
-                                    self.log(f"[{pkg}] Home Screen detected (home_rejoin disabled — skipping)")
+                        home_hits[pkg] = 0
+                        self.set_status(pkg, 'Unknown', last_result='Activity evidence unavailable')
             except Exception as e:
-                # A single bad cycle (e.g. an unexpected su/dumpsys hiccup)
-                # must not silently kill this daemon thread — that would
-                # leave self.running stuck True forever with no rejoin
-                # actually happening and no visible sign anything died.
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
-            time.sleep(check_interval)
+            stop_event.wait(check_interval)
 
         for pkg in packages:
             self.set_status(pkg, 'Stopped')
@@ -1610,11 +1813,20 @@ def interactive_menu():
             seq = prompt(f"Sequential Join? (y/n) [{config.get('sequential_join', False)}]: ").strip().lower()
             if seq in ['y', 'n']: config['sequential_join'] = (seq == 'y')
 
-            clr = prompt(f"Clear Cache on Rejoin? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
+            retry_d = prompt(f"Retry Batch Delay seconds [{config.get('retry_delay', 30)}]: ").strip()
+            if retry_d.isdigit(): config['retry_delay'] = int(retry_d)
+
+            cooldown = prompt(f"Minimum Rejoin Cooldown seconds [{config.get('rejoin_cooldown', 10)}]: ").strip()
+            if cooldown.isdigit(): config['rejoin_cooldown'] = int(cooldown)
+
+            clr = prompt(f"Clear ALL App Data on Rejoin (pm clear; may sign out accounts)? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
 
             hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
             if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
+
+            confirm = prompt(f"Required Consecutive Home Detections [{config.get('home_confirmation_count', 2)}]: ").strip()
+            if confirm.isdigit(): config['home_confirmation_count'] = int(confirm)
 
             save_config()
             print("\n[+] Timing & Home Screen settings updated.")
