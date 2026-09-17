@@ -30,6 +30,7 @@ import argparse
 import subprocess
 import threading
 import shutil
+import shlex
 import urllib.request
 import urllib.parse
 import mimetypes
@@ -37,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.89-REI-REJOIN"
-BUILD_TIME = "2026-09-17 17:33:30 UTC"
+BUILD_VERSION = "v6.8.90-REI-REJOIN"
+BUILD_TIME = "2026-09-17 17:59:09 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -67,6 +68,7 @@ DEFAULT_CONFIG = {
     'activity_check_interval': 30,
     'dashboard_refresh_interval': 2,
     'ram_refresh_interval': 30,
+    'app_ram_refresh_interval': 30,
     'launch_wait': 15,
     'rejoin_cooldown': 10,
     'sequential_join': False,
@@ -97,6 +99,7 @@ _CONFIG_RANGES = {
     'activity_check_interval': (5.0, 600.0),
     'dashboard_refresh_interval': (0.5, 60.0),
     'ram_refresh_interval': (10.0, 3600.0),
+    'app_ram_refresh_interval': (10.0, 3600.0),
     'launch_wait': (0.0, 300.0),
     'offline_wait': (0.0, 300.0),
     'retry_delay': (1.0, 3600.0),
@@ -901,17 +904,79 @@ def get_ram_usage():
         pass
     return _last_ram_usage
 
-def get_process_ram(package):
-    try:
-        result = run_cmd(f"su -c 'dumpsys meminfo {package} -c'", timeout=5)
-        for line in result.stdout.split('\n'):
-            if 'TOTAL' in line:
-                parts = line.split(',')
-                if len(parts) > 1:
-                    return int(parts[1].strip()) // 1024  # MB
-        return 0
-    except Exception:
-        return 0
+_process_ram_cache = {}  # package -> (ram_mb | None, timestamp)
+
+def _parse_process_ram_kb(content):
+    """Parse aggregate PSS in kB from human-readable or CSV dumpsys output."""
+    if not content:
+        return None
+
+    match = re.search(r'\bTOTAL\s+PSS:\s*([\d,]+)', content, re.IGNORECASE)
+    if match:
+        return int(match.group(1).replace(',', ''))
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.lower().startswith('total,'):
+            fields = [field.strip().replace(',', '') for field in line.split(',')]
+            for field in fields[1:]:
+                if field.isdigit():
+                    return int(field)
+        match = re.match(r'^TOTAL\s*:?[ \t]+([\d,]+)\b', line, re.IGNORECASE)
+        if match:
+            return int(match.group(1).replace(',', ''))
+    return None
+
+def get_process_ram(package, force=False):
+    """Return total app-process memory in MB, preferring aggregate PSS."""
+    package = str(package or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9._]+', package):
+        return None
+
+    now = time.time()
+    refresh = max(10.0, float(config.get('app_ram_refresh_interval', 30)))
+    cached = _process_ram_cache.get(package)
+    if cached and not force and (now - cached[1]) < refresh:
+        return cached[0]
+
+    ram_kb = None
+    for command in (
+        f"su -c 'dumpsys meminfo {package}'",
+        f'dumpsys meminfo {package}',
+        f"su -c 'dumpsys meminfo {package} -c'",
+    ):
+        result = run_cmd(command, timeout=5)
+        if result.returncode == 0 and result.stdout:
+            ram_kb = _parse_process_ram_kb(result.stdout)
+            if ram_kb is not None:
+                break
+
+    if ram_kb is None:
+        # Kernel fallback: sum PSS for every process owned by this package.
+        # VmRSS is used only on kernels without smaps_rollup.
+        script = (
+            f'for p in $(pidof {package} 2>/dev/null); do '
+            'if [ -r /proc/$p/smaps_rollup ]; then '
+            "awk '/^Pss:/{print $2; exit}' /proc/$p/smaps_rollup 2>/dev/null; "
+            'else '
+            "awk '/^VmRSS:/{print $2; exit}' /proc/$p/status 2>/dev/null; "
+            'fi; done'
+        )
+        for command in (f'su -c {shlex.quote(script)}', script):
+            result = run_cmd(command, timeout=5)
+            values = [int(value) for value in result.stdout.split() if value.isdigit()]
+            if values:
+                ram_kb = sum(values)
+                break
+
+    ram_mb = max(1, int(round(ram_kb / 1024.0))) if ram_kb and ram_kb > 0 else None
+    _process_ram_cache[package] = (ram_mb, now)
+    return ram_mb
+
+def format_process_ram(ram_mb):
+    return f'{int(ram_mb)} MB' if isinstance(ram_mb, (int, float)) and ram_mb > 0 else 'N/A'
 
 def get_device_name():
     try:
@@ -973,17 +1038,17 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
         parts = []
         for i, (pkg, info) in enumerate(statuses.items(), 1):
             status = info.get('status', 'Unknown')
-            ram = get_process_ram(pkg)
+            ram = format_process_ram(info.get('ram_mb'))
             parts.append(
                 f'**{i}.** {status} | `{pkg}`\n'
-                f'    RAM: {ram} MB'
+                f'    App RAM: {ram}'
             )
         if parts:
             app_lines = '\n'.join(parts)
 
     description = (
         f'**Device:** {device}\n'
-        f'**Uptime:** {uptime}\n'
+        f'**Monitor Uptime:** {uptime}\n'
         f'**CPU:** {cpu}% / 100%\n'
         f'**RAM:** {used_ram:.2f} / {total_ram:.2f} GB\n'
     )
@@ -1090,6 +1155,34 @@ class WebhookThread(threading.Thread):
     def stop(self):
         self.stop_event.set()
 
+class AppRamThread(threading.Thread):
+    """Sample per-app RAM away from the dashboard and rejoin loops."""
+    def __init__(self, packages, interval, set_ram_fn):
+        super().__init__(daemon=True)
+        self.packages = list(packages)
+        self.interval = max(10.0, float(interval))
+        self.set_ram_fn = set_ram_fn
+        self.stop_event = threading.Event()
+
+    def run(self):
+        while not self.stop_event.is_set():
+            cycle_started = time.monotonic()
+            any_value = False
+            for package in self.packages:
+                if self.stop_event.is_set():
+                    return
+                ram_mb = get_process_ram(package, force=True)
+                any_value = any_value or ram_mb is not None
+                self.set_ram_fn(package, ram_mb)
+                if self.stop_event.wait(0.1):
+                    return
+            elapsed = time.monotonic() - cycle_started
+            next_interval = self.interval if any_value else min(5.0, self.interval)
+            self.stop_event.wait(max(1.0, next_interval - elapsed))
+
+    def stop(self):
+        self.stop_event.set()
+
 # ==============================================================================
 # 4. AUTO REJOIN MONITORING LOOP & LIVE DASHBOARD
 # ==============================================================================
@@ -1102,6 +1195,7 @@ class TerminalRejoinLoop:
         self.thread = None
         self.start_time = None
         self.webhook_thread = None
+        self.app_ram_thread = None
         self.recent_logs = []
         self.stop_event = None
         self.state_lock = threading.RLock()
@@ -1124,6 +1218,13 @@ class TerminalRejoinLoop:
     def get_status(self):
         with self.state_lock:
             return {pkg: dict(info) for pkg, info in self.status.items()}
+
+    def set_app_ram(self, pkg, ram_mb):
+        with self.state_lock:
+            current = dict(self.status.get(pkg, {}))
+            current['ram_mb'] = ram_mb
+            current['ram_time'] = time.time()
+            self.status[pkg] = current
 
     def _get_game_id(self, pkg, cfg):
         return _resolve_package_game_id(pkg, cfg)
@@ -1149,6 +1250,13 @@ class TerminalRejoinLoop:
         self.running = True
         self.start_time = time.time()
         self.stop_event = threading.Event()
+
+        self.app_ram_thread = AppRamThread(
+            packages,
+            float(cfg.get('app_ram_refresh_interval', 30)),
+            self.set_app_ram,
+        )
+        self.app_ram_thread.start()
 
         if cfg.get('webhook_enabled') and cfg.get('webhook_url'):
             self.webhook_thread = WebhookThread(
@@ -1176,6 +1284,11 @@ class TerminalRejoinLoop:
             if self.webhook_thread is not threading.current_thread():
                 self.webhook_thread.join(timeout=2)
             self.webhook_thread = None
+        if self.app_ram_thread:
+            self.app_ram_thread.stop()
+            if self.app_ram_thread is not threading.current_thread():
+                self.app_ram_thread.join(timeout=6)
+            self.app_ram_thread = None
         if self.thread and self.thread is not threading.current_thread():
             self.thread.join(timeout=8)
         self.log("Auto rejoin loop stopped.")
@@ -1246,12 +1359,12 @@ class TerminalRejoinLoop:
             columns is target - (3*N + 1)."""
             N = 5
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, status_w = 2, 8, 6
+            no_w, user_w, status_w = 1, 4, 9
             remaining = max(8, budget - no_w - user_w - status_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
             # Short header labels so they never overflow a narrow column on their own.
-            cols = [("No", no_w), ("User", user_w), ("Pkg", pkg_w), ("Stat", status_w), ("Game", game_w)]
+            cols = [("N", no_w), ("Usr", user_w), ("Pkg", pkg_w), ("Stat/RAM", status_w), ("Game", game_w)]
             total_w = sum(w + 3 for _, w in cols) + 1  # " val " + trailing "|" per col, + leading "|"
 
             def cell(val, width):
@@ -1314,6 +1427,7 @@ class TerminalRejoinLoop:
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
+                uptime = format_uptime(time.time() - (self.start_time or time.time()))
 
                 # ── Header ────────────────────────────────────────
                 title = "REI REJOIN"
@@ -1326,6 +1440,7 @@ class TerminalRejoinLoop:
                 out(f"AUTO SORT: {s_st}")
                 out(f"HOME REJOIN: {h_st}")
                 out(f"CLEAR CACHE: {c_st}")
+                out(f"UPTIME: {uptime}")
                 out(SEP)
 
                 # ── Stats ──────────────────────────────────────────
@@ -1340,18 +1455,20 @@ class TerminalRejoinLoop:
                 for idx, p in enumerate(pkgs, 1):
                     info_d    = statuses.get(p, {})
                     st        = info_d.get('status', 'Launching')
+                    ram_mb    = info_d.get('ram_mb')
+                    ram_short = f"{int(ram_mb)}M" if isinstance(ram_mb, (int, float)) and ram_mb > 0 else "N/A"
                     uname_raw = get_package_username(p, cfg, idx)
                     user_w    = COLS[1][1]
                     uname     = uname_raw if len(uname_raw) <= user_w else uname_raw[:max(1, user_w - 1)] + '.'
 
-                    if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}HomePg{RESET}"
-                    elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
-                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wait{RESET}"
-                    elif st == 'Launch Failed':                  st_c = f"{RED}Failed{RESET}"
-                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unkwn{RESET}"
-                    else:                                        st_c = st
+                    if   st == 'Ingame':                         st_c = f"{GREEN}In/{ram_short}{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Re/{ram_short}{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Hm/{ram_short}{RESET}"
+                    elif st == 'Launching':                      st_c = f"{CYAN}Ld/{ram_short}{RESET}"
+                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wt/{ram_short}{RESET}"
+                    elif st == 'Launch Failed':                  st_c = f"{RED}Fl/{ram_short}{RESET}"
+                    elif st == 'Unknown':                        st_c = f"{YELLOW}Un/{ram_short}{RESET}"
+                    else:                                        st_c = f"{st[:2]}/{ram_short}"
 
                     pkg_w = COLS[2][1]
                     pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
@@ -1592,10 +1709,10 @@ def show_status():
     for pkg in roblox_pkgs:
         running = is_app_running(pkg)
         status_str = "RUNNING" if running else "STOPPED"
-        ram = get_process_ram(pkg) if running else 0
+        ram = format_process_ram(get_process_ram(pkg)) if running else 'N/A'
         selected = "*" if pkg in config.get('selected_packages', []) else " "
         pkg_gname = _resolve_package_game_name(pkg, config)
-        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18} RAM: {ram}MB")
+        print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18} RAM: {ram}")
     print("=" * 60)
 
 def interactive_menu():
@@ -1818,6 +1935,9 @@ def interactive_menu():
 
             cooldown = prompt(f"Minimum Rejoin Cooldown seconds [{config.get('rejoin_cooldown', 10)}]: ").strip()
             if cooldown.isdigit(): config['rejoin_cooldown'] = int(cooldown)
+
+            ram_rate = prompt(f"Per-App RAM Refresh seconds [{config.get('app_ram_refresh_interval', 30)}]: ").strip()
+            if ram_rate.isdigit(): config['app_ram_refresh_interval'] = int(ram_rate)
 
             clr = prompt(f"Clear ALL App Data on Rejoin (pm clear; may sign out accounts)? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')

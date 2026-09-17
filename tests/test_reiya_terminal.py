@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.89-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.90-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
 
     def test_config_validation(self):
@@ -82,6 +82,80 @@ class EnhancementTests(unittest.TestCase):
         self.assertTrue(event.is_set())
         self.assertFalse(engine.thread.is_alive())
         self.assertFalse(engine.running)
+
+    def test_process_ram_parsers(self):
+        self.assertEqual(reiya._parse_process_ram_kb('TOTAL PSS: 345,678 TOTAL RSS: 400000'), 345678)
+        self.assertEqual(reiya._parse_process_ram_kb(' TOTAL  123456  42  9'), 123456)
+        self.assertEqual(reiya._parse_process_ram_kb('total,654321,2,3'), 654321)
+        self.assertIsNone(reiya._parse_process_ram_kb('No process found'))
+
+    def test_process_ram_pss_and_cache(self):
+        reiya._process_ram_cache.clear()
+        output = subprocess.CompletedProcess('cmd', 0, 'TOTAL PSS: 204800 TOTAL RSS: 250000', '')
+        with mock.patch.object(reiya, 'run_cmd', return_value=output) as run_cmd:
+            self.assertEqual(reiya.get_process_ram('com.roblox.client', force=True), 200)
+            self.assertEqual(reiya.get_process_ram('com.roblox.client'), 200)
+            self.assertEqual(run_cmd.call_count, 1)
+        self.assertEqual(reiya.format_process_ram(200), '200 MB')
+        self.assertEqual(reiya.format_process_ram(None), 'N/A')
+
+    def test_process_ram_proc_fallback(self):
+        reiya._process_ram_cache.clear()
+        failed = subprocess.CompletedProcess('cmd', 1, '', '')
+        proc_values = subprocess.CompletedProcess('cmd', 0, '102400\n51200\n', '')
+        with mock.patch.object(reiya, 'run_cmd', side_effect=[failed, failed, failed, proc_values]):
+            self.assertEqual(reiya.get_process_ram('com.roblox.client', force=True), 150)
+
+    def test_app_ram_sampler_updates_status(self):
+        samples = []
+        worker = None
+        def receive(package, ram_mb):
+            samples.append((package, ram_mb))
+            worker.stop()
+        worker = reiya.AppRamThread(['com.roblox.client'], 10, receive)
+        with mock.patch.object(reiya, 'get_process_ram', return_value=321):
+            worker.start()
+            worker.join(timeout=2)
+        self.assertEqual(samples, [('com.roblox.client', 321)])
+        self.assertFalse(worker.is_alive())
+
+    def test_webhook_contains_uptime_and_cached_app_ram(self):
+        statuses = {'com.roblox.client': {'status': 'Ingame', 'ram_mb': 321}}
+        sent = subprocess.CompletedProcess('curl', 0, '204', '')
+        with mock.patch.object(reiya, 'get_cpu_usage', return_value=12.5), \
+             mock.patch.object(reiya, 'get_ram_usage', return_value=(2.0, 4.0)), \
+             mock.patch.object(reiya, 'get_device_name', return_value='Device'), \
+             mock.patch.object(reiya, 'take_screenshot', return_value=None), \
+             mock.patch.object(reiya.subprocess, 'run', return_value=sent) as curl:
+            reiya.send_discord_webhook('https://discord.com/api/webhooks/1/token', statuses, time.time() - 3661)
+        payload_arg = next(arg for arg in curl.call_args.args[0] if arg.startswith('payload_json='))
+        self.assertIn('Monitor Uptime', payload_arg)
+        self.assertIn('01h:01m:01s', payload_arg)
+        self.assertIn('App RAM: 321 MB', payload_arg)
+
+    def test_dashboard_contains_uptime_and_app_ram(self):
+        import io
+        from contextlib import redirect_stdout
+        engine = reiya.TerminalRejoinLoop()
+        engine.running = True
+        engine.start_time = time.time() - 3661
+        engine.set_status('com.roblox.client', 'Ingame', ram_mb=321)
+        cfg = dict(reiya.DEFAULT_CONFIG, selected_packages=['com.roblox.client'], dashboard_refresh_interval=0.5)
+        output = io.StringIO()
+        with mock.patch.object(reiya, 'clear_terminal_screen'), \
+             mock.patch.object(reiya, 'get_cpu_usage', return_value=12.5), \
+             mock.patch.object(reiya, 'get_ram_usage', return_value=(2.0, 4.0)), \
+             mock.patch.object(reiya, 'get_package_username', return_value='User'), \
+             redirect_stdout(output):
+            thread = threading.Thread(target=engine.render_live_dashboard, args=(cfg,))
+            thread.start()
+            time.sleep(0.1)
+            engine.running = False
+            thread.join(timeout=2)
+        rendered = output.getvalue()
+        self.assertIn('UPTIME: 01h:01m:', rendered)
+        self.assertIn('Stat/RAM', rendered)
+        self.assertIn('In/321M', rendered)
 
 
 if __name__ == '__main__':
