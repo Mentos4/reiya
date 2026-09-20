@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.92-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.93-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -28,6 +28,7 @@ class EnhancementTests(unittest.TestCase):
             'selected_packages': ['com.roblox.client', 'bad;command', 'com.roblox.client'],
             'rejoin_interval': 1,
             'ram_refresh_interval': 30,
+            'system_ram_refresh_interval': 5,
         })
         self.assertEqual(clean['check_interval'], 1)
         self.assertEqual(clean['retry_count'], 100)
@@ -35,29 +36,24 @@ class EnhancementTests(unittest.TestCase):
         self.assertEqual(clean['selected_packages'], ['com.roblox.client'])
         self.assertNotIn('rejoin_interval', clean)
         self.assertNotIn('ram_refresh_interval', clean)
+        self.assertNotIn('system_ram_refresh_interval', clean)
 
-    def test_system_ram_refreshes_after_five_seconds(self):
-        old_config = reiya.config
+    def test_system_ram_uses_live_cloudphone_dumpsys_without_cache(self):
         old_usage = reiya._last_ram_usage
-        old_check = reiya._last_ram_check_time
         try:
-            reiya.config = {'system_ram_refresh_interval': 5}
             reiya._last_ram_usage = (0.0, 0.0)
-            reiya._last_ram_check_time = 0.0
             samples = [
-                'MemTotal: 4194304 kB\nMemAvailable: 1048576 kB\n',
-                'MemTotal: 4194304 kB\nMemAvailable: 2097152 kB\n',
+                subprocess.CompletedProcess('dumpsys', 0, 'Total RAM: 4,194,304K\nFree RAM: 1,048,576K\nUsed RAM: 3,145,728K\n', ''),
+                subprocess.CompletedProcess('dumpsys', 0, 'Total RAM: 4,194,304K\nFree RAM: 2,097,152K\nUsed RAM: 2,097,152K\n', ''),
             ]
-            with mock.patch.object(reiya.time, 'time', side_effect=[100.0, 103.0, 106.0]), \
-                 mock.patch.object(reiya, '_read_proc_file', side_effect=samples) as proc_read:
-                self.assertEqual(reiya.get_ram_usage(), (3.0, 4.0))
+            with mock.patch.object(reiya, 'run_cmd', side_effect=samples) as run_cmd, \
+                 mock.patch.object(reiya, '_read_proc_file') as proc_read:
                 self.assertEqual(reiya.get_ram_usage(), (3.0, 4.0))
                 self.assertEqual(reiya.get_ram_usage(), (2.0, 4.0))
-            self.assertEqual(proc_read.call_count, 2)
+            self.assertEqual(run_cmd.call_count, 2)
+            proc_read.assert_not_called()
         finally:
-            reiya.config = old_config
             reiya._last_ram_usage = old_usage
-            reiya._last_ram_check_time = old_check
 
     def test_atomic_config_and_backup_recovery(self):
         old_path, old_config = reiya.CONFIG_FILE, reiya.config

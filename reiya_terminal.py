@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.92-REI-REJOIN"
-BUILD_TIME = "2026-09-20 18:06:57 UTC"
+BUILD_VERSION = "v6.8.93-REI-REJOIN"
+BUILD_TIME = "2026-09-20 18:11:53 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -68,7 +68,6 @@ DEFAULT_CONFIG = {
     'check_interval': 10,
     'activity_check_interval': 30,
     'dashboard_refresh_interval': 2,
-    'system_ram_refresh_interval': 5,
     'app_ram_refresh_interval': 30,
     'launch_wait': 15,
     'rejoin_cooldown': 10,
@@ -99,7 +98,6 @@ _CONFIG_RANGES = {
     'check_interval': (1.0, 300.0),
     'activity_check_interval': (5.0, 600.0),
     'dashboard_refresh_interval': (0.5, 60.0),
-    'system_ram_refresh_interval': (2.0, 3600.0),
     'app_ram_refresh_interval': (10.0, 3600.0),
     'launch_wait': (0.0, 300.0),
     'offline_wait': (0.0, 300.0),
@@ -145,6 +143,7 @@ def validate_config(values):
         clean['window_mode'] = 'left_stack'
     clean.pop('rejoin_interval', None)  # retired legacy field
     clean.pop('ram_refresh_interval', None)  # retired 30-second system RAM cache
+    clean.pop('system_ram_refresh_interval', None)  # live dumpsys sampling has no cache
     return clean
 
 def load_config():
@@ -844,43 +843,18 @@ def get_cpu_usage():
         return _last_cpu_pct
 
 _last_ram_usage = (0.0, 0.0)
-_last_ram_check_time = 0.0
 
 def get_ram_usage():
     """
     Retrieves live system RAM usage (used_gb, total_gb).
-    Cached so RAM sampling cannot repeatedly compete with Roblox rendering.
-    The lightweight /proc/meminfo source is preferred; dumpsys is fallback-only.
+    Prioritizes 'dumpsys meminfo' for dynamic accuracy on cloudphones (VSPhone / VMOS / VPhone)
+    where containerized /proc/meminfo and 'free' report static stub memory.
     """
-    global _last_ram_usage, _last_ram_check_time
-    now = time.time()
-    # System RAM is a live dashboard metric. The old hidden 30-second cache made
-    # the value appear frozen; refresh every five seconds by default. Direct
-    # /proc reads are cheap, while _read_proc_file still rate-limits su fallback.
-    refresh_interval = max(2.0, float(config.get('system_ram_refresh_interval', 5)))
-    if _last_ram_usage != (0.0, 0.0) and (now - _last_ram_check_time) < refresh_interval:
-        return _last_ram_usage
-
-    _last_ram_check_time = now
+    global _last_ram_usage
     try:
-        # Layer 1: /proc/meminfo avoids a heavyweight Android service dump.
-        content = _read_proc_file('/proc/meminfo') or ''
-        if content:
-            meminfo = {}
-            for line in content.split('\n'):
-                parts = line.split()
-                if len(parts) >= 2 and parts[1].isdigit():
-                    meminfo[parts[0].rstrip(':')] = int(parts[1])
-            total_kb = meminfo.get('MemTotal', 0)
-            if total_kb > 0:
-                avail_kb = meminfo.get('MemAvailable', 0) or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
-                used_kb = max(0, total_kb - avail_kb)
-                _last_ram_usage = (round(used_kb / 1024 / 1024, 2), round(total_kb / 1024 / 1024, 2))
-                return _last_ram_usage
-
-        # Layer 2: dumpsys fallback for devices that hide /proc/meminfo.
+        # Layer 1: dumpsys meminfo (dynamic live stats on Android / Cloudphones)
         for dump_cmd in ["su -c 'dumpsys meminfo'", 'dumpsys meminfo']:
-            res = run_cmd(dump_cmd, timeout=2)
+            res = run_cmd(dump_cmd, timeout=3)
             if res.returncode == 0 and res.stdout.strip():
                 tot_kb, free_kb, used_kb = 0, 0, 0
                 for line in res.stdout.split('\n'):
@@ -905,6 +879,23 @@ def get_ram_usage():
                         _last_ram_usage = (u_gb, t_gb)
                         return _last_ram_usage
 
+        # Layer 2: /proc/meminfo fallback
+        content = _read_proc_file('/proc/meminfo') or ''
+        if content:
+            meminfo = {}
+            for line in content.split('\n'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(':')] = int(parts[1])
+            total_kb = meminfo.get('MemTotal', 0)
+            if total_kb > 0:
+                avail_kb = meminfo.get('MemAvailable', 0) or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
+                used_kb = max(0, total_kb - avail_kb)
+                u_gb = round(used_kb / 1024 / 1024, 2)
+                t_gb = round(total_kb / 1024 / 1024, 2)
+                if u_gb > 0 and t_gb > 0:
+                    _last_ram_usage = (u_gb, t_gb)
+                    return _last_ram_usage
     except Exception:
         pass
     return _last_ram_usage
