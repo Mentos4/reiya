@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.90-REI-REJOIN"
-BUILD_TIME = "2026-09-17 17:59:09 UTC"
+BUILD_VERSION = "v6.8.91-REI-REJOIN"
+BUILD_TIME = "2026-09-20 17:58:43 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -67,7 +67,7 @@ DEFAULT_CONFIG = {
     'check_interval': 10,
     'activity_check_interval': 30,
     'dashboard_refresh_interval': 2,
-    'ram_refresh_interval': 30,
+    'system_ram_refresh_interval': 5,
     'app_ram_refresh_interval': 30,
     'launch_wait': 15,
     'rejoin_cooldown': 10,
@@ -98,7 +98,7 @@ _CONFIG_RANGES = {
     'check_interval': (1.0, 300.0),
     'activity_check_interval': (5.0, 600.0),
     'dashboard_refresh_interval': (0.5, 60.0),
-    'ram_refresh_interval': (10.0, 3600.0),
+    'system_ram_refresh_interval': (2.0, 3600.0),
     'app_ram_refresh_interval': (10.0, 3600.0),
     'launch_wait': (0.0, 300.0),
     'offline_wait': (0.0, 300.0),
@@ -143,6 +143,7 @@ def validate_config(values):
     if clean.get('window_mode') not in ('left_stack', 'grid'):
         clean['window_mode'] = 'left_stack'
     clean.pop('rejoin_interval', None)  # retired legacy field
+    clean.pop('ram_refresh_interval', None)  # retired 30-second system RAM cache
     return clean
 
 def load_config():
@@ -852,7 +853,10 @@ def get_ram_usage():
     """
     global _last_ram_usage, _last_ram_check_time
     now = time.time()
-    refresh_interval = max(10.0, float(config.get('ram_refresh_interval', 30)))
+    # System RAM is a live dashboard metric. The old hidden 30-second cache made
+    # the value appear frozen; refresh every five seconds by default. Direct
+    # /proc reads are cheap, while _read_proc_file still rate-limits su fallback.
+    refresh_interval = max(2.0, float(config.get('system_ram_refresh_interval', 5)))
     if _last_ram_usage != (0.0, 0.0) and (now - _last_ram_check_time) < refresh_interval:
         return _last_ram_usage
 
