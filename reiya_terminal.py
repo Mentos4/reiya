@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.94-REI-REJOIN"
-BUILD_TIME = "2026-09-20 18:37:37 UTC"
+BUILD_VERSION = "v6.8.95-REI-REJOIN"
+BUILD_TIME = "2026-09-20 18:46:08 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -441,9 +441,11 @@ def get_screen_size():
     """Get screen resolution width and height via wm size."""
     try:
         res = run_cmd('wm size', timeout=3)
-        match = re.search(r'(\d+)x(\d+)', res.stdout)
-        if match:
-            w, h = int(match.group(1)), int(match.group(2))
+        # `wm size` prints physical first and active override second. Cloud
+        # phones commonly use an override, so the last size is the live one.
+        matches = re.findall(r'(\d+)x(\d+)', res.stdout or '')
+        if matches:
+            w, h = (int(value) for value in matches[-1])
             return (max(w, h), min(w, h))  # Always return landscape orientation (w > h)
     except Exception:
         pass
@@ -505,8 +507,8 @@ def _find_package_task_id(content, package):
                 return current_task
     return None
 
-def apply_window_bounds(package, bounds, attempts=6, retry_delay=0.75):
-    """Resize a freeform Android task, retrying while a newly launched task appears."""
+def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
+    """Force and repeatedly reapply freeform bounds while an OEM launch settles."""
     if not re.fullmatch(r'[A-Za-z0-9._]+', str(package)) or not bounds or len(bounds) != 4:
         return False
     try:
@@ -518,6 +520,7 @@ def apply_window_bounds(package, bounds, attempts=6, retry_delay=0.75):
 
     rectangle = f'{left} {top} {right} {bottom}'
     attempts = max(1, int(attempts))
+    resize_succeeded = False
     for attempt in range(attempts):
         task_id = None
         for dump_command in (
@@ -530,17 +533,32 @@ def apply_window_bounds(package, bounds, attempts=6, retry_delay=0.75):
                 break
 
         if task_id:
+            # Some clone managers mark their tasks unresizeable or restore the
+            # saved freeform size during launch. Override that state first.
             for command in (
-                f"su -c 'am task resize {task_id} \"{rectangle}\"'",
-                f"am task resize {task_id} '{rectangle}'",
+                f"su -c 'am task resizeable {task_id} 2'",
+                f'am task resizeable {task_id} 2',
             ):
                 result = run_cmd(command, timeout=5)
                 combined = (result.stdout or '') + (result.stderr or '')
                 if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
-                    return True
+                    break
+
+            # Android's ActivityManagerShellCommand reads these as four
+            # separate integer arguments; quoting the whole rectangle makes
+            # the command invalid on AOSP and compatible cloud-phone builds.
+            for command in (
+                f"su -c 'am task resize {task_id} {rectangle}'",
+                f'am task resize {task_id} {rectangle}',
+            ):
+                result = run_cmd(command, timeout=5)
+                combined = (result.stdout or '') + (result.stderr or '')
+                if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
+                    resize_succeeded = True
+                    break
         if attempt + 1 < attempts:
             time.sleep(max(0.0, float(retry_delay)))
-    return False
+    return resize_succeeded
 
 def launch_game(package, game_id, bounds=None, freeform=True):
     """Launch Roblox game directly into place ID for targeted clone package."""
@@ -585,10 +603,11 @@ def launch_game(package, game_id, bounds=None, freeform=True):
 
     # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
     # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
+    freeform_option = ' --windowingMode 5' if freeform and bounds else ''
     intents = [
-        f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start{freeform_option} -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start{freeform_option} -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start{freeform_option} -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
         f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
         f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
         f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",

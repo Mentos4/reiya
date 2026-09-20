@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.94-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.95-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -77,17 +77,34 @@ class EnhancementTests(unittest.TestCase):
         self.assertEqual(reiya.calculate_window_bounds(2, 4, 1000, 800, 'left_stack'), (500, 156, 750, 312))
         self.assertEqual(reiya.calculate_window_bounds(3, 4, 1000, 800, 'grid'), (500, 400, 1000, 800))
 
-    def test_window_apply_retries_until_new_task_exists(self):
-        missing = subprocess.CompletedProcess('dump', 0, 'no matching task', '')
-        found = subprocess.CompletedProcess(
-            'dump', 0, 'Task{abc #42 type=standard}\n  ActivityRecord com.roblox.client/.Activity', ''
+    def test_screen_size_prefers_active_override(self):
+        output = subprocess.CompletedProcess(
+            'wm size', 0, 'Physical size: 1080x1920\nOverride size: 1844x920\n', ''
         )
-        resized = subprocess.CompletedProcess('resize', 0, '', '')
-        with mock.patch.object(reiya, 'run_cmd', side_effect=[missing, missing, found, resized]) as run_cmd, \
+        with mock.patch.object(reiya, 'run_cmd', return_value=output):
+            self.assertEqual(reiya.get_screen_size(), (1844, 920))
+
+    def test_window_apply_retries_until_new_task_exists(self):
+        commands = []
+        def command_result(command, timeout=None):
+            commands.append(command)
+            if 'dumpsys activity activities' in command and commands.count(command) == 1:
+                return subprocess.CompletedProcess(command, 0, 'no matching task', '')
+            if 'dumpsys activity recents' in command and commands.count(command) == 1:
+                return subprocess.CompletedProcess(command, 0, 'no matching task', '')
+            if 'dumpsys activity' in command:
+                return subprocess.CompletedProcess(
+                    command, 0, 'Task{abc #42 type=standard}\n  ActivityRecord com.roblox.client/.Activity', ''
+                )
+            return subprocess.CompletedProcess(command, 0, '', '')
+
+        with mock.patch.object(reiya, 'run_cmd', side_effect=command_result), \
              mock.patch.object(reiya.time, 'sleep') as sleep:
             self.assertTrue(reiya.apply_window_bounds('com.roblox.client', (500, 0, 750, 156), attempts=2))
-        sleep.assert_called_once_with(0.75)
-        self.assertIn('am task resize 42 "500 0 750 156"', run_cmd.call_args.args[0])
+        sleep.assert_called_once_with(1.0)
+        self.assertTrue(any('am task resizeable 42 2' in command for command in commands))
+        resize_commands = [command for command in commands if 'am task resize 42 ' in command]
+        self.assertEqual(resize_commands, ["su -c 'am task resize 42 500 0 750 156'"])
 
     def test_activity_tri_state(self):
         home = 'TASK x com.roblox.client\n  ReactRootView homeactivity'
@@ -103,6 +120,7 @@ class EnhancementTests(unittest.TestCase):
              mock.patch.object(reiya, 'apply_window_bounds', return_value=True) as resize:
             self.assertTrue(reiya.launch_game('com.roblox.client', '12345', (0, 0, 100, 100), True))
             resize.assert_called_once_with('com.roblox.client', (0, 0, 100, 100))
+            self.assertIn('--windowingMode 5', run_cmd.call_args_list[0].args[0])
             self.assertFalse(reiya.launch_game('bad;package', '12345'))
             self.assertFalse(reiya.launch_game('com.roblox.client', '123;rm'))
             self.assertEqual(run_cmd.call_count, 1)
