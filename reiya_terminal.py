@@ -13,7 +13,7 @@ Single standalone CLI script combining all core functions of REI REJOIN Roblox A
 - Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
-- Right-Stack Window Tiling (Tiles Roblox app windows on right half of screen while Termux stays on left)
+- Right-Side Window Tiling (Tiles landscape Roblox windows beside Termux)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
 - Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear, Auto-Sort)
@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.93-REI-REJOIN"
-BUILD_TIME = "2026-09-20 18:11:53 UTC"
+BUILD_VERSION = "v6.8.94-REI-REJOIN"
+BUILD_TIME = "2026-09-20 18:37:37 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
-    'window_mode': 'left_stack',  # 'left_stack' (Roblox windows on right 50%) or 'grid'
+    'window_mode': 'left_stack',  # legacy name: compact landscape tiles on right 50%, or 'grid'
     'home_rejoin_enabled': True,
     'home_confirmation_count': 2,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
@@ -453,6 +453,8 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
     """
     Calculate (left, top, right, bottom) bounds for window tiling.
     Places Roblox windows on the RIGHT 50% of the landscape screen so Termux stays on Left 50%.
+    The default layout uses compact landscape tiles, matching the visible side-by-side
+    cloud-phone layout instead of stretching each Roblox task into a tall vertical strip.
     """
     if not screen_w or not screen_h:
         screen_w, screen_h = get_screen_size()
@@ -471,15 +473,40 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
         bottom = (row + 1) * screen_h // rows
     else:
         half_w = int(screen_w * 0.5)
-        cell_h = int(screen_h / total_apps)
-        left = half_w
-        top = index * cell_h
-        right = screen_w
-        bottom = (index + 1) * cell_h
+        available_w = screen_w - half_w
+        columns = min(2, total_apps)
+        rows = max(1, math.ceil(total_apps / columns))
+        column = index % columns
+        row = index // columns
+        left = half_w + column * available_w // columns
+        right = half_w + (column + 1) * available_w // columns
+        cell_w = right - left
+        # Noka/Roblox freeform windows are landscape. Keep roughly a 16:10
+        # client area while also fitting every row on screen.
+        cell_h = min(max(1, screen_h // rows), max(1, int(round(cell_w / 1.6))))
+        top = row * cell_h
+        bottom = min(screen_h, top + cell_h)
     return left, top, right, bottom
 
-def apply_window_bounds(package, bounds):
-    """Best-effort freeform resize for Android builds that expose `am task resize`."""
+def _find_package_task_id(content, package):
+    """Find a package task even when dumpsys prints the task id on a parent line."""
+    current_task = None
+    for line in (content or '').splitlines():
+        task_match = None
+        for pattern in (r'Task\{[^#]*#(\d+)', r'taskId=(\d+)', r'\bt(\d+)\b'):
+            task_match = re.search(pattern, line)
+            if task_match:
+                current_task = task_match.group(1)
+                break
+        if package in line:
+            if task_match:
+                return task_match.group(1)
+            if current_task:
+                return current_task
+    return None
+
+def apply_window_bounds(package, bounds, attempts=6, retry_delay=0.75):
+    """Resize a freeform Android task, retrying while a newly launched task appears."""
     if not re.fullmatch(r'[A-Za-z0-9._]+', str(package)) or not bounds or len(bounds) != 4:
         return False
     try:
@@ -489,31 +516,30 @@ def apply_window_bounds(package, bounds):
     if right <= left or bottom <= top:
         return False
 
-    dump = run_cmd("su -c 'dumpsys activity activities'", timeout=4)
-    content = dump.stdout or ''
-    task_id = None
-    for line in content.splitlines():
-        if package not in line:
-            continue
-        for pattern in (r'Task\{[^#]*#(\d+)', r'taskId=(\d+)', r'\bt(\d+)\b'):
-            match = re.search(pattern, line)
-            if match:
-                task_id = match.group(1)
-                break
-        if task_id:
-            break
-    if not task_id:
-        return False
-
     rectangle = f'{left} {top} {right} {bottom}'
-    for command in (
-        f"su -c 'am task resize {task_id} {rectangle}'",
-        f'am task resize {task_id} {rectangle}',
-    ):
-        result = run_cmd(command, timeout=5)
-        combined = (result.stdout or '') + (result.stderr or '')
-        if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
-            return True
+    attempts = max(1, int(attempts))
+    for attempt in range(attempts):
+        task_id = None
+        for dump_command in (
+            "su -c 'dumpsys activity activities'",
+            "su -c 'dumpsys activity recents'",
+        ):
+            dump = run_cmd(dump_command, timeout=4)
+            task_id = _find_package_task_id(dump.stdout, package)
+            if task_id:
+                break
+
+        if task_id:
+            for command in (
+                f"su -c 'am task resize {task_id} \"{rectangle}\"'",
+                f"am task resize {task_id} '{rectangle}'",
+            ):
+                result = run_cmd(command, timeout=5)
+                combined = (result.stdout or '') + (result.stderr or '')
+                if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
+                    return True
+        if attempt + 1 < attempts:
+            time.sleep(max(0.0, float(retry_delay)))
     return False
 
 def launch_game(package, game_id, bounds=None, freeform=True):
@@ -1954,7 +1980,7 @@ def interactive_menu():
             print(f"Current Layout Mode: {config.get('window_mode', 'left_stack')}")
             print(f"Current Dashboard Table Width: {config.get('dashboard_width', 40)} columns")
             print("\n1. Enable/Disable Auto-Sort")
-            print("2. Set Mode: Left Vertical Stack (Matching side-by-side layout)")
+            print("2. Set Mode: Right Landscape Tiles (Matching side-by-side layout)")
             print("3. Set Mode: Grid Layout (Even N x M grid across screen)")
             print("4. Set Dashboard Table Width (fix the live rejoin dashboard's layout)")
             lch = prompt("Select option: ").strip()
@@ -1963,7 +1989,7 @@ def interactive_menu():
                 print(f"[+] Auto-Sort set to: {config['auto_sort']}")
             elif lch == '2':
                 config['window_mode'] = 'left_stack'
-                print("[+] Window mode set to: Left Vertical Stack")
+                print("[+] Window mode set to: Right Landscape Tiles")
             elif lch == '3':
                 config['window_mode'] = 'grid'
                 print("[+] Window mode set to: Grid Layout")

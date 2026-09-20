@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.93-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.94-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -72,8 +72,22 @@ class EnhancementTests(unittest.TestCase):
             reiya.CONFIG_FILE, reiya.config = old_path, old_config
 
     def test_grid_and_stack_bounds(self):
-        self.assertEqual(reiya.calculate_window_bounds(0, 2, 1000, 800, 'left_stack'), (500, 0, 1000, 400))
+        self.assertEqual(reiya.calculate_window_bounds(0, 2, 1000, 800, 'left_stack'), (500, 0, 750, 156))
+        self.assertEqual(reiya.calculate_window_bounds(1, 2, 1000, 800, 'left_stack'), (750, 0, 1000, 156))
+        self.assertEqual(reiya.calculate_window_bounds(2, 4, 1000, 800, 'left_stack'), (500, 156, 750, 312))
         self.assertEqual(reiya.calculate_window_bounds(3, 4, 1000, 800, 'grid'), (500, 400, 1000, 800))
+
+    def test_window_apply_retries_until_new_task_exists(self):
+        missing = subprocess.CompletedProcess('dump', 0, 'no matching task', '')
+        found = subprocess.CompletedProcess(
+            'dump', 0, 'Task{abc #42 type=standard}\n  ActivityRecord com.roblox.client/.Activity', ''
+        )
+        resized = subprocess.CompletedProcess('resize', 0, '', '')
+        with mock.patch.object(reiya, 'run_cmd', side_effect=[missing, missing, found, resized]) as run_cmd, \
+             mock.patch.object(reiya.time, 'sleep') as sleep:
+            self.assertTrue(reiya.apply_window_bounds('com.roblox.client', (500, 0, 750, 156), attempts=2))
+        sleep.assert_called_once_with(0.75)
+        self.assertIn('am task resize 42 "500 0 750 156"', run_cmd.call_args.args[0])
 
     def test_activity_tri_state(self):
         home = 'TASK x com.roblox.client\n  ReactRootView homeactivity'
