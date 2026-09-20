@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.91-REI-REJOIN"
-BUILD_TIME = "2026-09-20 17:58:43 UTC"
+BUILD_VERSION = "v6.8.92-REI-REJOIN"
+BUILD_TIME = "2026-09-20 18:06:57 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -56,6 +56,7 @@ PRESET_GAMES = [
     ('Steal an Egg',          '107778070777162'),
     ('Anime Astral Simulator','102072869879193'),
     ('Anime Dice',             '113290951185459'),
+    ('Ride a Pet',             '124216119978534'),
 ]
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'config.json')
