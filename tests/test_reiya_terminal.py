@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.96-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.97-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -37,6 +37,9 @@ class EnhancementTests(unittest.TestCase):
         self.assertNotIn('rejoin_interval', clean)
         self.assertNotIn('ram_refresh_interval', clean)
         self.assertNotIn('system_ram_refresh_interval', clean)
+        # the retired v6.8.96 90s Unknown wait is migrated to an immediate rejoin
+        self.assertEqual(reiya.validate_config({'unknown_stall_seconds': 90})['unknown_stall_seconds'], 0)
+        self.assertEqual(reiya.validate_config({'unknown_stall_seconds': 30})['unknown_stall_seconds'], 30)
 
     def test_system_ram_uses_live_cloudphone_dumpsys_without_cache(self):
         old_usage = reiya._last_ram_usage
