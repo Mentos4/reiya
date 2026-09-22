@@ -38,7 +38,7 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.95-REI-REJOIN"
+BUILD_VERSION = "v6.8.96-REI-REJOIN"
 BUILD_TIME = "2026-09-20 18:46:08 UTC"
 
 # ==============================================================================
@@ -88,6 +88,9 @@ DEFAULT_CONFIG = {
     'window_mode': 'left_stack',  # legacy name: compact landscape tiles on right 50%, or 'grid'
     'home_rejoin_enabled': True,
     'home_confirmation_count': 2,
+    # How long a running package may stay in the 'Unknown' activity state before
+    # it is treated as stuck and force-stopped + relaunched. 0 disables recovery.
+    'unknown_stall_seconds': 90,
     'dashboard_width': 40,  # live dashboard table width in columns; user-tunable via Option 6.4
 }
 
@@ -107,6 +110,7 @@ _CONFIG_RANGES = {
     'dashboard_width': (30, 300),
     'retry_count': (1, 100),
     'home_confirmation_count': (1, 10),
+    'unknown_stall_seconds': (0.0, 3600.0),
 }
 
 def validate_config(values):
@@ -1569,6 +1573,7 @@ class TerminalRejoinLoop:
         auto_sort           = cfg.get('auto_sort', True)
         window_mode         = cfg.get('window_mode', 'left_stack')
         home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
+        unknown_stall       = float(cfg.get('unknown_stall_seconds', 90))
         LAUNCH_GRACE        = 45
 
         w, h = get_screen_size()
@@ -1576,11 +1581,15 @@ class TerminalRejoinLoop:
         retry_attempts = {pkg: 0 for pkg in packages}
         next_retry = {pkg: 0.0 for pkg in packages}
         home_hits = {pkg: 0 for pkg in packages}
+        # Timestamp of the first consecutive 'Unknown' activity reading per package.
+        # 0.0 means the package is not currently in an Unknown streak.
+        unknown_since = {pkg: 0.0 for pkg in packages}
 
         def launch_package(pkg, index, reason):
             gid = self._get_game_id(pkg, cfg)
             bounds = calculate_window_bounds(index, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.last_launch[pkg] = time.time()
+            unknown_since[pkg] = 0.0
             launched = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
             retry_attempts[pkg] += 1
             next_retry[pkg] = time.time() + max(offline_wait, rejoin_cooldown)
@@ -1631,6 +1640,7 @@ class TerminalRejoinLoop:
                     now = time.time()
                     if pkg not in running_packages:
                         home_hits[pkg] = 0
+                        unknown_since[pkg] = 0.0
                         if now < next_retry[pkg]:
                             self.set_status(
                                 pkg, 'Retry Wait', attempts=retry_attempts[pkg],
@@ -1667,8 +1677,10 @@ class TerminalRejoinLoop:
                     activity_state = get_app_activity_state(pkg, content=activity_dump)
                     if activity_state is True:
                         home_hits[pkg] = 0
+                        unknown_since[pkg] = 0.0
                         self.set_status(pkg, 'Ingame', attempts=0, last_result='Activity confirmed')
                     elif activity_state is False:
+                        unknown_since[pkg] = 0.0
                         home_hits[pkg] += 1
                         self.set_status(
                             pkg, 'Home Page', confirmations=home_hits[pkg],
@@ -1689,8 +1701,36 @@ class TerminalRejoinLoop:
                         retry_attempts[pkg] = 0
                         launch_package(pkg, i, 'Confirmed Home rejoin')
                     else:
+                        # 'Unknown' means the process is alive but dumpsys shows no
+                        # usable evidence — typically a backgrounded/frozen clone that
+                        # never made it into the game. Previously this state just sat
+                        # there forever and the app was never relaunched, so track how
+                        # long it lasts and recover once it exceeds the stall timeout.
                         home_hits[pkg] = 0
-                        self.set_status(pkg, 'Unknown', last_result='Activity evidence unavailable')
+                        if not unknown_since[pkg]:
+                            unknown_since[pkg] = now
+                        stalled_for = now - unknown_since[pkg]
+
+                        if not home_rejoin_enabled or unknown_stall <= 0:
+                            self.set_status(pkg, 'Unknown', last_result='Activity evidence unavailable')
+                            continue
+
+                        if stalled_for < unknown_stall:
+                            self.set_status(
+                                pkg, 'Unknown',
+                                last_result=f"No activity evidence {int(stalled_for)}s/{int(unknown_stall)}s",
+                            )
+                            continue
+
+                        self.log(f"[{pkg}] Stuck in Unknown for {int(stalled_for)}s; force stopping and rejoining")
+                        self.set_status(pkg, 'Rejoining')
+                        force_stop_app(pkg)
+                        if stop_event.wait(2):
+                            break
+                        unknown_since[pkg] = 0.0
+                        home_hits[pkg] = 0
+                        retry_attempts[pkg] = 0
+                        launch_package(pkg, i, 'Unknown stall rejoin')
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
@@ -1988,6 +2028,9 @@ def interactive_menu():
 
             confirm = prompt(f"Required Consecutive Home Detections [{config.get('home_confirmation_count', 2)}]: ").strip()
             if confirm.isdigit(): config['home_confirmation_count'] = int(confirm)
+
+            stall = prompt(f"Rejoin if stuck on Unknown status after seconds (0 = never) [{config.get('unknown_stall_seconds', 90)}]: ").strip()
+            if stall.isdigit(): config['unknown_stall_seconds'] = int(stall)
 
             save_config()
             print("\n[+] Timing & Home Screen settings updated.")
