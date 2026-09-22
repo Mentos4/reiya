@@ -1164,6 +1164,9 @@ class TerminalRejoinLoop:
             )
             self.webhook_thread.start()
 
+        for pkg in packages:
+            run_cmd(f"su -c 'am force-stop {pkg}'", timeout=5)
+
         self.thread = threading.Thread(
             target=self._loop,
             args=(list(packages), dict(cfg), self.stop_event),
