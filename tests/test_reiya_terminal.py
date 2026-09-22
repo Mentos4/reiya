@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.99-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.9.0-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -75,9 +75,9 @@ class EnhancementTests(unittest.TestCase):
             reiya.CONFIG_FILE, reiya.config = old_path, old_config
 
     def test_grid_and_stack_bounds(self):
-        self.assertEqual(reiya.calculate_window_bounds(0, 2, 1000, 800, 'left_stack'), (750, 0, 1000, 156))
-        self.assertEqual(reiya.calculate_window_bounds(1, 2, 1000, 800, 'left_stack'), (750, 156, 1000, 312))
-        self.assertEqual(reiya.calculate_window_bounds(2, 4, 1000, 800, 'left_stack'), (750, 312, 1000, 468))
+        self.assertEqual(reiya.calculate_window_bounds(0, 2, 1000, 800, 'left_stack'), (500, 0, 750, 156))
+        self.assertEqual(reiya.calculate_window_bounds(1, 2, 1000, 800, 'left_stack'), (750, 0, 1000, 156))
+        self.assertEqual(reiya.calculate_window_bounds(2, 4, 1000, 800, 'left_stack'), (750, 0, 875, 78))
         self.assertEqual(reiya.calculate_window_bounds(3, 4, 1000, 800, 'grid'), (500, 400, 1000, 800))
 
     def test_screen_size_prefers_active_override(self):

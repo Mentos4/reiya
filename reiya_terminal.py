@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.99-REI-REJOIN"
-BUILD_TIME = "2026-09-22 13:35:41 UTC"
+BUILD_VERSION = "v6.9.0-REI-REJOIN"
+BUILD_TIME = "2026-09-22 13:42:13 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'auto_sort': True,
-    'window_mode': 'left_stack',  # legacy name: compact landscape tiles on right 50%, or 'grid'
+    'window_mode': 'left_stack',  # legacy name: uniform side-by-side row on right 50%, or 'grid'
     'home_rejoin_enabled': True,
     'home_confirmation_count': 2,
     # Grace period before a running package stuck on 'Unknown' is force-stopped and
@@ -462,8 +462,8 @@ def get_screen_size():
 def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
     """
     Calculate (left, top, right, bottom) bounds for window tiling.
-    Places compact Roblox windows in one ordered column at the far right,
-    leaving Termux visible across the remaining screen area.
+    Places uniformly sized Roblox windows side by side across the right half,
+    leaving Termux visible on the left half.
     """
     if not screen_w or not screen_h:
         screen_w, screen_h = get_screen_size()
@@ -481,14 +481,16 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
         right = (column + 1) * screen_w // columns
         bottom = (row + 1) * screen_h // rows
     else:
-        # The reference Noka layout is a compact vertical stack anchored to
-        # the far-right quarter of the landscape display.
-        cell_w = max(1, screen_w // 4)
-        cell_h = min(max(1, screen_h // total_apps), max(1, int(round(cell_w / 1.6))))
-        left = screen_w - cell_w
-        right = screen_w
-        top = index * cell_h
-        bottom = min(screen_h, top + cell_h)
+        # Keep Termux on the left. Every selected Noka clone receives one
+        # equal-width landscape tile in a single horizontal row on the right.
+        half_w = screen_w // 2
+        available_w = screen_w - half_w
+        left = half_w + index * available_w // total_apps
+        right = half_w + (index + 1) * available_w // total_apps
+        cell_w = right - left
+        cell_h = min(screen_h, max(1, int(round(cell_w / 1.6))))
+        top = 0
+        bottom = cell_h
     return left, top, right, bottom
 
 def _find_package_task_ids(content, package):
@@ -2117,7 +2119,7 @@ def interactive_menu():
             print(f"Current Layout Mode: {config.get('window_mode', 'left_stack')}")
             print(f"Current Dashboard Table Width: {config.get('dashboard_width', 40)} columns")
             print("\n1. Enable/Disable Auto-Sort")
-            print("2. Set Mode: Right Landscape Tiles (Matching side-by-side layout)")
+            print("2. Set Mode: Uniform Side-by-Side Row on Right")
             print("3. Set Mode: Grid Layout (Even N x M grid across screen)")
             print("4. Set Dashboard Table Width (fix the live rejoin dashboard's layout)")
             lch = prompt("Select option: ").strip()
@@ -2126,7 +2128,7 @@ def interactive_menu():
                 print(f"[+] Auto-Sort set to: {config['auto_sort']}")
             elif lch == '2':
                 config['window_mode'] = 'left_stack'
-                print("[+] Window mode set to: Right Landscape Tiles")
+                print("[+] Window mode set to: Uniform Side-by-Side Row on Right")
             elif lch == '3':
                 config['window_mode'] = 'grid'
                 print("[+] Window mode set to: Grid Layout")
