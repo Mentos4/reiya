@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.97-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.8.98-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -108,6 +108,30 @@ class EnhancementTests(unittest.TestCase):
         self.assertTrue(any('am task resizeable 42 2' in command for command in commands))
         resize_commands = [command for command in commands if 'am task resize 42 ' in command]
         self.assertEqual(resize_commands, ["su -c 'am task resize 42 500 0 750 156'"])
+
+    def test_noka_task_and_freeform_frame_parsing(self):
+        dump = '''
+* Task{abc #41 type=standard A=unrelated.app}
+* Task{def #42 type=standard A=com.noka.clone visible=true bounds=[83,325][813,945]}
+  ActivityRecord{xyz u0 com.noka.clone/.MainActivity t42}
+'''
+        self.assertEqual(reiya._find_package_task_ids(dump, 'com.noka.clone'), ['42'])
+        self.assertEqual(
+            reiya._extract_freeform_bounds(dump, 'com.noka.clone', '42'),
+            (83, 325, 813, 945),
+        )
+
+    def test_noka_gesture_fallback_uses_caption_and_corner(self):
+        ok = subprocess.CompletedProcess('cmd', 0, '', '')
+        with mock.patch.object(reiya, 'run_cmd', return_value=ok) as run_cmd, \
+             mock.patch.object(reiya.time, 'sleep'):
+            self.assertTrue(reiya._drag_freeform_window(
+                'com.noka.clone', '42', (83, 325, 813, 945), (750, 0, 1000, 156)
+            ))
+        commands = [call.args[0] for call in run_cmd.call_args_list]
+        self.assertEqual(commands[0], "su -c 'am task focus 42'")
+        self.assertIn("input touchscreen swipe 810 942 330 478 450", commands[1])
+        self.assertIn("input touchscreen swipe 208 367 875 42 350", commands[2])
 
     def test_activity_tri_state(self):
         home = 'TASK x com.roblox.client\n  ReactRootView homeactivity'

@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.97-REI-REJOIN"
-BUILD_TIME = "2026-09-20 18:46:08 UTC"
+BUILD_VERSION = "v6.8.98-REI-REJOIN"
+BUILD_TIME = "2026-09-22 13:18:10 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -498,22 +498,76 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
         bottom = min(screen_h, top + cell_h)
     return left, top, right, bottom
 
-def _find_package_task_id(content, package):
-    """Find a package task even when dumpsys prints the task id on a parent line."""
+def _find_package_task_ids(content, package):
+    """Find every task owned by a package, including Noka clone wrapper tasks."""
+    found = []
     current_task = None
     for line in (content or '').splitlines():
-        task_match = None
-        for pattern in (r'Task\{[^#]*#(\d+)', r'taskId=(\d+)', r'\bt(\d+)\b'):
-            task_match = re.search(pattern, line)
-            if task_match:
-                current_task = task_match.group(1)
-                break
+        header_match = re.search(r'(?:Task\{[^#]*#|rootTaskId=|taskId=)(\d+)', line)
+        if header_match:
+            current_task = header_match.group(1)
         if package in line:
-            if task_match:
-                return task_match.group(1)
-            if current_task:
-                return current_task
+            line_ids = re.findall(r'(?:Task\{[^#]*#|rootTaskId=|taskId=|\bt)(\d+)', line)
+            for task_id in line_ids + ([current_task] if current_task else []):
+                if task_id and task_id not in found:
+                    found.append(task_id)
+    return found
+
+def _find_package_task_id(content, package):
+    """Backward-compatible single-task lookup."""
+    task_ids = _find_package_task_ids(content, package)
+    return task_ids[0] if task_ids else None
+
+def _extract_freeform_bounds(content, package=None, task_id=None):
+    """Read the visible task/window frame from common Android/Noka dumpsys formats."""
+    patterns = (
+        r'(?:bounds|frame|mFrame)=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]',
+        r'(?:bounds|mBounds|frame|mFrame)=Rect\((-?\d+),\s*(-?\d+)\s*-\s*(-?\d+),\s*(-?\d+)\)',
+    )
+    blocks = re.split(r'(?=^\s*(?:\*\s*)?(?:Task\{|Window #|Window\{))', content or '', flags=re.MULTILINE)
+    for block in blocks:
+        if package and package not in block:
+            continue
+        if task_id and not re.search(rf'(?:#|taskId=|\bt){re.escape(str(task_id))}\b', block):
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, block)
+            if match:
+                return tuple(int(value) for value in match.groups())
     return None
+
+def _bounds_close(actual, expected, tolerance=12):
+    return bool(actual) and all(abs(a - b) <= tolerance for a, b in zip(actual, expected))
+
+def _drag_freeform_window(package, task_id, current_bounds, target_bounds):
+    """Move and resize a Noka freeform window using its visible caption and corner."""
+    if not current_bounds:
+        return False
+    cur_left, cur_top, cur_right, cur_bottom = current_bounds
+    dst_left, dst_top, dst_right, dst_bottom = target_bounds
+    cur_width, cur_height = cur_right - cur_left, cur_bottom - cur_top
+    dst_width, dst_height = dst_right - dst_left, dst_bottom - dst_top
+    if cur_width <= 20 or cur_height <= 20:
+        return False
+
+    # Noka's caption is part of the freeform decoration. Shrink/grow at the
+    # current position first so a large window cannot be clamped at the screen
+    # edge, then move the resized window by its empty caption area.
+    title_y = cur_top + min(42, max(18, cur_height // 12))
+    start_x = cur_left + dst_width // 2
+    end_x = dst_left + dst_width // 2
+    end_y = dst_top + (title_y - cur_top)
+    commands = [
+        f"su -c 'am task focus {task_id}'",
+        f"su -c 'input touchscreen swipe {cur_right - 3} {cur_bottom - 3} {cur_left + dst_width - 3} {cur_top + dst_height - 3} 450'",
+        f"su -c 'input touchscreen swipe {start_x} {title_y} {end_x} {end_y} 350'",
+    ]
+    accepted = False
+    for command in commands:
+        result = run_cmd(command, timeout=5)
+        accepted = accepted or result.returncode == 0
+        time.sleep(0.15)
+    return accepted
 
 def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
     """Force and repeatedly reapply freeform bounds while an OEM launch settles."""
@@ -529,18 +583,20 @@ def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
     rectangle = f'{left} {top} {right} {bottom}'
     attempts = max(1, int(attempts))
     resize_succeeded = False
+    last_dump = ''
+    task_ids = []
     for attempt in range(attempts):
-        task_id = None
         for dump_command in (
             "su -c 'dumpsys activity activities'",
             "su -c 'dumpsys activity recents'",
         ):
             dump = run_cmd(dump_command, timeout=4)
-            task_id = _find_package_task_id(dump.stdout, package)
-            if task_id:
-                break
+            last_dump = dump.stdout or ''
+            for task_id in _find_package_task_ids(last_dump, package):
+                if task_id not in task_ids:
+                    task_ids.append(task_id)
 
-        if task_id:
+        for task_id in task_ids:
             # Some clone managers mark their tasks unresizeable or restore the
             # saved freeform size during launch. Override that state first.
             for command in (
@@ -564,8 +620,25 @@ def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
                 if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
                     resize_succeeded = True
                     break
+            verify = run_cmd("su -c 'dumpsys activity activities'", timeout=4)
+            last_dump = verify.stdout or last_dump
+            if _bounds_close(_extract_freeform_bounds(last_dump, package, task_id), (left, top, right, bottom)):
+                return True
         if attempt + 1 < attempts:
             time.sleep(max(0.0, float(retry_delay)))
+
+    # Noka's clone manager can restore its saved freeform resolution after
+    # ActivityManager accepts a resize. Fall back to the same caption/corner
+    # gestures a user performs, based on the currently visible window frame.
+    window_dump = run_cmd("su -c 'dumpsys window windows'", timeout=5)
+    current_bounds = _extract_freeform_bounds(window_dump.stdout, package)
+    if not current_bounds:
+        current_bounds = _extract_freeform_bounds(last_dump, package, task_ids[0] if task_ids else None)
+    if task_ids and current_bounds:
+        gesture_succeeded = _drag_freeform_window(
+            package, task_ids[0], current_bounds, (left, top, right, bottom)
+        )
+        return gesture_succeeded or resize_succeeded
     return resize_succeeded
 
 def launch_game(package, game_id, bounds=None, freeform=True):
