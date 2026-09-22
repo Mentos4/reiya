@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.8.98-REI-REJOIN"
-BUILD_TIME = "2026-09-22 13:18:10 UTC"
+BUILD_VERSION = "v6.8.99-REI-REJOIN"
+BUILD_TIME = "2026-09-22 13:35:41 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -462,9 +462,8 @@ def get_screen_size():
 def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
     """
     Calculate (left, top, right, bottom) bounds for window tiling.
-    Places Roblox windows on the RIGHT 50% of the landscape screen so Termux stays on Left 50%.
-    The default layout uses compact landscape tiles, matching the visible side-by-side
-    cloud-phone layout instead of stretching each Roblox task into a tall vertical strip.
+    Places compact Roblox windows in one ordered column at the far right,
+    leaving Termux visible across the remaining screen area.
     """
     if not screen_w or not screen_h:
         screen_w, screen_h = get_screen_size()
@@ -482,19 +481,13 @@ def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mod
         right = (column + 1) * screen_w // columns
         bottom = (row + 1) * screen_h // rows
     else:
-        half_w = int(screen_w * 0.5)
-        available_w = screen_w - half_w
-        columns = min(2, total_apps)
-        rows = max(1, math.ceil(total_apps / columns))
-        column = index % columns
-        row = index // columns
-        left = half_w + column * available_w // columns
-        right = half_w + (column + 1) * available_w // columns
-        cell_w = right - left
-        # Noka/Roblox freeform windows are landscape. Keep roughly a 16:10
-        # client area while also fitting every row on screen.
-        cell_h = min(max(1, screen_h // rows), max(1, int(round(cell_w / 1.6))))
-        top = row * cell_h
+        # The reference Noka layout is a compact vertical stack anchored to
+        # the far-right quarter of the landscape display.
+        cell_w = max(1, screen_w // 4)
+        cell_h = min(max(1, screen_h // total_apps), max(1, int(round(cell_w / 1.6))))
+        left = screen_w - cell_w
+        right = screen_w
+        top = index * cell_h
         bottom = min(screen_h, top + cell_h)
     return left, top, right, bottom
 
@@ -630,10 +623,12 @@ def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
     # Noka's clone manager can restore its saved freeform resolution after
     # ActivityManager accepts a resize. Fall back to the same caption/corner
     # gestures a user performs, based on the currently visible window frame.
-    window_dump = run_cmd("su -c 'dumpsys window windows'", timeout=5)
-    current_bounds = _extract_freeform_bounds(window_dump.stdout, package)
+    # Activity task bounds include Noka's title decoration, so prefer them for
+    # the caption drag. Window frames can begin below the title bar.
+    current_bounds = _extract_freeform_bounds(last_dump, package, task_ids[0] if task_ids else None)
     if not current_bounds:
-        current_bounds = _extract_freeform_bounds(last_dump, package, task_ids[0] if task_ids else None)
+        window_dump = run_cmd("su -c 'dumpsys window windows'", timeout=5)
+        current_bounds = _extract_freeform_bounds(window_dump.stdout, package)
     if task_ids and current_bounds:
         gesture_succeeded = _drag_freeform_window(
             package, task_ids[0], current_bounds, (left, top, right, bottom)
