@@ -6,17 +6,15 @@ Single standalone CLI script combining all core functions of REI REJOIN Roblox A
 - ROBLOX & CLONE APPS ONLY (Displays exclusively Roblox apps & Roblox clones: com.roblox.client, free.nokaA, Delta, etc.)
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
-- Automatic Horizontal/Landscape Screen Rotation (Forces orientation lock 1 / landscape)
 - Exact Match REI REJOIN ASCII Dashboard UI (2-line REI REJOIN block logo + clean settings & live stats table)
 - Home Page Reset & Callback Rejoin (Force stops stuck Home Screen and retries launch intent until in-game)
 - Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
 - Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
 - Multi-Window dumpsys inspection (Accurately checks RobloxActivity across side-by-side windows even when Termux is focused)
-- Right-Side Window Tiling (Tiles landscape Roblox windows beside Termux)
 - System monitoring (CPU, RAM, Uptime, Screenshots)
 - Discord Webhook reporting with screenshot attachments
-- Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear, Auto-Sort)
+- Automatic Rejoin loop (Retry, Cooldown, Sequential, Cache clear)
 - Autoexecute script management
 """
 
@@ -25,7 +23,6 @@ import sys
 import time
 import json
 import re
-import math
 import argparse
 import subprocess
 import threading
@@ -84,8 +81,6 @@ DEFAULT_CONFIG = {
     'webhook_url': '',
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
-    'auto_sort': True,
-    'window_mode': 'left_stack',  # legacy name: uniform side-by-side row on right 50%, or 'grid'
     'home_rejoin_enabled': True,
     'home_confirmation_count': 2,
     # Grace period before a running package stuck on 'Unknown' is force-stopped and
@@ -143,8 +138,7 @@ def validate_config(values):
 
     if clean.get('game_method') not in ('all', 'each'):
         clean['game_method'] = 'all'
-    if clean.get('window_mode') not in ('left_stack', 'grid'):
-        clean['window_mode'] = 'left_stack'
+
     # v6.8.96 shipped a 90s wait as the Unknown-rejoin default; v6.8.97 rejoins
     # immediately instead, so drop the old default that got written to disk.
     if clean.get('unknown_stall_seconds') == 90:
@@ -219,20 +213,6 @@ def run_cmd(cmd, timeout=5):
     except Exception:
         return subprocess.CompletedProcess(cmd, -1, '', '')
 
-def set_landscape_orientation():
-    """Force Android screen orientation to Landscape (Horizontal mode)."""
-    cmds = [
-        "su -c 'settings put system accelerometer_rotation 0'",
-        "su -c 'settings put system user_rotation 1'",
-        "su -c 'wm set-user-rotation lock 1'",
-        "settings put system accelerometer_rotation 0",
-        "settings put system user_rotation 1"
-    ]
-    for c in cmds:
-        try:
-            run_cmd(c, timeout=2)
-        except Exception:
-            pass
 
 def clear_terminal_screen():
     """Clear terminal screen completely preventing duplicate overlapping headers."""
@@ -459,187 +439,7 @@ def get_screen_size():
         pass
     return 1280, 720
 
-def calculate_window_bounds(index, total_apps, screen_w=None, screen_h=None, mode='left_stack'):
-    """
-    Calculate (left, top, right, bottom) bounds for window tiling.
-    Places uniformly sized Roblox windows side by side across the right half,
-    leaving Termux visible on the left half.
-    """
-    if not screen_w or not screen_h:
-        screen_w, screen_h = get_screen_size()
-
-    total_apps = max(1, total_apps)
-
-    index = max(0, min(int(index), total_apps - 1))
-    if mode == 'grid':
-        columns = max(1, math.ceil(math.sqrt(total_apps)))
-        rows = max(1, math.ceil(total_apps / columns))
-        column = index % columns
-        row = index // columns
-        left = column * screen_w // columns
-        top = row * screen_h // rows
-        right = (column + 1) * screen_w // columns
-        bottom = (row + 1) * screen_h // rows
-    else:
-        # Keep Termux on the left. Every selected Noka clone receives one
-        # equal-width landscape tile in a single horizontal row on the right.
-        half_w = screen_w // 2
-        available_w = screen_w - half_w
-        left = half_w + index * available_w // total_apps
-        right = half_w + (index + 1) * available_w // total_apps
-        cell_w = right - left
-        cell_h = min(screen_h, max(1, int(round(cell_w / 1.6))))
-        top = 0
-        bottom = cell_h
-    return left, top, right, bottom
-
-def _find_package_task_ids(content, package):
-    """Find every task owned by a package, including Noka clone wrapper tasks."""
-    found = []
-    current_task = None
-    for line in (content or '').splitlines():
-        header_match = re.search(r'(?:Task\{[^#]*#|rootTaskId=|taskId=)(\d+)', line)
-        if header_match:
-            current_task = header_match.group(1)
-        if package in line:
-            line_ids = re.findall(r'(?:Task\{[^#]*#|rootTaskId=|taskId=|\bt)(\d+)', line)
-            for task_id in line_ids + ([current_task] if current_task else []):
-                if task_id and task_id not in found:
-                    found.append(task_id)
-    return found
-
-def _find_package_task_id(content, package):
-    """Backward-compatible single-task lookup."""
-    task_ids = _find_package_task_ids(content, package)
-    return task_ids[0] if task_ids else None
-
-def _extract_freeform_bounds(content, package=None, task_id=None):
-    """Read the visible task/window frame from common Android/Noka dumpsys formats."""
-    patterns = (
-        r'(?:bounds|frame|mFrame)=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]',
-        r'(?:bounds|mBounds|frame|mFrame)=Rect\((-?\d+),\s*(-?\d+)\s*-\s*(-?\d+),\s*(-?\d+)\)',
-    )
-    blocks = re.split(r'(?=^\s*(?:\*\s*)?(?:Task\{|Window #|Window\{))', content or '', flags=re.MULTILINE)
-    for block in blocks:
-        if package and package not in block:
-            continue
-        if task_id and not re.search(rf'(?:#|taskId=|\bt){re.escape(str(task_id))}\b', block):
-            continue
-        for pattern in patterns:
-            match = re.search(pattern, block)
-            if match:
-                return tuple(int(value) for value in match.groups())
-    return None
-
-def _bounds_close(actual, expected, tolerance=12):
-    return bool(actual) and all(abs(a - b) <= tolerance for a, b in zip(actual, expected))
-
-def _drag_freeform_window(package, task_id, current_bounds, target_bounds):
-    """Move and resize a Noka freeform window using its visible caption and corner."""
-    if not current_bounds:
-        return False
-    cur_left, cur_top, cur_right, cur_bottom = current_bounds
-    dst_left, dst_top, dst_right, dst_bottom = target_bounds
-    cur_width, cur_height = cur_right - cur_left, cur_bottom - cur_top
-    dst_width, dst_height = dst_right - dst_left, dst_bottom - dst_top
-    if cur_width <= 20 or cur_height <= 20:
-        return False
-
-    # Noka's caption is part of the freeform decoration. Shrink/grow at the
-    # current position first so a large window cannot be clamped at the screen
-    # edge, then move the resized window by its empty caption area.
-    title_y = cur_top + min(42, max(18, cur_height // 12))
-    start_x = cur_left + dst_width // 2
-    end_x = dst_left + dst_width // 2
-    end_y = dst_top + (title_y - cur_top)
-    commands = [
-        f"su -c 'am task focus {task_id}'",
-        f"su -c 'input touchscreen swipe {cur_right - 3} {cur_bottom - 3} {cur_left + dst_width - 3} {cur_top + dst_height - 3} 450'",
-        f"su -c 'input touchscreen swipe {start_x} {title_y} {end_x} {end_y} 350'",
-    ]
-    accepted = False
-    for command in commands:
-        result = run_cmd(command, timeout=5)
-        accepted = accepted or result.returncode == 0
-    return accepted
-
-def apply_window_bounds(package, bounds, attempts=1, retry_delay=0.0):
-    """Immediately force freeform bounds without delaying the next package launch."""
-    if not re.fullmatch(r'[A-Za-z0-9._]+', str(package)) or not bounds or len(bounds) != 4:
-        return False
-    try:
-        left, top, right, bottom = (max(0, int(value)) for value in bounds)
-    except (TypeError, ValueError):
-        return False
-    if right <= left or bottom <= top:
-        return False
-
-    rectangle = f'{left} {top} {right} {bottom}'
-    attempts = max(1, int(attempts))
-    resize_succeeded = False
-    last_dump = ''
-    task_ids = []
-    for attempt in range(attempts):
-        for dump_command in (
-            "su -c 'dumpsys activity activities'",
-            "su -c 'dumpsys activity recents'",
-        ):
-            dump = run_cmd(dump_command, timeout=4)
-            last_dump = dump.stdout or ''
-            for task_id in _find_package_task_ids(last_dump, package):
-                if task_id not in task_ids:
-                    task_ids.append(task_id)
-
-        for task_id in task_ids:
-            # Some clone managers mark their tasks unresizeable or restore the
-            # saved freeform size during launch. Override that state first.
-            for command in (
-                f"su -c 'am task resizeable {task_id} 2'",
-                f'am task resizeable {task_id} 2',
-            ):
-                result = run_cmd(command, timeout=5)
-                combined = (result.stdout or '') + (result.stderr or '')
-                if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
-                    break
-
-            # Android's ActivityManagerShellCommand reads these as four
-            # separate integer arguments; quoting the whole rectangle makes
-            # the command invalid on AOSP and compatible cloud-phone builds.
-            for command in (
-                f"su -c 'am task resize {task_id} {rectangle}'",
-                f'am task resize {task_id} {rectangle}',
-            ):
-                result = run_cmd(command, timeout=5)
-                combined = (result.stdout or '') + (result.stderr or '')
-                if result.returncode == 0 and 'Error' not in combined and 'Exception' not in combined:
-                    resize_succeeded = True
-                    break
-            verify = run_cmd("su -c 'dumpsys activity activities'", timeout=4)
-            last_dump = verify.stdout or last_dump
-            if _bounds_close(_extract_freeform_bounds(last_dump, package, task_id), (left, top, right, bottom)):
-                return True
-        if attempt + 1 < attempts:
-            delay = max(0.0, float(retry_delay))
-            if delay:
-                time.sleep(delay)
-
-    # Noka's clone manager can restore its saved freeform resolution after
-    # ActivityManager accepts a resize. Fall back to the same caption/corner
-    # gestures a user performs, based on the currently visible window frame.
-    # Activity task bounds include Noka's title decoration, so prefer them for
-    # the caption drag. Window frames can begin below the title bar.
-    current_bounds = _extract_freeform_bounds(last_dump, package, task_ids[0] if task_ids else None)
-    if not current_bounds:
-        window_dump = run_cmd("su -c 'dumpsys window windows'", timeout=5)
-        current_bounds = _extract_freeform_bounds(window_dump.stdout, package)
-    if task_ids and current_bounds:
-        gesture_succeeded = _drag_freeform_window(
-            package, task_ids[0], current_bounds, (left, top, right, bottom)
-        )
-        return gesture_succeeded or resize_succeeded
-    return resize_succeeded
-
-def launch_game(package, game_id, bounds=None, freeform=True):
+def launch_game(package, game_id):
     """Launch Roblox game directly into place ID for targeted clone package."""
     package = str(package).strip()
     if not re.fullmatch(r'[A-Za-z0-9._]+', package):
@@ -682,11 +482,10 @@ def launch_game(package, game_id, bounds=None, freeform=True):
 
     # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
     # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
-    freeform_option = ' --windowingMode 5' if freeform and bounds else ''
     intents = [
-        f"su -c 'am start{freeform_option} -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start{freeform_option} -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start{freeform_option} -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
+        f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
+        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
         f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
         f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
         f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
@@ -697,12 +496,6 @@ def launch_game(package, game_id, bounds=None, freeform=True):
         try:
             res = run_cmd(cmd, timeout=6)
             if res.returncode == 0 and "Error" not in res.stdout:
-                if freeform and bounds:
-                    # Task may not be in the activity manager yet right after am start;
-                    # retry with delays so the window actually lands where we want it.
-                    if not apply_window_bounds(package, bounds):
-                        time.sleep(2)
-                        apply_window_bounds(package, bounds, attempts=4, retry_delay=1.5)
                 return True
         except Exception:
             pass
@@ -842,23 +635,6 @@ def get_package_username(package, cfg, idx):
 
     return f"Acc_{idx:02d}"
 
-def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
-    """Auto-arrange/tile running Roblox app windows on screen."""
-    set_landscape_orientation()
-    if packages is None:
-        packages = config.get('selected_packages', [])
-    if not packages:
-        packages = get_roblox_packages()
-
-    w, h = get_screen_size()
-    total = len(packages)
-    print(f"[+] Auto-sorting {total} window(s) on screen ({w}x{h}, landscape)...")
-
-    for idx, pkg in enumerate(packages):
-        bounds = calculate_window_bounds(idx, total, w, h, mode=mode)
-        print(f"  -> Positioning {pkg} bounds: {bounds}")
-        pkg_gid = game_id or _resolve_package_game_id(pkg, config)
-        launch_game(pkg, pkg_gid, bounds=bounds, freeform=True)
 
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
@@ -1360,8 +1136,6 @@ class TerminalRejoinLoop:
             print("[!] Auto rejoin is already running.")
             return False
 
-        set_landscape_orientation()
-
         packages = cfg.get('selected_packages', [])
         if not packages:
             packages = get_roblox_packages()
@@ -1543,7 +1317,6 @@ class TerminalRejoinLoop:
                 COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
-                s_st = f"{GREEN}Enable{RESET}"  if cfg.get('auto_sort', True)       else f"{RED}Disable{RESET}"
                 h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
@@ -1560,7 +1333,6 @@ class TerminalRejoinLoop:
                 out(f"{BLUE}By seisen_{RESET}")
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
-                out(f"AUTO SORT: {s_st}")
                 out(f"HOME REJOIN: {h_st}")
                 out(f"CLEAR CACHE: {c_st}")
                 out(f"UPTIME: {uptime}")
@@ -1648,14 +1420,10 @@ class TerminalRejoinLoop:
         home_confirmations  = int(cfg.get('home_confirmation_count', 2))
         sequential          = cfg.get('sequential_join', False)
         auto_clear          = cfg.get('clear_cache', False)
-        auto_sort           = cfg.get('auto_sort', True)
-        window_mode         = cfg.get('window_mode', 'left_stack')
         home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
         unknown_stall       = float(cfg.get('unknown_stall_seconds', 0))
         LAUNCH_GRACE        = 45
 
-        w, h = get_screen_size()
-        total_apps = len(packages)
         retry_attempts = {pkg: 0 for pkg in packages}
         next_retry = {pkg: 0.0 for pkg in packages}
         home_hits = {pkg: 0 for pkg in packages}
@@ -1663,12 +1431,11 @@ class TerminalRejoinLoop:
         # 0.0 means the package is not currently in an Unknown streak.
         unknown_since = {pkg: 0.0 for pkg in packages}
 
-        def launch_package(pkg, index, reason):
+        def launch_package(pkg, _index, reason):
             gid = self._get_game_id(pkg, cfg)
-            bounds = calculate_window_bounds(index, total_apps, w, h, mode=window_mode) if auto_sort else None
             self.last_launch[pkg] = time.time()
             unknown_since[pkg] = 0.0
-            launched = launch_game(pkg, gid, bounds=bounds, freeform=auto_sort)
+            launched = launch_game(pkg, gid)
             retry_attempts[pkg] += 1
             next_retry[pkg] = time.time() + max(offline_wait, rejoin_cooldown)
             self.set_status(
@@ -1888,13 +1655,12 @@ def interactive_menu():
         print("3. Configure Game Setup (Place ID / Private Server Link)")
         print("4. Configure Webhook Settings")
         print("5. Configure Timing & Auto-rejoin Options")
-        print("6. Auto-Sort / Tile Windows Layout Configuration")
+        print("6. Dashboard Width Configuration")
         print("7. Autoexecute Script Manager")
         print("8. START Auto Rejoin Loop & Live Dashboard")
         print("9. STOP Auto Rejoin Loop")
-        print("10. Auto-Sort / Tile Open Windows NOW")
-        print("11. Test Launch Selected Package Now")
-        print("12. Send Manual Discord Webhook Test")
+        print("10. Test Launch Selected Package Now")
+        print("11. Send Manual Discord Webhook Test")
         print("0. Exit CLI")
         choice = prompt("\nSelect option: ").strip()
 
@@ -2118,36 +1884,17 @@ def interactive_menu():
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
-            print("\n--- [ AUTO-SORT / WINDOW TILING LAYOUT ] ---")
-            print(f"Current Auto-Sort Enabled: {config.get('auto_sort', True)}")
-            print(f"Current Layout Mode: {config.get('window_mode', 'left_stack')}")
+            print("\n--- [ DASHBOARD WIDTH ] ---")
             print(f"Current Dashboard Table Width: {config.get('dashboard_width', 40)} columns")
-            print("\n1. Enable/Disable Auto-Sort")
-            print("2. Set Mode: Uniform Side-by-Side Row on Right")
-            print("3. Set Mode: Grid Layout (Even N x M grid across screen)")
-            print("4. Set Dashboard Table Width (fix the live rejoin dashboard's layout)")
-            lch = prompt("Select option: ").strip()
-            if lch == '1':
-                config['auto_sort'] = not config.get('auto_sort', True)
-                print(f"[+] Auto-Sort set to: {config['auto_sort']}")
-            elif lch == '2':
-                config['window_mode'] = 'left_stack'
-                print("[+] Window mode set to: Uniform Side-by-Side Row on Right")
-            elif lch == '3':
-                config['window_mode'] = 'grid'
-                print("[+] Window mode set to: Grid Layout")
-            elif lch == '4':
-                print("\nThe live dashboard (Option 8) draws a fixed-width table. If your")
-                print("device rotates or the terminal is narrower than the table, it will")
-                print("wrap and look broken. Run 'stty size' in Termux (second number = columns)")
-                print("to find your real width, then set a table width a few columns")
-                print("narrower than that (e.g. columns=50 -> try 44).")
-                wch = prompt(f"Dashboard table width in columns [{config.get('dashboard_width', 40)}]: ").strip()
-                if wch.isdigit() and int(wch) >= 30:
-                    config['dashboard_width'] = int(wch)
-                    print(f"[+] Dashboard table width set to: {config['dashboard_width']} columns")
-                elif wch:
-                    print("[!] Ignored — enter a number of 30 or higher.")
+            print("\nThe live dashboard draws a fixed-width table. Run 'stty size' in Termux")
+            print("(second number = columns) to find your real width, then set a table width")
+            print("a few columns narrower (e.g. columns=50 -> try 44).")
+            wch = prompt(f"Dashboard table width in columns [{config.get('dashboard_width', 40)}]: ").strip()
+            if wch.isdigit() and int(wch) >= 30:
+                config['dashboard_width'] = int(wch)
+                print(f"[+] Dashboard table width set to: {config['dashboard_width']} columns")
+            elif wch:
+                print("[!] Ignored — enter a number of 30 or higher.")
             save_config()
             prompt("\nPress Enter to return to menu...")
 
@@ -2190,28 +1937,23 @@ def interactive_menu():
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '10':
-            auto_sort_windows(mode=config.get('window_mode', 'left_stack'))
-            prompt("\nPress Enter to return to menu...")
-
-        elif choice == '11':
             pkgs = config.get('selected_packages', [])
             if not pkgs:
                 pkgs = get_roblox_packages()
             if not pkgs:
                 print("[!] Please select packages first.")
             else:
-                for idx, p in enumerate(pkgs):
+                for p in pkgs:
                     gid = _resolve_package_game_id(p, config)
                     gname = _resolve_package_game_name(p, config)
                     if not gid:
                         print(f"[!] No Game ID configured for {p}. Skipping.")
                         continue
-                    bounds = calculate_window_bounds(idx, len(pkgs), mode=config.get('window_mode', 'left_stack'))
-                    print(f"Launching {p} into '{gname}' (ID: {gid}) at bounds {bounds}...")
-                    launch_game(p, gid, bounds=bounds, freeform=True)
+                    print(f"Launching {p} into '{gname}' (ID: {gid})...")
+                    launch_game(p, gid)
             prompt("\nPress Enter to return to menu...")
 
-        elif choice == '12':
+        elif choice == '11':
             wurl = config.get('webhook_url')
             if not wurl:
                 print("[!] No webhook URL set!")
@@ -2234,28 +1976,12 @@ def main():
     parser = argparse.ArgumentParser(description="REI REJOIN Roblox Account Manager - Global Termux Core Script")
     parser.add_argument("--daemon", action="store_true", help="Run auto-rejoin immediately in headless daemon mode")
     parser.add_argument("--scan", action="store_true", help="Scan installed Roblox packages and list them")
-    parser.add_argument("--sort", action="store_true", help="Auto-sort and tile open Roblox windows on screen")
-    parser.add_argument("--sort-all-now", action="store_true", help="Launch and immediately sort every detected Roblox/Noka package")
     args = parser.parse_args()
 
     load_config()
 
     if args.scan:
         show_status()
-        return
-
-    if args.sort:
-        auto_sort_windows(mode=config.get('window_mode', 'left_stack'))
-        return
-
-    if args.sort_all_now:
-        packages = config.get('selected_packages') or get_roblox_packages()
-        mode = config.get('window_mode', 'left_stack')
-        print(f"[+] Launching and sorting {len(packages)} package(s) (mode: {mode})...")
-        for i, pkg in enumerate(packages):
-            print(f"  [{i+1}/{len(packages)}] {pkg}")
-        auto_sort_windows(packages=packages, mode=mode)
-        print("[+] Done. Windows should be positioned now.")
         return
 
     if args.daemon:
