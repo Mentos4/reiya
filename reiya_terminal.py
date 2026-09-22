@@ -38,8 +38,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.0-REI-REJOIN"
-BUILD_TIME = "2026-09-22 13:42:13 UTC"
+BUILD_VERSION = "v6.9.1-REI-REJOIN"
+BUILD_TIME = "2026-09-22 13:49:07 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -561,11 +561,10 @@ def _drag_freeform_window(package, task_id, current_bounds, target_bounds):
     for command in commands:
         result = run_cmd(command, timeout=5)
         accepted = accepted or result.returncode == 0
-        time.sleep(0.15)
     return accepted
 
-def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
-    """Force and repeatedly reapply freeform bounds while an OEM launch settles."""
+def apply_window_bounds(package, bounds, attempts=1, retry_delay=0.0):
+    """Immediately force freeform bounds without delaying the next package launch."""
     if not re.fullmatch(r'[A-Za-z0-9._]+', str(package)) or not bounds or len(bounds) != 4:
         return False
     try:
@@ -620,7 +619,9 @@ def apply_window_bounds(package, bounds, attempts=6, retry_delay=1.0):
             if _bounds_close(_extract_freeform_bounds(last_dump, package, task_id), (left, top, right, bottom)):
                 return True
         if attempt + 1 < attempts:
-            time.sleep(max(0.0, float(retry_delay)))
+            delay = max(0.0, float(retry_delay))
+            if delay:
+                time.sleep(delay)
 
     # Noka's clone manager can restore its saved freeform resolution after
     # ActivityManager accepts a resize. Fall back to the same caption/corner
@@ -697,7 +698,11 @@ def launch_game(package, game_id, bounds=None, freeform=True):
             res = run_cmd(cmd, timeout=6)
             if res.returncode == 0 and "Error" not in res.stdout:
                 if freeform and bounds:
-                    apply_window_bounds(package, bounds)
+                    # Task may not be in the activity manager yet right after am start;
+                    # retry with delays so the window actually lands where we want it.
+                    if not apply_window_bounds(package, bounds):
+                        time.sleep(2)
+                        apply_window_bounds(package, bounds, attempts=4, retry_delay=1.5)
                 return True
         except Exception:
             pass
@@ -854,7 +859,6 @@ def auto_sort_windows(packages=None, game_id=None, mode='left_stack'):
         print(f"  -> Positioning {pkg} bounds: {bounds}")
         pkg_gid = game_id or _resolve_package_game_id(pkg, config)
         launch_game(pkg, pkg_gid, bounds=bounds, freeform=True)
-        time.sleep(1)
 
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
@@ -2231,6 +2235,7 @@ def main():
     parser.add_argument("--daemon", action="store_true", help="Run auto-rejoin immediately in headless daemon mode")
     parser.add_argument("--scan", action="store_true", help="Scan installed Roblox packages and list them")
     parser.add_argument("--sort", action="store_true", help="Auto-sort and tile open Roblox windows on screen")
+    parser.add_argument("--sort-all-now", action="store_true", help="Launch and immediately sort every detected Roblox/Noka package")
     args = parser.parse_args()
 
     load_config()
@@ -2241,6 +2246,16 @@ def main():
 
     if args.sort:
         auto_sort_windows(mode=config.get('window_mode', 'left_stack'))
+        return
+
+    if args.sort_all_now:
+        packages = config.get('selected_packages') or get_roblox_packages()
+        mode = config.get('window_mode', 'left_stack')
+        print(f"[+] Launching and sorting {len(packages)} package(s) (mode: {mode})...")
+        for i, pkg in enumerate(packages):
+            print(f"  [{i+1}/{len(packages)}] {pkg}")
+        auto_sort_windows(packages=packages, mode=mode)
+        print("[+] Done. Windows should be positioned now.")
         return
 
     if args.daemon:
