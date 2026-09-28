@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.6-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:23:00 UTC"
+BUILD_VERSION = "v6.9.7-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:28:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -350,26 +350,12 @@ def is_app_running(package):
     return False
 
 def get_running_packages(packages):
-    """Return live packages with one shell instead of two pidof calls per app."""
-    safe_packages = [
-        str(pkg) for pkg in packages
-        if re.fullmatch(r'[A-Za-z0-9._]+', str(pkg))
-    ]
-    if not safe_packages:
+    """Return live packages using ps -A."""
+    try:
+        res = subprocess.run("su -c 'ps -A'", shell=True, capture_output=True, text=True, timeout=3)
+        return set(pkg for pkg in packages if pkg in res.stdout)
+    except Exception:
         return set()
-
-    checks = '; '.join(
-        f'pids=$(pidof {pkg} 2>/dev/null); '
-        f'case "$pids" in *[!0-9\\ ]*|"") ;; *) echo {pkg} ;; esac'
-        for pkg in safe_packages
-    )
-    script = checks + '; exit 0'
-    for cmd in [f"su -c '{script}'", script]:
-        result = run_cmd(cmd, timeout=max(3, len(safe_packages)))
-        if result.returncode == 0:
-            found = set(result.stdout.split())
-            return {pkg for pkg in safe_packages if pkg in found}
-    return set()
 
 def get_package_activity_dump(package, content):
     """
@@ -424,7 +410,7 @@ def get_app_activity_state(package, content=None):
     ]
     # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
     GAME_SIGNALS = [
-        'renderview', 'nativemain', 'gameactivity', 'surfaceview', 'glsurfaceview'
+        'renderview', 'nativemain', 'gameactivity'
     ]
 
     if content is None:
