@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.13-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:53:00 UTC"
+BUILD_VERSION = "v6.9.14-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:58:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -433,21 +433,27 @@ def check_network_in_game(package):
     except Exception:
         return None
 
-def check_uiautomator_home():
+def check_uiautomator_home(package):
     """
     VISUAL UI DETECTION: Dumps the actual screen layout to check for Home Screen UI elements.
-    This acts as a perfect, resolution-independent alternative to image detection.
+    Ensures that the text belongs SPECIFICALLY to the target package (ignoring other apps on screen).
     """
     try:
         subprocess.run("su -c 'uiautomator dump /sdcard/window_dump.xml > /dev/null 2>&1'", shell=True, timeout=5)
         res = subprocess.run("su -c 'cat /sdcard/window_dump.xml 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
         text = res.stdout.lower()
-        if (
-            ('for you' in text and 'charts' in text) or 
-            'let\'s play!' in text or
-            ('moments' in text and 'chat' in text and 'more' in text)
-        ):
-            return True
+        pkg_lower = str(package).lower()
+        
+        # Find all XML nodes belonging exclusively to this package
+        nodes = re.findall(rf'<node[^>]*package="{pkg_lower}"[^>]*>', text)
+        
+        for node in nodes:
+            if ('text="for you"' in node or 
+                'text="charts"' in node or 
+                'text="let\'s play!' in node or 
+                'text="moments"' in node or 
+                'text="chat"' in node):
+                return True
     except Exception:
         pass
     return False
@@ -457,7 +463,7 @@ def get_app_activity_state(package, content=None):
     Check if package is in-game vs on Roblox Home Screen.
     """
     # 1. Visual UI Detection (Most accurate for Home screen)
-    if check_uiautomator_home():
+    if check_uiautomator_home(package):
         return False # Definitely on Home Screen
         
     # 2. Network Detection
