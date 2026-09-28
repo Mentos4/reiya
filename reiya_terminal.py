@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.9-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:35:00 UTC"
+BUILD_VERSION = "v6.9.10-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:38:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -673,24 +673,28 @@ def check_roblox_log_state(package):
     if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
         return None
         
-    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
+    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs /sdcard/Android/data/{package}/files/logs"
     cmd = (
         f"su -c '"
-        f"LOGFILES=$(ls -t {log_dirs}/*.log {log_dirs}/*Player*.log 2>/dev/null | head -n 2); "
-        f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
+        f"LOGFILES=$(ls -t {log_dirs}/* 2>/dev/null | grep -v \":$\" | head -n 2); "
+        f"if [ -n \"$LOGFILES\" ]; then tail -n 1200 $LOGFILES 2>/dev/null; fi; "
         f"'"
     )
     
     try:
-        res = run_cmd(cmd, timeout=3)
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
         text = res.stdout.lower() if res.stdout else ''
         
         # Check for Disconnect
-        if 'error code: 288' in text or 'error code 288' in text or 'disconnected from the experience' in text or 'disconnectreason' in text:
+        if ('error code: 288' in text or 'error code 288' in text or 
+            'disconnected from the experience' in text or 'disconnectreason' in text):
             return "DISCONNECT"
             
         # Check for LuaApp Home Screen
-        if 'setstage: (stage:luaapp)' in text or 'returntoluaappinternal:' in text or 'returning from game' in text:
+        if ('setstage: (stage:luaapp)' in text or 'stage: luaapp' in text or 
+            'returntoluaappinternal:' in text or 'returning from game' in text or 
+            'datamodel::leave' in text or 'leaving game' in text or 
+            'leaveserver' in text):
             return "HOME"
             
     except Exception:
