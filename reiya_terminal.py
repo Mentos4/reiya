@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.8-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:33:00 UTC"
+BUILD_VERSION = "v6.9.9-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:35:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1994,6 +1994,8 @@ def interactive_menu():
             try:
                 import termios
                 termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                if os.name == 'posix':
+                    os.system('stty sane 2>/dev/null')
             except Exception:
                 pass
             print("\n[+] Stopped Auto Rejoin and returned to Main Menu.")
@@ -2033,6 +2035,8 @@ def interactive_menu():
         elif choice == '0':
             if rejoin_engine.running:
                 rejoin_engine.stop()
+            if os.name == 'posix':
+                os.system('stty sane 2>/dev/null')
             print("Exiting REI REJOIN CLI. Goodbye!")
             sys.exit(0)
 
