@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.4-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:10:00 UTC"
+BUILD_VERSION = "v6.9.5-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:18:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1308,7 +1308,7 @@ class TerminalRejoinLoop:
             columns is target - (3*N + 1)."""
             N = 6
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, stat_w, ram_w = 1, 4, 5, 5
+            no_w, user_w, stat_w, ram_w = 1, 4, 10, 5
             remaining = max(8, budget - no_w - user_w - stat_w - ram_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
@@ -1408,14 +1408,14 @@ class TerminalRejoinLoop:
                     user_w    = COLS[1][1]
                     uname     = uname_raw if len(uname_raw) <= user_w else uname_raw[:max(1, user_w - 1)] + '.'
 
-                    if   st == 'Ingame':                         st_c = f"{GREEN}In{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rej{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Hm{RESET}"
-                    elif st == 'Launching':                      st_c = f"{CYAN}Ld{RESET}"
-                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wt{RESET}"
-                    elif st == 'Launch Failed':                  st_c = f"{RED}Fail{RESET}"
-                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unk{RESET}"
-                    else:                                        st_c = f"{st[:4]}"
+                    if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoining{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Home Page{RESET}"
+                    elif st == 'Launching':                      st_c = f"{CYAN}Launching{RESET}"
+                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wait{RESET}"
+                    elif st == 'Launch Failed':                  st_c = f"{RED}Failed{RESET}"
+                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unknown{RESET}"
+                    else:                                        st_c = f"{st[:9]}"
 
                     pkg_w = COLS[2][1]
                     pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
