@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.10-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:38:00 UTC"
+BUILD_VERSION = "v6.9.11-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:44:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -393,14 +393,56 @@ def get_activity_top_dump():
             pass
     return ''
 
+def check_network_in_game(package):
+    """
+    Detects if Roblox is in-game by checking for active UDP sockets (RakNet)
+    or TCP sockets on non-HTTP ports (TCP Fallback).
+    Returns True if in-game, False if on Home Screen, None if unavailable.
+    """
+    try:
+        uid_res = subprocess.run(f"su -c 'dumpsys package {package} | grep userId='", shell=True, capture_output=True, text=True, timeout=3)
+        uid_match = re.search(r'userId=(\d+)', uid_res.stdout)
+        if not uid_match:
+            return None
+        uid = uid_match.group(1)
+        
+        # Check UDP
+        udp_res = subprocess.run(f"su -c 'cat /proc/net/udp /proc/net/udp6 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
+        for line in udp_res.stdout.split('\n'):
+            parts = line.split()
+            if len(parts) >= 8 and parts[7] == uid:
+                local_addr = parts[1]
+                if not local_addr.endswith(':0035') and not local_addr.endswith(':0000'): # Ignore DNS and unassigned
+                    return True
+                    
+        # Check TCP
+        tcp_res = subprocess.run(f"su -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
+        for line in tcp_res.stdout.split('\n'):
+            parts = line.split()
+            if len(parts) >= 8 and parts[7] == uid:
+                rem_addr = parts[2]
+                if ':' in rem_addr:
+                    try:
+                        rem_port = int(rem_addr.split(':')[1], 16)
+                        state = parts[3]
+                        if state == '01' and rem_port not in (0, 80, 443):
+                            return True
+                    except:
+                        pass
+        return False
+    except Exception:
+        return None
+
 def get_app_activity_state(package, content=None):
     """
-    Check if package is in-game vs on Roblox Home Screen using dumpsys activity top.
-    Returns True for game evidence, False for Home evidence, and None when evidence is unavailable.
-    `content` may be passed in (a dump already fetched via get_activity_top_dump())
-    to avoid re-running the heavy dumpsys command per package; if omitted, it is
-    fetched here for backwards compatibility.
+    Check if package is in-game vs on Roblox Home Screen using network sockets and dumpsys.
     """
+    net_state = check_network_in_game(package)
+    if net_state is True:
+        return True
+    elif net_state is False:
+        return False
+        
     HOME_SIGNALS = [
         'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
         'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
