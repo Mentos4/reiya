@@ -1306,14 +1306,14 @@ class TerminalRejoinLoop:
             a target total width. For N pipe-bordered columns, total width =
             sum(width) + 3*N + 1, so the content budget to split across
             columns is target - (3*N + 1)."""
-            N = 5
+            N = 6
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, status_w = 1, 4, 9
-            remaining = max(8, budget - no_w - user_w - status_w)
+            no_w, user_w, status_w, ram_col_w = 1, 4, 6, 6
+            remaining = max(8, budget - no_w - user_w - status_w - ram_col_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
             # Short header labels so they never overflow a narrow column on their own.
-            cols = [("N", no_w), ("Usr", user_w), ("Pkg", pkg_w), ("Stat/RAM", status_w), ("Game", game_w)]
+            cols = [("N", no_w), ("Usr", user_w), ("Pkg", pkg_w), ("Stat", status_w), ("RAM", ram_col_w), ("Game", game_w)]
             total_w = sum(w + 3 for _, w in cols) + 1  # " val " + trailing "|" per col, + leading "|"
 
             def cell(val, width):
@@ -1408,22 +1408,22 @@ class TerminalRejoinLoop:
                     user_w    = COLS[1][1]
                     uname     = uname_raw if len(uname_raw) <= user_w else uname_raw[:max(1, user_w - 1)] + '.'
 
-                    if   st == 'Ingame':                         st_c = f"{GREEN}In/{ram_short}{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Re/{ram_short}{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Hm/{ram_short}{RESET}"
-                    elif st == 'Launching':                      st_c = f"{CYAN}Ld/{ram_short}{RESET}"
-                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wt/{ram_short}{RESET}"
-                    elif st == 'Launch Failed':                  st_c = f"{RED}Fl/{ram_short}{RESET}"
-                    elif st == 'Unknown':                        st_c = f"{YELLOW}Un/{ram_short}{RESET}"
-                    else:                                        st_c = f"{st[:2]}/{ram_short}"
+                    if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoin{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Home{RESET}"
+                    elif st == 'Launching':                      st_c = f"{CYAN}Launch{RESET}"
+                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wait{RESET}"
+                    elif st == 'Launch Failed':                  st_c = f"{RED}Fail{RESET}"
+                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unknwn{RESET}"
+                    else:                                        st_c = st[:6]
 
                     pkg_w = COLS[2][1]
                     pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
-                    game_w = COLS[4][1]
+                    game_w = COLS[5][1]
                     pkg_gname = _resolve_package_game_name(p, cfg)
                     gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
 
-                    out(table_row([idx, uname, pkg_t, st_c, gname_t]))
+                    out(table_row([idx, uname, pkg_t, st_c, ram_short, gname_t]))
 
                 out(SEP)
                 out(f"{BOLD}[Recent Activity Log]{RESET}")
