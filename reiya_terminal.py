@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.14-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:58:00 UTC"
+BUILD_VERSION = "v6.9.15-REI-REJOIN"
+BUILD_TIME = "2026-09-28 18:00:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1538,8 +1538,8 @@ class TerminalRejoinLoop:
     def _loop(self, packages, cfg, stop_event):
         self._su_broken = not check_su_works()
         
-        check_interval      = float(cfg.get('check_interval', 8))
-        activity_interval   = max(check_interval, float(cfg.get('activity_check_interval', 30)))
+        check_interval      = float(cfg.get('check_interval', 5))
+        activity_interval   = max(check_interval, float(cfg.get('activity_check_interval', 15)))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
         offline_wait        = float(cfg.get('offline_wait', 15))
         retry_limit         = int(cfg.get('retry_count', 3))
@@ -1550,7 +1550,7 @@ class TerminalRejoinLoop:
         auto_clear          = cfg.get('clear_cache', False)
         home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
         unknown_stall       = float(cfg.get('unknown_stall_seconds', 0))
-        LAUNCH_GRACE        = 45
+        LAUNCH_GRACE        = float(cfg.get('launch_grace', 25))
 
         retry_attempts = {pkg: 0 for pkg in packages}
         next_retry = {pkg: 0.0 for pkg in packages}
@@ -2022,6 +2022,9 @@ def interactive_menu():
 
             stall = prompt(f"Delay before rejoining an Unknown status app, seconds (0 = immediate) [{config.get('unknown_stall_seconds', 0)}]: ").strip()
             if stall.isdigit(): config['unknown_stall_seconds'] = int(stall)
+
+            grace = prompt(f"Launch Grace Period (hide Launching status after X seconds) [{config.get('launch_grace', 25)}]: ").strip()
+            if grace.isdigit(): config['launch_grace'] = int(grace)
 
             save_config()
             print("\n[+] Timing & Home Screen settings updated.")
