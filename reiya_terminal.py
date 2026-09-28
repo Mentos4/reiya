@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.5-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:18:00 UTC"
+BUILD_VERSION = "v6.9.6-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:23:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -213,6 +213,14 @@ def run_cmd(cmd, timeout=5):
     except Exception:
         return subprocess.CompletedProcess(cmd, -1, '', '')
 
+def check_su_works():
+    try:
+        res = subprocess.run("su -c 'id'", shell=True, capture_output=True, text=True, timeout=2)
+        if 'uid=0' in res.stdout or 'root' in res.stdout.lower():
+            return True
+    except Exception:
+        pass
+    return False
 
 def clear_terminal_screen():
     """Clear terminal screen completely preventing duplicate overlapping headers."""
@@ -1392,6 +1400,10 @@ class TerminalRejoinLoop:
 
                 # ── Stats ──────────────────────────────────────────
                 out(pipe_row([(f"Cpu usage: {cpu} %", cpu_w), (f"Ram usage: {used_ram:.2f} / {total_ram:.2f} GB", ram_w)]))
+                
+                if getattr(self, '_su_broken', False):
+                    out(f"{RED}{BOLD}  [!] ROOT (SU) IS BROKEN/JAMMED! RESTART TERMUX OR REBOOT PHONE!{RESET}")
+                
                 out(SEP)
 
                 # ── Table ──────────────────────────────────────────
@@ -1462,6 +1474,8 @@ class TerminalRejoinLoop:
                     pass
 
     def _loop(self, packages, cfg, stop_event):
+        self._su_broken = not check_su_works()
+        
         check_interval      = float(cfg.get('check_interval', 8))
         activity_interval   = max(check_interval, float(cfg.get('activity_check_interval', 30)))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
