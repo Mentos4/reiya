@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.12-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:51:00 UTC"
+BUILD_VERSION = "v6.9.13-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:53:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -442,7 +442,11 @@ def check_uiautomator_home():
         subprocess.run("su -c 'uiautomator dump /sdcard/window_dump.xml > /dev/null 2>&1'", shell=True, timeout=5)
         res = subprocess.run("su -c 'cat /sdcard/window_dump.xml 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
         text = res.stdout.lower()
-        if ('for you' in text and 'charts' in text) or 'let\'s play!' in text:
+        if (
+            ('for you' in text and 'charts' in text) or 
+            'let\'s play!' in text or
+            ('moments' in text and 'chat' in text and 'more' in text)
+        ):
             return True
     except Exception:
         pass
