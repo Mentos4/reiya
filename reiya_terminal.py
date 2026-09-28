@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.7-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:28:00 UTC"
+BUILD_VERSION = "v6.9.8-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:33:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1566,7 +1566,7 @@ class TerminalRejoinLoop:
                     next_retry[pkg] = 0.0
                     time_since_launch = now - self.last_launch.get(pkg, 0)
                     if time_since_launch < LAUNCH_GRACE:
-                        self.set_status(pkg, 'Launching', attempts=0)
+                        self.set_status(pkg, 'Launching', attempts=0, last_result=f"Waiting for load ({int(LAUNCH_GRACE - time_since_launch)}s)")
                         continue
                     if not (activity_due and needs_activity):
                         continue
