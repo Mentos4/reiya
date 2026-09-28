@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.4-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:03:00 UTC"
+BUILD_VERSION = "v6.9.3-REI-REJOIN"
+BUILD_TIME = "2026-09-28 16:45:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -683,7 +683,7 @@ def check_roblox_log_state(package):
     cmd = (
         f"su -c '"
         f"LOGFILES=$(ls -t {log_dirs}/*.log {log_dirs}/*Player*.log 2>/dev/null | head -n 2); "
-        f"if [ -n \"$LOGFILES\" ]; then tail -n 200 $LOGFILES 2>/dev/null; fi; "
+        f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
         f"'"
     )
     
@@ -1306,14 +1306,14 @@ class TerminalRejoinLoop:
             a target total width. For N pipe-bordered columns, total width =
             sum(width) + 3*N + 1, so the content budget to split across
             columns is target - (3*N + 1)."""
-            N = 5
+            N = 6
             budget = max(20, target_w - (3 * N + 1))
-            no_w, user_w, status_w = 1, 4, 9
-            remaining = max(8, budget - no_w - user_w - status_w)
+            no_w, user_w, stat_w, ram_w = 1, 4, 5, 5
+            remaining = max(8, budget - no_w - user_w - stat_w - ram_w)
             pkg_w  = max(4, remaining * 2 // 5)
             game_w = max(4, remaining - pkg_w)
             # Short header labels so they never overflow a narrow column on their own.
-            cols = [("N", no_w), ("Usr", user_w), ("Pkg", pkg_w), ("Stat/RAM", status_w), ("Game", game_w)]
+            cols = [("N", no_w), ("Usr", user_w), ("Pkg", pkg_w), ("Stat", stat_w), ("RAM", ram_w), ("Game", game_w)]
             total_w = sum(w + 3 for _, w in cols) + 1  # " val " + trailing "|" per col, + leading "|"
 
             def cell(val, width):
@@ -1408,14 +1408,14 @@ class TerminalRejoinLoop:
                     user_w    = COLS[1][1]
                     uname     = uname_raw if len(uname_raw) <= user_w else uname_raw[:max(1, user_w - 1)] + '.'
 
-                    if   st == 'Ingame':                         st_c = f"{GREEN}In/{ram_short}{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Re/{ram_short}{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Hm/{ram_short}{RESET}"
-                    elif st == 'Launching':                      st_c = f"{CYAN}Ld/{ram_short}{RESET}"
-                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wt/{ram_short}{RESET}"
-                    elif st == 'Launch Failed':                  st_c = f"{RED}Fl/{ram_short}{RESET}"
-                    elif st == 'Unknown':                        st_c = f"{YELLOW}Un/{ram_short}{RESET}"
-                    else:                                        st_c = f"{st[:2]}/{ram_short}"
+                    if   st == 'Ingame':                         st_c = f"{GREEN}In{RESET}"
+                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rej{RESET}"
+                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Hm{RESET}"
+                    elif st == 'Launching':                      st_c = f"{CYAN}Ld{RESET}"
+                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wt{RESET}"
+                    elif st == 'Launch Failed':                  st_c = f"{RED}Fail{RESET}"
+                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unk{RESET}"
+                    else:                                        st_c = f"{st[:4]}"
 
                     pkg_w = COLS[2][1]
                     pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
@@ -1423,7 +1423,7 @@ class TerminalRejoinLoop:
                     pkg_gname = _resolve_package_game_name(p, cfg)
                     gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
 
-                    out(table_row([idx, uname, pkg_t, st_c, gname_t]))
+                    out(table_row([idx, uname, pkg_t, st_c, ram_short, gname_t]))
 
                 out(SEP)
                 out(f"{BOLD}[Recent Activity Log]{RESET}")
