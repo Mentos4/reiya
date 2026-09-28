@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.16-REI-REJOIN"
-BUILD_TIME = "2026-09-28 18:04:00 UTC"
+BUILD_VERSION = "v6.9.17-REI-REJOIN"
+BUILD_TIME = "2026-09-28 18:15:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -376,138 +376,7 @@ def get_package_activity_dump(package, content):
 
     return pkg_lines
 
-def get_activity_top_dump():
-    """Fetch 'dumpsys activity top' once. This is a system-wide dump (same
-    content regardless of which package you're checking), so callers
-    monitoring multiple packages should fetch it ONCE per poll cycle and
-    reuse it for every package — calling it per-package multiplies an
-    already-heavy su+dumpsys invocation by the package count, which was a
-    major source of the CPU/battery load causing slowdowns on constrained
-    Termux/VPhone devices."""
-    for cmd in ["su -c 'dumpsys activity top'", 'dumpsys activity top']:
-        try:
-            res = run_cmd(cmd, timeout=4)
-            if res.stdout.strip():
-                return res.stdout
-        except Exception:
-            pass
-    return ''
-
-def check_network_in_game(package):
-    """
-    Detects if Roblox is in-game by checking for active UDP sockets (RakNet)
-    or TCP sockets on non-HTTP ports (TCP Fallback).
-    Returns True if in-game, False if on Home Screen, None if unavailable.
-    """
-    try:
-        uid_res = subprocess.run(f"su -c 'dumpsys package {package} | grep userId='", shell=True, capture_output=True, text=True, timeout=3)
-        uid_match = re.search(r'userId=(\d+)', uid_res.stdout)
-        if not uid_match:
-            return None
-        uid = uid_match.group(1)
-        
-        # Check UDP
-        udp_res = subprocess.run(f"su -c 'cat /proc/net/udp /proc/net/udp6 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
-        for line in udp_res.stdout.split('\n'):
-            parts = line.split()
-            if len(parts) >= 8 and parts[7] == uid:
-                local_addr = parts[1]
-                if not local_addr.endswith(':0035') and not local_addr.endswith(':0000'): # Ignore DNS and unassigned
-                    return True
-                    
-        # Check TCP
-        tcp_res = subprocess.run(f"su -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
-        for line in tcp_res.stdout.split('\n'):
-            parts = line.split()
-            if len(parts) >= 8 and parts[7] == uid:
-                rem_addr = parts[2]
-                if ':' in rem_addr:
-                    try:
-                        rem_port = int(rem_addr.split(':')[1], 16)
-                        state = parts[3]
-                        if state == '01' and rem_port not in (0, 80, 443):
-                            return True
-                    except:
-                        pass
-        return False
-    except Exception:
-        return None
-
-def check_uiautomator_home(package):
-    """
-    VISUAL UI DETECTION: Dumps the actual screen layout to check for Home Screen UI elements.
-    Ensures that the text belongs SPECIFICALLY to the target package (ignoring other apps on screen).
-    """
-    try:
-        subprocess.run("su -c 'uiautomator dump /sdcard/window_dump.xml > /dev/null 2>&1'", shell=True, timeout=5)
-        res = subprocess.run("su -c 'cat /sdcard/window_dump.xml 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
-        text = res.stdout.lower()
-        pkg_lower = str(package).lower()
-        
-        # Find all XML nodes belonging exclusively to this package
-        nodes = re.findall(rf'<node[^>]*package="{pkg_lower}"[^>]*>', text)
-        
-        for node in nodes:
-            if ('text="for you"' in node or 
-                'text="charts"' in node or 
-                'text="let\'s play!' in node or 
-                'text="moments"' in node or 
-                'text="chat"' in node):
-                return True
-    except Exception:
-        pass
-    return False
-
-def get_app_activity_state(package, content=None):
-    """
-    Check if package is in-game vs on Roblox Home Screen.
-    """
-    # 1. Visual UI Detection (Most accurate for Home screen)
-    if check_uiautomator_home(package):
-        return False # Definitely on Home Screen
-        
-    # 2. Network Detection
-    net_state = check_network_in_game(package)
-    if net_state is True:
-        return True
-    elif net_state is False:
-        return False
-        
-    HOME_SIGNALS = [
-        'mainactivity', 'splashactivity', 'loginactivity', 'welcomeactivity',
-        'titleactivity', 'lobbyactivity', 'loadingactivity', 'bootstrapactivity',
-        'loginview', 'landingview', 'authactivity', 'appshell', 'for you',
-        'charts', 'recommended for', 'moments', 'reactrootview', 'reactviewgroup',
-        'reactframelayout', 'activityprotocollaunch', 'homeactivity', 'hometab'
-    ]
-    # Note: 'robloxactivity' is excluded because RobloxActivity hosts React Home UI as well as game view
-    GAME_SIGNALS = [
-        'renderview', 'nativemain', 'gameactivity'
-    ]
-
-    if content is None:
-        content = get_activity_top_dump()
-
-    if content.strip():
-        pkg_lines = get_package_activity_dump(package, content)
-        if not pkg_lines:
-            pkg_lines = [line for line in content.split('\n') if package in line]
-        if pkg_lines:
-            block_text = '\n'.join(pkg_lines).lower()
-            # 1. Check for explicit Home Screen / React UI signals FIRST
-            if any(sig in block_text for sig in HOME_SIGNALS):
-                return False
-            # 2. Check for explicit 3D Game rendering signals
-            if any(sig in block_text for sig in GAME_SIGNALS):
-                return True
-            # 3. Ambiguous evidence is not the same thing as a confirmed Home page.
-            return None
-
-    return None
-
-def is_app_in_game(package, content=None):
-    """Backwards-compatible Boolean view of the tri-state activity detector."""
-    return get_app_activity_state(package, content=content) is True
+# (Activity detection logic removed per user request)
 
 
 
@@ -740,38 +609,7 @@ def clear_app_cache(package):
         print(f"[!] Clear cache error: {e}")
         return False
 
-def check_roblox_log_state(package):
-    """Check Roblox logs for Error Code 288, Disconnect, or Home Screen signals."""
-    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
-        return None
-        
-    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs /sdcard/Android/data/{package}/files/logs"
-    cmd = (
-        f"su -c '"
-        f"LOGFILES=$(ls -t {log_dirs}/* 2>/dev/null | grep -v \":$\" | head -n 2); "
-        f"if [ -n \"$LOGFILES\" ]; then tail -n 1200 $LOGFILES 2>/dev/null; fi; "
-        f"'"
-    )
-    
-    try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-        text = res.stdout.lower() if res.stdout else ''
-        
-        # Check for Disconnect
-        if ('error code: 288' in text or 'error code 288' in text or 
-            'disconnected from the experience' in text or 'disconnectreason' in text):
-            return "DISCONNECT"
-            
-        # Check for LuaApp Home Screen
-        if ('setstage: (stage:luaapp)' in text or 'stage: luaapp' in text or 
-            'returntoluaappinternal:' in text or 'returning from game' in text or 
-            'datamodel::leave' in text or 'leaving game' in text or 
-            'leaveserver' in text):
-            return "HOME"
-            
-    except Exception:
-        pass
-    return None
+# (Log state check removed per user request)
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1576,10 +1414,17 @@ class TerminalRejoinLoop:
             self.log(f"[{pkg}] {reason}: {'accepted' if launched else 'failed'}")
             return launched
 
-        # Preserve the established initial behavior: launch each selected package.
+        # Initial launch of all packages
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
+                
+            # If the package is already running upon startup, force close it first
+            if pkg in get_running_packages(packages):
+                self.log(f"[{pkg}] Initializing: Force closing running package")
+                force_stop_app(pkg)
+                time.sleep(1)
+                
             launch_package(pkg, i, 'Initial launch')
             if sequential and i < len(packages) - 1 and stop_event.wait(delay_open_tab):
                 break
@@ -1589,31 +1434,16 @@ class TerminalRejoinLoop:
                 self.set_status(pkg, 'Stopped')
             return
 
-        activity_dump = ''
-        last_activity_check = 0.0
-
         while self.running and not stop_event.is_set():
             try:
-                cycle_now = time.time()
                 running_packages = get_running_packages(packages)
-                activity_due = (cycle_now - last_activity_check) >= activity_interval
-                needs_activity = any(
-                    pkg in running_packages and
-                    (cycle_now - self.last_launch.get(pkg, 0)) >= LAUNCH_GRACE
-                    for pkg in packages
-                )
-                if activity_due and needs_activity:
-                    activity_dump = get_activity_top_dump()
-                    last_activity_check = cycle_now
+                now = time.time()
 
                 for i, pkg in enumerate(packages):
                     if stop_event.is_set():
                         break
 
-                    now = time.time()
                     if pkg not in running_packages:
-                        home_hits[pkg] = 0
-                        unknown_since[pkg] = 0.0
                         if now < next_retry[pkg]:
                             self.set_status(
                                 pkg, 'Retry Wait', attempts=retry_attempts[pkg],
@@ -1638,91 +1468,15 @@ class TerminalRejoinLoop:
                         launch_package(pkg, i, f"Rejoin attempt {retry_attempts[pkg] + 1}/{retry_limit}")
                         continue
 
+                    # If process IS running
                     retry_attempts[pkg] = 0
                     next_retry[pkg] = 0.0
                     time_since_launch = now - self.last_launch.get(pkg, 0)
+                    
                     if time_since_launch < LAUNCH_GRACE:
                         self.set_status(pkg, 'Launching', attempts=0, last_result=f"Waiting for load ({int(LAUNCH_GRACE - time_since_launch)}s)")
-                        continue
-                    if not (activity_due and needs_activity):
-                        continue
-
-                    activity_state = get_app_activity_state(pkg, content=activity_dump)
-                    
-                    if activity_state is True:
-                        log_state = check_roblox_log_state(pkg)
-                        if log_state == "DISCONNECT":
-                            self.log(f"[{pkg}] Disconnect (Error 288) detected in logs; force stopping and rejoining")
-                            self.set_status(pkg, 'Rejoining')
-                            force_stop_app(pkg)
-                            if stop_event.wait(2):
-                                break
-                            home_hits[pkg] = 0
-                            retry_attempts[pkg] = 0
-                            launch_package(pkg, i, 'Disconnected from server')
-                            continue
-                        elif log_state == "HOME":
-                            activity_state = False
-
-                    if activity_state is True:
-                        home_hits[pkg] = 0
-                        unknown_since[pkg] = 0.0
-                        self.set_status(pkg, 'Ingame', attempts=0, last_result='Activity confirmed')
-                    elif activity_state is False:
-                        unknown_since[pkg] = 0.0
-                        home_hits[pkg] += 1
-                        self.set_status(
-                            pkg, 'Home Page', confirmations=home_hits[pkg],
-                            last_result=f"Home confirmation {home_hits[pkg]}/{home_confirmations}",
-                        )
-                        if not home_rejoin_enabled:
-                            continue
-                        if home_hits[pkg] < home_confirmations:
-                            self.log(f"[{pkg}] Home confirmation {home_hits[pkg]}/{home_confirmations}")
-                            continue
-
-                        self.log(f"[{pkg}] Confirmed Home Screen; force stopping and rejoining")
-                        self.set_status(pkg, 'Rejoining')
-                        force_stop_app(pkg)
-                        if stop_event.wait(2):
-                            break
-                        home_hits[pkg] = 0
-                        retry_attempts[pkg] = 0
-                        launch_package(pkg, i, 'Confirmed Home rejoin')
                     else:
-                        # 'Unknown' means the process is alive but dumpsys shows no
-                        # usable evidence — typically a backgrounded/frozen clone that
-                        # never made it into the game. It is NOT in game, so it gets
-                        # the same treatment as a confirmed Home screen: force-stop and
-                        # relaunch. By default (unknown_stall_seconds = 0) this fires on
-                        # the very first Unknown reading rather than letting the app sit
-                        # on 'Un' forever; a non-zero value delays it by that many
-                        # seconds instead.
-                        home_hits[pkg] = 0
-                        if not unknown_since[pkg]:
-                            unknown_since[pkg] = now
-                        stalled_for = now - unknown_since[pkg]
-
-                        if not home_rejoin_enabled:
-                            self.set_status(pkg, 'Unknown', last_result='Activity evidence unavailable')
-                            continue
-
-                        if unknown_stall > 0 and stalled_for < unknown_stall:
-                            self.set_status(
-                                pkg, 'Unknown',
-                                last_result=f"No activity evidence {int(stalled_for)}s/{int(unknown_stall)}s",
-                            )
-                            continue
-
-                        self.log(f"[{pkg}] Unknown status ({int(stalled_for)}s); force stopping and rejoining")
-                        self.set_status(pkg, 'Rejoining')
-                        force_stop_app(pkg)
-                        if stop_event.wait(2):
-                            break
-                        unknown_since[pkg] = 0.0
-                        home_hits[pkg] = 0
-                        retry_attempts[pkg] = 0
-                        launch_package(pkg, i, 'Unknown status rejoin')
+                        self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
