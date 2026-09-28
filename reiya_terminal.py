@@ -316,6 +316,16 @@ def get_roblox_packages():
     ]
 
     roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
+    
+    # Always forcefully display packages that were previously saved/selected
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            cfg = json.load(f)
+            for p in cfg.get('selected_packages', []):
+                roblox_pkgs.append(p)
+    except Exception:
+        pass
+        
     return sorted(list(set(roblox_pkgs)))
 
 def is_app_running(package):
