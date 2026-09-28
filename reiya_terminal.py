@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.11-REI-REJOIN"
-BUILD_TIME = "2026-09-28 17:44:00 UTC"
+BUILD_VERSION = "v6.9.12-REI-REJOIN"
+BUILD_TIME = "2026-09-28 17:51:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -433,10 +433,30 @@ def check_network_in_game(package):
     except Exception:
         return None
 
+def check_uiautomator_home():
+    """
+    VISUAL UI DETECTION: Dumps the actual screen layout to check for Home Screen UI elements.
+    This acts as a perfect, resolution-independent alternative to image detection.
+    """
+    try:
+        subprocess.run("su -c 'uiautomator dump /sdcard/window_dump.xml > /dev/null 2>&1'", shell=True, timeout=5)
+        res = subprocess.run("su -c 'cat /sdcard/window_dump.xml 2>/dev/null'", shell=True, capture_output=True, text=True, timeout=2)
+        text = res.stdout.lower()
+        if ('for you' in text and 'charts' in text) or 'let\'s play!' in text:
+            return True
+    except Exception:
+        pass
+    return False
+
 def get_app_activity_state(package, content=None):
     """
-    Check if package is in-game vs on Roblox Home Screen using network sockets and dumpsys.
+    Check if package is in-game vs on Roblox Home Screen.
     """
+    # 1. Visual UI Detection (Most accurate for Home screen)
+    if check_uiautomator_home():
+        return False # Definitely on Home Screen
+        
+    # 2. Network Detection
     net_state = check_network_in_game(package)
     if net_state is True:
         return True
