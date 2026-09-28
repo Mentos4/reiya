@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.17-REI-REJOIN"
-BUILD_TIME = "2026-09-28 18:15:00 UTC"
+BUILD_VERSION = "v6.9.18-REI-REJOIN"
+BUILD_TIME = "2026-09-28 18:20:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -609,7 +609,32 @@ def clear_app_cache(package):
         print(f"[!] Clear cache error: {e}")
         return False
 
-# (Log state check removed per user request)
+def check_roblox_log_state(package):
+    """Check Roblox logs for Error Code 288, 277, or general Disconnect signals."""
+    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
+        return False
+        
+    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs /sdcard/Android/data/{package}/files/logs"
+    cmd = (
+        f"su -c '"
+        f"LOGFILES=$(ls -t {log_dirs}/* 2>/dev/null | grep -v \":$\" | head -n 2); "
+        f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
+        f"'"
+    )
+    
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
+        text = res.stdout.lower() if res.stdout else ''
+        
+        # Check for Disconnects
+        if ('error code: 288' in text or 'error code 288' in text or 
+            'error code: 277' in text or 'error code 277' in text or
+            'disconnected from the experience' in text or 'disconnectreason' in text):
+            return True
+            
+    except Exception:
+        pass
+    return False
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1476,6 +1501,16 @@ class TerminalRejoinLoop:
                     if time_since_launch < LAUNCH_GRACE:
                         self.set_status(pkg, 'Launching', attempts=0, last_result=f"Waiting for load ({int(LAUNCH_GRACE - time_since_launch)}s)")
                     else:
+                        # Check if it's sitting on a Disconnect prompt
+                        if check_roblox_log_state(pkg):
+                            self.log(f"[{pkg}] Disconnect (Error 277/288) detected in logs; force stopping and rejoining")
+                            self.set_status(pkg, 'Rejoining')
+                            force_stop_app(pkg)
+                            if stop_event.wait(2):
+                                break
+                            launch_package(pkg, i, 'Disconnected from server')
+                            continue
+                            
                         self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
