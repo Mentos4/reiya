@@ -1419,7 +1419,7 @@ class TerminalRejoinLoop:
 
                     pkg_w = COLS[2][1]
                     pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
-                    game_w = COLS[4][1]
+                    game_w = COLS[5][1]
                     pkg_gname = _resolve_package_game_name(p, cfg)
                     gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
 
