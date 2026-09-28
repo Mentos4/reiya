@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.15-REI-REJOIN"
-BUILD_TIME = "2026-09-28 18:00:00 UTC"
+BUILD_VERSION = "v6.9.16-REI-REJOIN"
+BUILD_TIME = "2026-09-28 18:04:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1992,6 +1992,9 @@ def interactive_menu():
             print("\nTiming Settings:")
             check_in = prompt(f"Check Interval seconds [{config.get('check_interval', 10)}]: ").strip()
             if check_in.isdigit(): config['check_interval'] = int(check_in)
+
+            act_in = prompt(f"Activity Scan Interval seconds [{config.get('activity_check_interval', 15)}]: ").strip()
+            if act_in.isdigit(): config['activity_check_interval'] = int(act_in)
 
             off_w = prompt(f"Offline Wait seconds [{config.get('offline_wait', 15)}]: ").strip()
             if off_w.isdigit(): config['offline_wait'] = int(off_w)
