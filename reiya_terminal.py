@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.1-REI-REJOIN"
-BUILD_TIME = "2026-09-22 13:49:07 UTC"
+BUILD_VERSION = "v6.9.3-REI-REJOIN"
+BUILD_TIME = "2026-09-28 16:45:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -653,6 +653,35 @@ def clear_app_cache(package):
     except Exception as e:
         print(f"[!] Clear cache error: {e}")
         return False
+
+def check_roblox_log_state(package):
+    """Check Roblox logs for Error Code 288, Disconnect, or Home Screen signals."""
+    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
+        return None
+        
+    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
+    cmd = (
+        f"su -c '"
+        f"LOGFILES=$(ls -t {log_dirs}/*.log {log_dirs}/*Player*.log 2>/dev/null | head -n 2); "
+        f"if [ -n \"$LOGFILES\" ]; then tail -n 200 $LOGFILES 2>/dev/null; fi; "
+        f"'"
+    )
+    
+    try:
+        res = run_cmd(cmd, timeout=3)
+        text = res.stdout.lower() if res.stdout else ''
+        
+        # Check for Disconnect
+        if 'error code: 288' in text or 'error code 288' in text or 'disconnected from the experience' in text or 'disconnectreason' in text:
+            return "DISCONNECT"
+            
+        # Check for LuaApp Home Screen
+        if 'setstage: (stage:luaapp)' in text or 'returntoluaappinternal:' in text or 'returning from game' in text:
+            return "HOME"
+            
+    except Exception:
+        pass
+    return None
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1523,6 +1552,22 @@ class TerminalRejoinLoop:
                         continue
 
                     activity_state = get_app_activity_state(pkg, content=activity_dump)
+                    
+                    if activity_state is True:
+                        log_state = check_roblox_log_state(pkg)
+                        if log_state == "DISCONNECT":
+                            self.log(f"[{pkg}] Disconnect (Error 288) detected in logs; force stopping and rejoining")
+                            self.set_status(pkg, 'Rejoining')
+                            force_stop_app(pkg)
+                            if stop_event.wait(2):
+                                break
+                            home_hits[pkg] = 0
+                            retry_attempts[pkg] = 0
+                            launch_package(pkg, i, 'Disconnected from server')
+                            continue
+                        elif log_state == "HOME":
+                            activity_state = False
+
                     if activity_state is True:
                         home_hits[pkg] = 0
                         unknown_since[pkg] = 0.0
