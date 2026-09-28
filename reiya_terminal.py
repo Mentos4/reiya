@@ -295,6 +295,16 @@ def get_installed_packages():
     except Exception:
         pass
 
+    # Strategy 6: Hard fallback for when Termux package scanner is completely blocked
+    if not packages:
+        for known in ['com.roblox.client', 'free.nokaA', 'free.nokaB', 'free.nokaC', 'com.delta.client']:
+            try:
+                res = subprocess.run(f"dumpsys package {known}", shell=True, capture_output=True, text=True, timeout=2)
+                if "versionName=" in res.stdout:
+                    packages.add(known)
+            except Exception:
+                pass
+
     return sorted(list(packages))
 
 def get_roblox_packages():

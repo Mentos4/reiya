@@ -16,7 +16,7 @@ spec.loader.exec_module(reiya)
 
 class EnhancementTests(unittest.TestCase):
     def test_version_and_preset(self):
-        self.assertEqual(reiya.BUILD_VERSION, 'v6.9.0-REI-REJOIN')
+        self.assertEqual(reiya.BUILD_VERSION, 'v6.9.1-REI-REJOIN')
         self.assertIn(('Anime Dice', '113290951185459'), reiya.PRESET_GAMES)
         self.assertIn(('Ride a Pet', '124216119978534'), reiya.PRESET_GAMES)
 
@@ -104,7 +104,7 @@ class EnhancementTests(unittest.TestCase):
         with mock.patch.object(reiya, 'run_cmd', side_effect=command_result), \
              mock.patch.object(reiya.time, 'sleep') as sleep:
             self.assertTrue(reiya.apply_window_bounds('com.roblox.client', (500, 0, 750, 156), attempts=2))
-        sleep.assert_called_once_with(1.0)
+        sleep.assert_not_called()
         self.assertTrue(any('am task resizeable 42 2' in command for command in commands))
         resize_commands = [command for command in commands if 'am task resize 42 ' in command]
         self.assertEqual(resize_commands, ["su -c 'am task resize 42 500 0 750 156'"])
@@ -132,6 +132,19 @@ class EnhancementTests(unittest.TestCase):
         self.assertEqual(commands[0], "su -c 'am task focus 42'")
         self.assertIn("input touchscreen swipe 810 942 330 478 450", commands[1])
         self.assertIn("input touchscreen swipe 208 367 875 42 350", commands[2])
+
+    def test_auto_sort_launches_all_packages_without_fixed_wait(self):
+        packages = ['free.nokaA', 'free.nokaB']
+        with mock.patch.object(reiya, 'set_landscape_orientation'), \
+             mock.patch.object(reiya, 'get_screen_size', return_value=(1000, 800)), \
+             mock.patch.object(reiya, '_resolve_package_game_id', return_value='12345'), \
+             mock.patch.object(reiya, 'launch_game', return_value=True) as launch, \
+             mock.patch.object(reiya.time, 'sleep') as sleep:
+            reiya.auto_sort_windows(packages=packages, mode='left_stack')
+        self.assertEqual(launch.call_count, 2)
+        self.assertEqual(launch.call_args_list[0].kwargs['bounds'], (500, 0, 750, 156))
+        self.assertEqual(launch.call_args_list[1].kwargs['bounds'], (750, 0, 1000, 156))
+        sleep.assert_not_called()
 
     def test_activity_tri_state(self):
         home = 'TASK x com.roblox.client\n  ReactRootView homeactivity'
