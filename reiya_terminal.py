@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.22-REI-REJOIN"
-BUILD_TIME = "2026-09-29 06:34:00 UTC"
+BUILD_VERSION = "v6.9.23-REI-REJOIN"
+BUILD_TIME = "2026-09-29 06:40:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -54,6 +54,7 @@ PRESET_GAMES = [
     ('Anime Astral Simulator','102072869879193'),
     ('Anime Dice',             '113290951185459'),
     ('Ride a Pet',             '124216119978534'),
+    ('Slayer 2',             '16205713724'),
 ]
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'config.json')
@@ -733,14 +734,18 @@ def get_cpu_usage():
         return _last_cpu_pct
 
 _last_ram_usage = (0.0, 0.0)
+_last_ram_time = 0.0
 
 def get_ram_usage():
     """
     Retrieves live system RAM usage (used_gb, total_gb).
-    Prioritizes 'dumpsys meminfo' for dynamic accuracy on cloudphones (VSPhone / VMOS / VPhone)
-    where containerized /proc/meminfo and 'free' report static stub memory.
+    Caches for 15s to prevent Android shell crashes from spamming dumpsys.
     """
-    global _last_ram_usage
+    global _last_ram_usage, _last_ram_time
+    now = time.time()
+    if now - _last_ram_time < 15.0 and _last_ram_usage[1] > 0:
+        return _last_ram_usage
+
     try:
         # Layer 1: dumpsys meminfo (dynamic live stats on Android / Cloudphones)
         for dump_cmd in ["su -c 'dumpsys meminfo'", 'dumpsys meminfo']:
@@ -785,6 +790,7 @@ def get_ram_usage():
                 t_gb = round(total_kb / 1024 / 1024, 2)
                 if u_gb > 0 and t_gb > 0:
                     _last_ram_usage = (u_gb, t_gb)
+                    _last_ram_time = now
                     return _last_ram_usage
     except Exception:
         pass
@@ -1415,6 +1421,7 @@ class TerminalRejoinLoop:
 
         retry_attempts = {pkg: 0 for pkg in packages}
         next_retry = {pkg: 0.0 for pkg in packages}
+        last_log_check = {pkg: 0.0 for pkg in packages}
 
         def launch_package(pkg, _index, reason):
             gid = self._get_game_id(pkg, cfg)
@@ -1494,15 +1501,17 @@ class TerminalRejoinLoop:
                     if time_since_launch < LAUNCH_GRACE:
                         self.set_status(pkg, 'Launching', attempts=0, last_result=f"Waiting for load ({int(LAUNCH_GRACE - time_since_launch)}s)")
                     else:
-                        # Check if it's sitting on a Disconnect prompt
-                        if check_roblox_log_state(pkg):
-                            self.log(f"[{pkg}] Disconnect (Error 277/288) detected in logs; force stopping and rejoining")
-                            self.set_status(pkg, 'Rejoining')
-                            force_stop_app(pkg)
-                            if stop_event.wait(2):
-                                break
-                            launch_package(pkg, i, 'Disconnected from server')
-                            continue
+                        # Check if it's sitting on a Disconnect prompt (rate-limited to 15s to save shell resources)
+                        if now - last_log_check.get(pkg, 0) >= 15:
+                            last_log_check[pkg] = now
+                            if check_roblox_log_state(pkg):
+                                self.log(f"[{pkg}] Disconnect (Error 277/288) detected in logs; force stopping and rejoining")
+                                self.set_status(pkg, 'Rejoining')
+                                force_stop_app(pkg)
+                                if stop_event.wait(2):
+                                    break
+                                launch_package(pkg, i, 'Disconnected from server')
+                                continue
                             
                         self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
             except Exception as e:
