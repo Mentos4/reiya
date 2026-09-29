@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.18-REI-REJOIN"
-BUILD_TIME = "2026-09-28 18:20:00 UTC"
+BUILD_VERSION = "v6.9.19-REI-REJOIN"
+BUILD_TIME = "2026-09-29 06:20:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -350,10 +350,14 @@ def is_app_running(package):
     return False
 
 def get_running_packages(packages):
-    """Return live packages using ps -A."""
+    """Return live packages using ps -A with strict matching."""
     try:
         res = subprocess.run("su -c 'ps -A'", shell=True, capture_output=True, text=True, timeout=3)
-        return set(pkg for pkg in packages if pkg in res.stdout)
+        running = set()
+        for pkg in packages:
+            if re.search(r'\s' + re.escape(pkg) + r'\s*$', res.stdout, re.MULTILINE):
+                running.add(pkg)
+        return running
     except Exception:
         return set()
 
