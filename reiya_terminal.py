@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.20-REI-REJOIN"
-BUILD_TIME = "2026-09-29 06:26:00 UTC"
+BUILD_VERSION = "v6.9.21-REI-REJOIN"
+BUILD_TIME = "2026-09-29 06:30:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1306,7 +1306,6 @@ class TerminalRejoinLoop:
                 COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
-                h_st = f"{GREEN}Enable{RESET}"  if cfg.get('home_rejoin_enabled', True) else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
                 game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
 
@@ -1322,7 +1321,6 @@ class TerminalRejoinLoop:
                 out(f"{BLUE}By seisen_{RESET}")
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
-                out(f"HOME REJOIN: {h_st}")
                 out(f"CLEAR CACHE: {c_st}")
                 out(f"UPTIME: {uptime}")
                 out(SEP)
@@ -1351,7 +1349,6 @@ class TerminalRejoinLoop:
 
                     if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
                     elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoining{RESET}"
-                    elif st in ('Home Page', 'Home Screen'):     st_c = f"{YELLOW}Home Page{RESET}"
                     elif st == 'Launching':                      st_c = f"{CYAN}Launching{RESET}"
                     elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wait{RESET}"
                     elif st == 'Launch Failed':                  st_c = f"{RED}Failed{RESET}"
@@ -1802,7 +1799,7 @@ def interactive_menu():
             if grace.isdigit(): config['launch_grace'] = int(grace)
 
             save_config()
-            print("\n[+] Timing & Home Screen settings updated.")
+            print("\n[+] Timing settings updated.")
             prompt("\nPress Enter to return to menu...")
 
         elif choice == '6':
