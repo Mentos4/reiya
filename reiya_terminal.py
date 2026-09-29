@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.21-REI-REJOIN"
-BUILD_TIME = "2026-09-29 06:30:00 UTC"
+BUILD_VERSION = "v6.9.22-REI-REJOIN"
+BUILD_TIME = "2026-09-29 06:34:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -350,14 +350,15 @@ def is_app_running(package):
     return False
 
 def get_running_packages(packages):
-    """Return live packages using ps -A with strict matching."""
+    """Return live packages using pidof inside a single su call for exact matching and speed."""
+    if not packages:
+        return set()
+    
+    pkg_list = " ".join(packages)
+    cmd = f"su -c 'for p in {pkg_list}; do if pidof \"$p\" >/dev/null; then echo \"$p\"; fi; done'"
     try:
-        res = subprocess.run("su -c 'ps -A'", shell=True, capture_output=True, text=True, timeout=3)
-        running = set()
-        for pkg in packages:
-            if re.search(r'\s' + re.escape(pkg) + r'\s*$', res.stdout, re.MULTILINE):
-                running.add(pkg)
-        return running
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
+        return set(res.stdout.split())
     except Exception:
         return set()
 
