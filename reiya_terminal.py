@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.19-REI-REJOIN"
-BUILD_TIME = "2026-09-29 06:20:00 UTC"
+BUILD_VERSION = "v6.9.20-REI-REJOIN"
+BUILD_TIME = "2026-09-29 06:26:00 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -1405,31 +1405,22 @@ class TerminalRejoinLoop:
     def _loop(self, packages, cfg, stop_event):
         self._su_broken = not check_su_works()
         
-        check_interval      = float(cfg.get('check_interval', 5))
-        activity_interval   = max(check_interval, float(cfg.get('activity_check_interval', 15)))
+        check_interval      = float(cfg.get('check_interval', 2))
         delay_open_tab      = float(cfg.get('launch_wait', 15))
         offline_wait        = float(cfg.get('offline_wait', 15))
         retry_limit         = int(cfg.get('retry_count', 3))
         retry_delay         = float(cfg.get('retry_delay', 30))
         rejoin_cooldown     = float(cfg.get('rejoin_cooldown', 10))
-        home_confirmations  = int(cfg.get('home_confirmation_count', 2))
         sequential          = cfg.get('sequential_join', False)
         auto_clear          = cfg.get('clear_cache', False)
-        home_rejoin_enabled = cfg.get('home_rejoin_enabled', True)
-        unknown_stall       = float(cfg.get('unknown_stall_seconds', 0))
         LAUNCH_GRACE        = float(cfg.get('launch_grace', 25))
 
         retry_attempts = {pkg: 0 for pkg in packages}
         next_retry = {pkg: 0.0 for pkg in packages}
-        home_hits = {pkg: 0 for pkg in packages}
-        # Timestamp of the first consecutive 'Unknown' activity reading per package.
-        # 0.0 means the package is not currently in an Unknown streak.
-        unknown_since = {pkg: 0.0 for pkg in packages}
 
         def launch_package(pkg, _index, reason):
             gid = self._get_game_id(pkg, cfg)
             self.last_launch[pkg] = time.time()
-            unknown_since[pkg] = 0.0
             launched = launch_game(pkg, gid)
             retry_attempts[pkg] += 1
             next_retry[pkg] = time.time() + max(offline_wait, rejoin_cooldown)
@@ -1783,11 +1774,8 @@ def interactive_menu():
 
         elif choice == '5':
             print("\nTiming Settings:")
-            check_in = prompt(f"Check Interval seconds [{config.get('check_interval', 10)}]: ").strip()
+            check_in = prompt(f"Check Interval seconds [{config.get('check_interval', 2)}]: ").strip()
             if check_in.isdigit(): config['check_interval'] = int(check_in)
-
-            act_in = prompt(f"Activity Scan Interval seconds [{config.get('activity_check_interval', 15)}]: ").strip()
-            if act_in.isdigit(): config['activity_check_interval'] = int(act_in)
 
             off_w = prompt(f"Offline Wait seconds [{config.get('offline_wait', 15)}]: ").strip()
             if off_w.isdigit(): config['offline_wait'] = int(off_w)
@@ -1809,15 +1797,6 @@ def interactive_menu():
 
             clr = prompt(f"Clear ALL App Data on Rejoin (pm clear; may sign out accounts)? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
             if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
-
-            hm = prompt(f"Auto Rejoin if stuck on Roblox Home Screen? (y/n) [{config.get('home_rejoin_enabled', True)}]: ").strip().lower()
-            if hm in ['y', 'n']: config['home_rejoin_enabled'] = (hm == 'y')
-
-            confirm = prompt(f"Required Consecutive Home Detections [{config.get('home_confirmation_count', 2)}]: ").strip()
-            if confirm.isdigit(): config['home_confirmation_count'] = int(confirm)
-
-            stall = prompt(f"Delay before rejoining an Unknown status app, seconds (0 = immediate) [{config.get('unknown_stall_seconds', 0)}]: ").strip()
-            if stall.isdigit(): config['unknown_stall_seconds'] = int(stall)
 
             grace = prompt(f"Launch Grace Period (hide Launching status after X seconds) [{config.get('launch_grace', 25)}]: ").strip()
             if grace.isdigit(): config['launch_grace'] = int(grace)
