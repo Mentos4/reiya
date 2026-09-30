@@ -35,8 +35,8 @@ import select
 import base64
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.23-REI-REJOIN"
-BUILD_TIME = "2026-09-29 06:40:00 UTC"
+BUILD_VERSION = "v6.9.25-REI-REJOIN"
+BUILD_TIME = "2026-09-30 11:08:47 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -362,6 +362,26 @@ def get_running_packages(packages):
         return set(res.stdout.split())
     except Exception:
         return set()
+
+def get_active_package_tasks(packages):
+    """Return packages with a live Activity, or None when the task dump is unavailable.
+
+    A clone may keep a cached process after its window closes, so pidof alone
+    cannot prove that Option 8 still has a game window to monitor.
+    """
+    if not packages:
+        return set()
+    try:
+        res = run_cmd("su -c 'dumpsys activity top'", timeout=8)
+        output = res.stdout or ''
+        if res.returncode != 0 or not re.search(r'^TASK\s', output, re.MULTILINE):
+            return None
+        active = set()
+        for match in re.finditer(r'^\s+ACTIVITY\s+([A-Za-z0-9._]+)/\S+\s+\S+\s+pid=(\d+)\b', output, re.MULTILINE):
+            active.add(match.group(1))
+        return active.intersection(packages)
+    except Exception:
+        return None
 
 def get_package_activity_dump(package, content):
     """
@@ -1422,6 +1442,8 @@ class TerminalRejoinLoop:
         retry_attempts = {pkg: 0 for pkg in packages}
         next_retry = {pkg: 0.0 for pkg in packages}
         last_log_check = {pkg: 0.0 for pkg in packages}
+        last_task_check = 0.0
+        missing_task_checks = {pkg: 0 for pkg in packages}
 
         def launch_package(pkg, _index, reason):
             gid = self._get_game_id(pkg, cfg)
@@ -1464,15 +1486,34 @@ class TerminalRejoinLoop:
                 running_packages = get_running_packages(packages)
                 now = time.time()
 
+                # A closed window can leave a cached PID. Confirm its absence
+                # twice before relaunching; never act on an unavailable dump.
+                if now - last_task_check >= 15:
+                    last_task_check = now
+                    task_packages = get_active_package_tasks(packages)
+                    if task_packages is None:
+                        missing_task_checks = {pkg: 0 for pkg in packages}
+                    else:
+                        for pkg in packages:
+                            if pkg in task_packages:
+                                missing_task_checks[pkg] = 0
+                            elif (pkg in running_packages
+                                  and now - self.last_launch.get(pkg, 0) >= LAUNCH_GRACE):
+                                missing_task_checks[pkg] += 1
+                            else:
+                                missing_task_checks[pkg] = 0
+
                 for i, pkg in enumerate(packages):
                     if stop_event.is_set():
                         break
 
-                    if pkg not in running_packages:
+                    window_closed = pkg in running_packages and missing_task_checks[pkg] >= 2
+                    if pkg not in running_packages or window_closed:
                         if now < next_retry[pkg]:
                             self.set_status(
                                 pkg, 'Retry Wait', attempts=retry_attempts[pkg],
-                                next_retry=next_retry[pkg], last_result='Process not running',
+                                next_retry=next_retry[pkg],
+                                last_result='Window closed' if window_closed else 'Process not running',
                             )
                             continue
                         if retry_attempts[pkg] >= retry_limit:
@@ -1490,6 +1531,13 @@ class TerminalRejoinLoop:
                             clear_app_cache(pkg)
                             if stop_event.wait(1):
                                 break
+
+                        self.log(f"[{pkg}] Force stopping before rejoin to prevent background stall")
+                        force_stop_app(pkg)
+                        if stop_event.wait(1):
+                            break
+
+                        missing_task_checks[pkg] = 0
                         launch_package(pkg, i, f"Rejoin attempt {retry_attempts[pkg] + 1}/{retry_limit}")
                         continue
 
@@ -1500,6 +1548,8 @@ class TerminalRejoinLoop:
                     
                     if time_since_launch < LAUNCH_GRACE:
                         self.set_status(pkg, 'Launching', attempts=0, last_result=f"Waiting for load ({int(LAUNCH_GRACE - time_since_launch)}s)")
+                    elif missing_task_checks[pkg]:
+                        self.set_status(pkg, 'Unknown', attempts=0, last_result='Window missing; confirming')
                     else:
                         # Check if it's sitting on a Disconnect prompt (rate-limited to 15s to save shell resources)
                         if now - last_log_check.get(pkg, 0) >= 15:
