@@ -55,6 +55,7 @@ PRESET_GAMES = [
     ('Anime Dice',             '113290951185459'),
     ('Ride a Pet',             '124216119978534'),
     ('Slayer 2',             '16205713724'),
+    ('Pet Simulator',        '8737899170'),
 ]
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'config.json')
@@ -1488,7 +1489,7 @@ class TerminalRejoinLoop:
 
                 # A closed window can leave a cached PID. Confirm its absence
                 # twice before relaunching; never act on an unavailable dump.
-                if now - last_task_check >= 15:
+                if now - last_task_check >= 5:
                     last_task_check = now
                     task_packages = get_active_package_tasks(packages)
                     if task_packages is None:
@@ -1567,7 +1568,7 @@ class TerminalRejoinLoop:
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
-            stop_event.wait(check_interval)
+            stop_event.wait(min(check_interval, 5))
 
         for pkg in packages:
             self.set_status(pkg, 'Stopped')
