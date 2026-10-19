@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.26-REI-REJOIN"
-BUILD_TIME = "2026-10-19 UTC"
+BUILD_VERSION = "v6.9.27-REI-REJOIN"
+BUILD_TIME = "2026-10-19 22:55 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
