@@ -1271,6 +1271,7 @@ class TerminalRejoinLoop:
         }
 
         pkgs = get_target_packages(cfg)  # resolved once; per-frame package scans spawn many shells
+        frame_lines = []
 
         def strip(s):
             return re.sub(r'\033\[[0-9;]*m', '', s)
@@ -1281,8 +1282,24 @@ class TerminalRejoinLoop:
             translation isn't happening, '\\n' only moves down a row and each
             line starts wherever the previous one's cursor ended up, producing
             a diagonal staircase effect. Writing '\\r\\n' explicitly makes the
-            column-0 return independent of the terminal's line-ending mode."""
-            sys.stdout.write(str(s) + "\r\n")
+            column-0 return independent of the terminal's line-ending mode.
+
+            Lines are collected and written as ONE frame (see draw_frame) so the
+            screen is never half-drawn and nothing scrolls into the scrollback."""
+            frame_lines.append(str(s))
+
+        def draw_frame():
+            """Home the cursor, repaint every line (clearing to end of line) and clear below.
+            The dashboard runs on the alternate screen, which has no scrollback, but a frame
+            taller than the terminal would still scroll it, so keep only the bottom rows that fit
+            (the table and activity log, not the title banner)."""
+            try:
+                rows = os.get_terminal_size().lines
+            except OSError:
+                rows = 24
+            lines = frame_lines[-max(1, rows - 1):]
+            sys.stdout.write("\033[H" + "".join(line + "\033[K\r\n" for line in lines) + "\033[J")
+            sys.stdout.flush()
 
         def detect_width(fallback):
             """Probe the real terminal width fresh each call. Reserves one
@@ -1371,9 +1388,12 @@ class TerminalRejoinLoop:
                     input_fd = candidate_fd
                     termios_module = termios
 
+            # Alternate screen: no scrollback, so frames can't pile up in history; the menu comes back intact.
+            sys.stdout.write("\033[?1049h\033[?25l")
+            sys.stdout.flush()
             while self.running:
                 frame_started = time.monotonic()
-                sys.stdout.write("\033[H\033[2J")  # cursor home + clear; no 'clear' fork per frame
+                frame_lines.clear()
 
                 target_w = detect_width(cfg.get('dashboard_width', 40))
                 COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
@@ -1427,7 +1447,7 @@ class TerminalRejoinLoop:
                     out(f"  {l}")
                 out(SEP)
                 out(f"{BOLD}[Enter] Stop & Main Menu{RESET}")
-                sys.stdout.flush()
+                draw_frame()
 
                 refresh_interval = max(0.5, float(cfg.get('dashboard_refresh_interval', 2)))
                 deadline = frame_started + refresh_interval
@@ -1452,6 +1472,8 @@ class TerminalRejoinLoop:
         except Exception as e:
             self.log(f"[!] Dashboard error: {e}")
         finally:
+            sys.stdout.write("\033[?25h\033[?1049l")  # show cursor, leave the alternate screen
+            sys.stdout.flush()
             if input_fd is not None and saved_terminal_mode is not None:
                 try:
                     termios_module.tcsetattr(input_fd, termios_module.TCSADRAIN, saved_terminal_mode)
