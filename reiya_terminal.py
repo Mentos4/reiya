@@ -33,10 +33,11 @@ import urllib.parse
 import mimetypes
 import select
 import base64
+import copy
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.25-REI-REJOIN"
-BUILD_TIME = "2026-09-30 11:08:47 UTC"
+BUILD_VERSION = "v6.9.26-REI-REJOIN"
+BUILD_TIME = "2026-10-19 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -92,7 +93,12 @@ DEFAULT_CONFIG = {
 }
 
 # Global config state
-config = DEFAULT_CONFIG.copy()
+config = copy.deepcopy(DEFAULT_CONFIG)
+
+PKG_RE = re.compile(r'[A-Za-z0-9._]+')
+
+def valid_pkg(package):
+    return bool(PKG_RE.fullmatch(str(package or '')))
 
 _CONFIG_RANGES = {
     'check_interval': (1.0, 300.0),
@@ -112,7 +118,7 @@ _CONFIG_RANGES = {
 
 def validate_config(values):
     """Return a normalized config while retaining forward-compatible keys."""
-    clean = DEFAULT_CONFIG.copy()
+    clean = copy.deepcopy(DEFAULT_CONFIG)
     if isinstance(values, dict):
         clean.update(values)
 
@@ -125,14 +131,10 @@ def validate_config(values):
         except (TypeError, ValueError):
             clean[key] = default
 
-    for key in ('selected_packages',):
-        value = clean.get(key)
-        if not isinstance(value, list):
-            value = []
-        clean[key] = list(dict.fromkeys(
-            str(pkg) for pkg in value
-            if re.fullmatch(r'[A-Za-z0-9._]+', str(pkg))
-        ))
+    value = clean.get('selected_packages')
+    if not isinstance(value, list):
+        value = []
+    clean['selected_packages'] = list(dict.fromkeys(str(pkg) for pkg in value if valid_pkg(pkg)))
 
     for key in ('package_games', 'package_game_names', 'package_account_names'):
         if not isinstance(clean.get(key), dict):
@@ -216,23 +218,15 @@ def run_cmd(cmd, timeout=5):
         return subprocess.CompletedProcess(cmd, -1, '', '')
 
 def check_su_works():
-    try:
-        res = subprocess.run("su -c 'id'", shell=True, capture_output=True, text=True, timeout=2)
-        if 'uid=0' in res.stdout or 'root' in res.stdout.lower():
-            return True
-    except Exception:
-        pass
-    return False
+    out = run_cmd("su -c 'id'", timeout=2).stdout
+    return 'uid=0' in out or 'root' in out.lower()
 
 def clear_terminal_screen():
     """Clear terminal screen completely preventing duplicate overlapping headers."""
     try:
-        if os.name == 'posix':
-            os.system('clear')
-        else:
-            os.system('cls')
+        os.system('clear' if os.name == 'posix' else 'cls')
     except Exception:
-        print("\033[H\033[2J\033[3J", end="")
+        print("[H[2J[3J", end="")
 
 def prompt(text=''):
     try:
@@ -243,126 +237,80 @@ def prompt(text=''):
         pass
     return input(text)
 
+def _parse_pm_lines(text):
+    return {line.strip()[8:].strip() for line in (text or '').splitlines() if line.strip().startswith('package:')}
+
 def get_installed_packages():
-    """
-    Discover all installed packages on Android / VPhone / Emulators.
-    Uses shell execution with su root fallbacks for maximum compatibility.
-    """
+    """Discover installed packages. Tries cheap strategies first and stops at
+    the first one that yields results, so only one or two shells are forked."""
     packages = set()
 
-    # Strategy 1: Try su shell pm list packages (VPhone / Rooted Emulators)
-    try:
-        res = subprocess.run("su -c 'pm list packages'", shell=True, capture_output=True, text=True, timeout=5)
-        for line in res.stdout.strip().split('\n'):
-            line = line.strip()
-            if line.startswith('package:'):
-                packages.add(line[8:].strip())
-    except Exception:
-        pass
+    # Strategies 1-3: package listings (root first, then plain shell)
+    for cmd in ("su -c 'pm list packages'", 'pm list packages -3', 'pm list packages',
+                'cmd package list packages', '/system/bin/pm list packages'):
+        packages |= _parse_pm_lines(run_cmd(cmd, timeout=5).stdout)
+        if packages:
+            break
 
-    # Strategy 2: Try su shell dumpsys package packages
+    # Strategy 4: dumpsys package dump
     if not packages:
-        try:
-            res = subprocess.run("su -c 'dumpsys package packages'", shell=True, capture_output=True, text=True, timeout=5)
-            for line in res.stdout.strip().split('\n'):
-                match = re.search(r'Package \[([^\]]+)\]', line)
-                if match:
-                    packages.add(match.group(1).strip())
-        except Exception:
-            pass
+        out = run_cmd("su -c 'dumpsys package packages'", timeout=5).stdout
+        packages |= set(re.findall(r'Package \[([^\]]+)\]', out))
 
-    # Strategy 3: Standard pm commands
+    # Strategy 5: app data dirs and running process names
     if not packages:
-        for cmd in ['pm list packages -3', 'pm list packages', 'cmd package list packages', '/system/bin/pm list packages']:
-            try:
-                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
-                for line in res.stdout.strip().split('\n'):
-                    line = line.strip()
-                    if line.startswith('package:'):
-                        packages.add(line[8:].strip())
-            except Exception:
-                pass
-
-    # Strategy 4: Try su -c "ls /data/data"
-    try:
-        res = subprocess.run("su -c 'ls /data/data'", shell=True, capture_output=True, text=True, timeout=5)
-        for line in res.stdout.strip().split('\n'):
+        for line in run_cmd("su -c 'ls /data/data'", timeout=5).stdout.splitlines():
             pkg = line.strip()
             if pkg and '.' in pkg and not pkg.startswith('/'):
                 packages.add(pkg)
-    except Exception:
-        pass
+        for line in run_cmd('ps -A', timeout=5).stdout.splitlines():
+            parts = line.split()
+            name = parts[-1] if parts else ''
+            if '.' in name and not name.startswith(('[', '/')):
+                packages.add(name)
 
-    # Strategy 5: Extract running process names via ps -A
-    try:
-        res = subprocess.run('ps -A', shell=True, capture_output=True, text=True, timeout=5)
-        for line in res.stdout.strip().split('\n'):
-            parts = line.strip().split()
-            if parts:
-                name = parts[-1]
-                if '.' in name and not name.startswith('[') and not name.startswith('/'):
-                    packages.add(name)
-    except Exception:
-        pass
-
-    # Strategy 6: Hard fallback for when Termux package scanner is completely blocked
+    # Strategy 6: hard fallback when the package scanner is completely blocked
     if not packages:
-        for known in ['com.roblox.client', 'free.nokaA', 'free.nokaB', 'free.nokaC', 'com.delta.client']:
-            try:
-                res = subprocess.run(f"dumpsys package {known}", shell=True, capture_output=True, text=True, timeout=2)
-                if "versionName=" in res.stdout:
-                    packages.add(known)
-            except Exception:
-                pass
+        for known in ('com.roblox.client', 'free.nokaA', 'free.nokaB', 'free.nokaC', 'com.delta.client'):
+            if "versionName=" in run_cmd(f"dumpsys package {known}", timeout=2).stdout:
+                packages.add(known)
 
-    return sorted(list(packages))
+    return sorted(packages)
 
-def get_roblox_packages():
-    """Filter all installed packages to ONLY include Roblox apps, Roblox clones, and Executors."""
-    all_pkgs = get_installed_packages()
-    keywords = [
-        'roblox', 'noka', 'blox', 'delta', 'arceus', 'executor',
-        'codex', 'fluxus', 'trigon', 'vegas', 'hydrogen', 'evon', 'krnl'
-    ]
+_ROBLOX_KEYWORDS = (
+    'roblox', 'noka', 'blox', 'delta', 'arceus', 'executor',
+    'codex', 'fluxus', 'trigon', 'vegas', 'hydrogen', 'evon', 'krnl',
+)
+_roblox_pkg_cache = (0.0, [])
+ROBLOX_PKG_CACHE_TTL = 30  # seconds; full package scans fork several shells
 
-    roblox_pkgs = [p for p in all_pkgs if any(k in p.lower() for k in keywords)]
-    
-    # Always forcefully display packages that were previously saved/selected
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            cfg = json.load(f)
-            for p in cfg.get('selected_packages', []):
-                roblox_pkgs.append(p)
-    except Exception:
-        pass
-        
-    return sorted(list(set(roblox_pkgs)))
+def get_roblox_packages(force=False):
+    """Installed Roblox apps, clones and executors plus any saved selection.
+    Cached briefly because callers poll it and each scan spawns shells."""
+    global _roblox_pkg_cache
+    now = time.time()
+    if not force and _roblox_pkg_cache[1] and now - _roblox_pkg_cache[0] < ROBLOX_PKG_CACHE_TTL:
+        return list(_roblox_pkg_cache[1])
+    found = {p for p in get_installed_packages() if any(k in p.lower() for k in _ROBLOX_KEYWORDS)}
+    found.update(config.get('selected_packages', []))
+    _roblox_pkg_cache = (now, sorted(found))
+    return list(_roblox_pkg_cache[1])
 
-def is_app_running(package):
-    """Check if the app process is alive. Only returns True if a real numeric PID is found."""
-    for cmd in [f"su -c 'pidof {package}'", f"pidof {package}"]:
-        try:
-            res = run_cmd(cmd, timeout=3)
-            out = res.stdout.strip()
-            # Must be non-empty AND all parts must be numeric (actual PIDs)
-            if out and all(part.isdigit() for part in out.split()):
-                return True
-        except Exception:
-            pass
-    return False
+def get_target_packages(cfg):
+    """Selected packages, or every detected Roblox package when none are selected."""
+    return list(cfg.get('selected_packages') or get_roblox_packages())
 
 def get_running_packages(packages):
     """Return live packages using pidof inside a single su call for exact matching and speed."""
+    packages = [p for p in packages if valid_pkg(p)]
     if not packages:
         return set()
-    
-    pkg_list = " ".join(packages)
-    cmd = f"su -c 'for p in {pkg_list}; do if pidof \"$p\" >/dev/null; then echo \"$p\"; fi; done'"
-    try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3)
-        return set(res.stdout.split())
-    except Exception:
-        return set()
+    cmd = f"su -c 'for p in {' '.join(packages)}; do if pidof \"$p\" >/dev/null; then echo \"$p\"; fi; done'"
+    return set(run_cmd(cmd, timeout=3).stdout.split())
+
+def is_app_running(package):
+    """True only if pidof reports a real process (error text is never parsed as a PID)."""
+    return package in get_running_packages([package])
 
 def get_active_package_tasks(packages):
     """Return packages with a live Activity, or None when the task dump is unavailable.
@@ -372,40 +320,12 @@ def get_active_package_tasks(packages):
     """
     if not packages:
         return set()
-    try:
-        res = run_cmd("su -c 'dumpsys activity top'", timeout=8)
-        output = res.stdout or ''
-        if res.returncode != 0 or not re.search(r'^TASK\s', output, re.MULTILINE):
-            return None
-        active = set()
-        for match in re.finditer(r'^\s+ACTIVITY\s+([A-Za-z0-9._]+)/\S+\s+\S+\s+pid=(\d+)\b', output, re.MULTILINE):
-            active.add(match.group(1))
-        return active.intersection(packages)
-    except Exception:
+    res = run_cmd("su -c 'dumpsys activity top'", timeout=8)
+    output = res.stdout or ''
+    if res.returncode != 0 or not re.search(r'^TASK\s', output, re.MULTILINE):
         return None
-
-def get_package_activity_dump(package, content):
-    """
-    Extract all lines in 'dumpsys activity top' belonging to the target package's task/activity block.
-    """
-    lines = content.split('\n')
-    pkg_lines = []
-    capturing = False
-
-    for line in lines:
-        if ('TASK ' in line or 'ACTIVITY ' in line) and package in line:
-            capturing = True
-            pkg_lines.append(line)
-        elif capturing:
-            if ('TASK ' in line or 'ACTIVITY ' in line) and package not in line:
-                break
-            pkg_lines.append(line)
-
-    return pkg_lines
-
-# (Activity detection logic removed per user request)
-
-
+    active = set(re.findall(r'^\s+ACTIVITY\s+([A-Za-z0-9._]+)/\S+\s+\S+\s+pid=\d+', output, re.MULTILINE))
+    return active.intersection(packages)
 
 def get_screen_size():
     """Get screen resolution width and height via wm size."""
@@ -421,46 +341,46 @@ def get_screen_size():
         pass
     return 1280, 720
 
-def launch_game(package, game_id):
-    """Launch Roblox game directly into place ID for targeted clone package."""
-    package = str(package).strip()
-    if not re.fullmatch(r'[A-Za-z0-9._]+', package):
-        return False
-    game_id = str(game_id).strip()
-    if not game_id:
-        game_id = '2753915549'
-
-    if '?privateServerLinkCode=' in game_id:
-        parts = game_id.split('?privateServerLinkCode=', 1)
-        place_match = re.search(r'(?:/games/)?(\d+)', parts[0])
-        place_id = place_match.group(1) if place_match else ''
-        link_code = parts[1].split('&', 1)[0]
-        if not place_id or not re.fullmatch(r'[A-Za-z0-9_-]+', link_code):
-            return False
-        url = f'roblox://placeId={place_id}&linkCode={link_code}'
-        web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
-    elif game_id.startswith('http'):
+def _build_launch_urls(game_id):
+    """Return (roblox:// url, web url) for a place ID / game link / private server link, or None."""
+    game_id = str(game_id).strip() or '2753915549'
+    link_code = None
+    if game_id.startswith('http'):
         parsed = urllib.parse.urlparse(game_id)
         host = (parsed.hostname or '').lower()
         match = re.search(r'/games/(\d+)', parsed.path)
         if parsed.scheme not in ('http', 'https') or not (host == 'roblox.com' or host.endswith('.roblox.com')) or not match:
-            return False
+            return None
         place_id = match.group(1)
         ps_match = re.search(r'privateServerLinkCode=([^&]+)', game_id)
         if ps_match:
             link_code = urllib.parse.unquote(ps_match.group(1))
-            if not re.fullmatch(r'[A-Za-z0-9_-]+', link_code):
-                return False
-            url = f'roblox://placeId={place_id}&linkCode={link_code}'
-            web_url = f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}'
-        else:
-            url = f'roblox://placeId={place_id}'
-            web_url = f'https://www.roblox.com/games/{place_id}'
+    elif '?privateServerLinkCode=' in game_id:
+        head, tail = game_id.split('?privateServerLinkCode=', 1)
+        place_match = re.search(r'(?:/games/)?(\d+)', head)
+        place_id = place_match.group(1) if place_match else ''
+        link_code = tail.split('&', 1)[0]
+    elif game_id.isdigit():
+        place_id = game_id
     else:
-        if not game_id.isdigit():
-            return False
-        url = f'roblox://placeId={game_id}'
-        web_url = f'https://www.roblox.com/games/{game_id}'
+        return None
+
+    if not place_id or (link_code is not None and not re.fullmatch(r'[A-Za-z0-9_-]+', link_code)):
+        return None
+    if link_code:
+        return (f'roblox://placeId={place_id}&linkCode={link_code}',
+                f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}')
+    return f'roblox://placeId={place_id}', f'https://www.roblox.com/games/{place_id}'
+
+def launch_game(package, game_id):
+    """Launch Roblox game directly into place ID for targeted clone package."""
+    package = str(package).strip()
+    if not valid_pkg(package):
+        return False
+    urls = _build_launch_urls(game_id)
+    if not urls:
+        return False
+    url, web_url = urls
 
     # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
     # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
@@ -475,41 +395,30 @@ def launch_game(package, game_id):
     ]
 
     for cmd in intents:
-        try:
-            res = run_cmd(cmd, timeout=6)
-            if res.returncode == 0 and "Error" not in res.stdout:
-                return True
-        except Exception:
-            pass
-
+        res = run_cmd(cmd, timeout=6)
+        if res.returncode == 0 and "Error" not in res.stdout:
+            return True
     return False
 
 def _resolve_package_game_id(pkg, cfg):
     """Resolve active Game ID or Private Server Link for a specific package."""
-    method = cfg.get('game_method', 'all')
-    if method == 'each':
-        pkg_games = cfg.get('package_games', {})
-        return pkg_games.get(pkg, cfg.get('game_id', ''))
+    if cfg.get('game_method', 'all') == 'each':
+        return cfg.get('package_games', {}).get(pkg, cfg.get('game_id', ''))
     return cfg.get('game_id', '')
+
+def _place_label(gid):
+    return f"Place:{gid[:12]}" if gid else 'No Game Set'
 
 def _resolve_package_game_name(pkg, cfg):
     """Resolve display name of the configured game for a specific package."""
-    method = cfg.get('game_method', 'all')
-    if method == 'each':
-        pkg_names = cfg.get('package_game_names', {})
-        if pkg in pkg_names and pkg_names[pkg]:
-            return pkg_names[pkg]
+    if cfg.get('game_method', 'all') == 'each':
+        name = cfg.get('package_game_names', {}).get(pkg)
+        if name:
+            return name
         gid = cfg.get('package_games', {}).get(pkg, '')
         if gid:
-            for gname, pid in PRESET_GAMES:
-                if pid == gid:
-                    return gname
-            return f"Place:{gid[:12]}"
-    gname = cfg.get('game_name')
-    if gname:
-        return gname
-    gid = cfg.get('game_id')
-    return f"Place:{gid[:12]}" if gid else 'No Game Set'
+            return next((gname for gname, pid in PRESET_GAMES if pid == gid), _place_label(gid))
+    return cfg.get('game_name') or _place_label(cfg.get('game_id'))
 
 _roblox_username_cache = {}
 
@@ -548,7 +457,7 @@ def _extract_roblox_identity(text):
 
 def get_roblox_username(package):
     """Detect the logged-in Roblox account for a clone from its Player logs and shared_prefs (from commit f55b982)."""
-    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
+    if not valid_pkg(package):
         return ''
 
     now = time.time()
@@ -598,9 +507,9 @@ def get_roblox_username(package):
 
 def get_package_username(package, cfg, idx):
     """Resolve active Roblox username for package using commit f55b982 logic."""
-    pkg_users = cfg.get('package_account_names', {})
-    if package in pkg_users and pkg_users[package]:
-        return pkg_users[package]
+    custom = cfg.get('package_account_names', {}).get(package)
+    if custom:
+        return custom
 
     detected = get_roblox_username(package)
     if detected:
@@ -612,35 +521,24 @@ def get_package_username(package, cfg, idx):
         short_alias = parts[-2]
     if short_alias.lower() == 'roblox':
         short_alias = 'Roblox'
-    if short_alias and len(short_alias) >= 2:
-        return short_alias
-
-    return f"Acc_{idx:02d}"
+    return short_alias if len(short_alias) >= 2 else f"Acc_{idx:02d}"
 
 
 def force_stop_app(package):
     """Force stop an application using am force-stop."""
-    try:
-        run_cmd(f"su -c 'am force-stop {package}'", timeout=5)
-        return True
-    except Exception as e:
-        print(f"[!] Force stop error: {e}")
-        return False
+    return valid_pkg(package) and run_cmd(f"su -c 'am force-stop {package}'", timeout=5).returncode != -1
 
 def clear_app_cache(package):
     """Clear all app data using Android `pm clear` (legacy function name)."""
-    try:
-        run_cmd(f"su -c 'pm clear {package}'", timeout=10)
-        return True
-    except Exception as e:
-        print(f"[!] Clear cache error: {e}")
-        return False
+    return valid_pkg(package) and run_cmd(f"su -c 'pm clear {package}'", timeout=10).returncode != -1
+
+_DISCONNECT_SIGNALS = ('error code: 288', 'error code 288', 'error code: 277', 'error code 277',
+                       'disconnected from the experience', 'disconnectreason')
 
 def check_roblox_log_state(package):
     """Check Roblox logs for Error Code 288, 277, or general Disconnect signals."""
-    if not package or not re.fullmatch(r'[A-Za-z0-9._]+', str(package)):
+    if not valid_pkg(package):
         return False
-        
     log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs /sdcard/Android/data/{package}/files/logs"
     cmd = (
         f"su -c '"
@@ -648,20 +546,8 @@ def check_roblox_log_state(package):
         f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
         f"'"
     )
-    
-    try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=4)
-        text = res.stdout.lower() if res.stdout else ''
-        
-        # Check for Disconnects
-        if ('error code: 288' in text or 'error code 288' in text or 
-            'error code: 277' in text or 'error code 277' in text or
-            'disconnected from the experience' in text or 'disconnectreason' in text):
-            return True
-            
-    except Exception:
-        pass
-    return False
+    text = (run_cmd(cmd, timeout=4).stdout or '').lower()
+    return any(sig in text for sig in _DISCONNECT_SIGNALS)
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -756,65 +642,56 @@ def get_cpu_usage():
 
 _last_ram_usage = (0.0, 0.0)
 _last_ram_time = 0.0
+RAM_CACHE_TTL = 15.0  # seconds
+
+def _kb_to_gb(kb):
+    return round(kb / 1024 / 1024, 2)
+
+def _ram_from_proc_meminfo():
+    """(used_kb, total_kb) from /proc/meminfo, or None. Cheap: no process spawn when readable."""
+    content = _read_proc_file('/proc/meminfo') or ''
+    meminfo = {}
+    for line in content.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            meminfo[parts[0].rstrip(':')] = int(parts[1])
+    total_kb = meminfo.get('MemTotal', 0)
+    if total_kb <= 0:
+        return None
+    avail_kb = meminfo.get('MemAvailable') or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
+    return max(0, total_kb - avail_kb), total_kb
+
+def _ram_from_dumpsys():
+    """(used_kb, total_kb) from `dumpsys meminfo`, or None. Heavy: only a fallback."""
+    for dump_cmd in ("su -c 'dumpsys meminfo'", 'dumpsys meminfo'):
+        res = run_cmd(dump_cmd, timeout=3)
+        if res.returncode != 0 or not res.stdout.strip():
+            continue
+        values = {}
+        for label in ('Total RAM', 'Free RAM', 'Used RAM'):
+            m = re.search(rf'{label}:\s*([\d,]+)\s*K', res.stdout)
+            values[label] = int(m.group(1).replace(',', '')) if m else 0
+        total_kb = values['Total RAM']
+        if total_kb > 0:
+            used_kb = values['Used RAM'] or max(0, total_kb - values['Free RAM'])
+            return used_kb, total_kb
+    return None
 
 def get_ram_usage():
-    """
-    Retrieves live system RAM usage (used_gb, total_gb).
-    Caches for 15s to prevent Android shell crashes from spamming dumpsys.
-    """
+    """Live system RAM (used_gb, total_gb), cached for RAM_CACHE_TTL seconds.
+    /proc/meminfo is tried first because `dumpsys meminfo` is expensive and,
+    when polled every dashboard frame, crashes constrained Android shells."""
     global _last_ram_usage, _last_ram_time
     now = time.time()
-    if now - _last_ram_time < 15.0 and _last_ram_usage[1] > 0:
+    if now - _last_ram_time < RAM_CACHE_TTL and _last_ram_usage[1] > 0:
         return _last_ram_usage
-
     try:
-        # Layer 1: dumpsys meminfo (dynamic live stats on Android / Cloudphones)
-        for dump_cmd in ["su -c 'dumpsys meminfo'", 'dumpsys meminfo']:
-            res = run_cmd(dump_cmd, timeout=3)
-            if res.returncode == 0 and res.stdout.strip():
-                tot_kb, free_kb, used_kb = 0, 0, 0
-                for line in res.stdout.split('\n'):
-                    if 'Total RAM:' in line:
-                        m = re.search(r'([\d,]+)\s*K', line)
-                        if m:
-                            tot_kb = int(m.group(1).replace(',', ''))
-                    elif 'Free RAM:' in line:
-                        m = re.search(r'([\d,]+)\s*K', line)
-                        if m:
-                            free_kb = int(m.group(1).replace(',', ''))
-                    elif 'Used RAM:' in line:
-                        m = re.search(r'([\d,]+)\s*K', line)
-                        if m:
-                            used_kb = int(m.group(1).replace(',', ''))
-                if tot_kb > 0:
-                    if used_kb == 0 and free_kb > 0:
-                        used_kb = max(0, tot_kb - free_kb)
-                    u_gb = round(used_kb / 1024 / 1024, 2)
-                    t_gb = round(tot_kb / 1024 / 1024, 2)
-                    if t_gb > 0:
-                        _last_ram_usage = (u_gb, t_gb)
-                        return _last_ram_usage
-
-        # Layer 2: /proc/meminfo fallback
-        content = _read_proc_file('/proc/meminfo') or ''
-        if content:
-            meminfo = {}
-            for line in content.split('\n'):
-                parts = line.split()
-                if len(parts) >= 2:
-                    meminfo[parts[0].rstrip(':')] = int(parts[1])
-            total_kb = meminfo.get('MemTotal', 0)
-            if total_kb > 0:
-                avail_kb = meminfo.get('MemAvailable', 0) or (meminfo.get('MemFree', 0) + meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
-                used_kb = max(0, total_kb - avail_kb)
-                u_gb = round(used_kb / 1024 / 1024, 2)
-                t_gb = round(total_kb / 1024 / 1024, 2)
-                if u_gb > 0 and t_gb > 0:
-                    _last_ram_usage = (u_gb, t_gb)
-                    _last_ram_time = now
-                    return _last_ram_usage
+        reading = _ram_from_proc_meminfo() or _ram_from_dumpsys()
+        if reading:
+            _last_ram_usage = (_kb_to_gb(reading[0]), _kb_to_gb(reading[1]))
     except Exception:
         pass
+    _last_ram_time = now  # also throttle failures so a broken reader isn't retried every frame
     return _last_ram_usage
 
 _process_ram_cache = {}  # package -> (ram_mb | None, timestamp)
@@ -845,7 +722,7 @@ def _parse_process_ram_kb(content):
 def get_process_ram(package, force=False):
     """Return total app-process memory in MB, preferring aggregate PSS."""
     package = str(package or '').strip()
-    if not re.fullmatch(r'[A-Za-z0-9._]+', package):
+    if not valid_pkg(package):
         return None
 
     now = time.time()
@@ -884,25 +761,25 @@ def get_process_ram(package, force=False):
                 ram_kb = sum(values)
                 break
 
-    ram_mb = max(1, int(round(ram_kb / 1024.0))) if ram_kb and ram_kb > 0 else None
+    ram_mb = max(1, round(ram_kb / 1024)) if ram_kb and ram_kb > 0 else None
     _process_ram_cache[package] = (ram_mb, now)
     return ram_mb
 
 def format_process_ram(ram_mb):
     return f'{int(ram_mb)} MB' if isinstance(ram_mb, (int, float)) and ram_mb > 0 else 'N/A'
 
+_device_name_cache = None
+
 def get_device_name():
-    try:
-        result = run_cmd('getprop ro.product.model', timeout=3)
-        return result.stdout.strip() or 'Unknown'
-    except Exception:
-        return 'Unknown'
+    global _device_name_cache
+    if _device_name_cache is None:
+        _device_name_cache = run_cmd('getprop ro.product.model', timeout=3).stdout.strip() or 'Unknown'
+    return _device_name_cache
 
 def format_uptime(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    return f"{h:02d}h:{m:02d}m:{s:02d}s"
+    h, rem = divmod(int(seconds), 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}h:{m:02d}m:{sec:02d}s"
 
 def take_screenshot(output_path=None):
     """Capture as root, then copy the PNG into a Termux-owned file."""
@@ -976,77 +853,66 @@ def send_discord_webhook(webhook_url, statuses=None, start_time=None):
     }
 
     payload = {'embeds': [embed]}
-    # Ignore malformed Android/Termux proxy environment variables.
-    webhook_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     screenshot_path = take_screenshot()
-
-    if screenshot_path and os.path.exists(screenshot_path):
+    has_shot = bool(screenshot_path and os.path.exists(screenshot_path))
+    if has_shot:
         embed['image'] = {'url': 'attachment://screenshot.png'}
         payload['attachments'] = [{'id': 0, 'filename': 'screenshot.png'}]
 
-    # curl is the most reliable Discord transport on Termux; urllib remains a fallback.
+    sent = _post_webhook_curl(webhook_url, payload, screenshot_path if has_shot else None)
+    if not sent:
+        sent = _post_webhook_urllib(webhook_url, payload, screenshot_path if has_shot else None)
+    if sent:
+        print('[+] Webhook sent with screenshot.' if has_shot else '[+] Webhook JSON sent.')
+
+def _post_webhook_curl(webhook_url, payload, screenshot_path):
+    """curl is the most reliable Discord transport on Termux."""
+    args = ['curl', '--noproxy', '*', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
+            '-F', 'payload_json=' + json.dumps(payload)]
+    if screenshot_path:
+        args += ['-F', 'files[0]=@' + screenshot_path + ';type=image/png']
+    args.append(webhook_url)
     try:
-        curl_args = ['curl', '--noproxy', '*', '-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST',
-                     '-F', 'payload_json=' + json.dumps(payload)]
-        if screenshot_path and os.path.exists(screenshot_path):
-            curl_args += ['-F', 'files[0]=@' + screenshot_path + ';type=image/png']
-        curl_args.append(webhook_url)
-        curl_result = subprocess.run(curl_args, capture_output=True, text=True, timeout=30)
-        if curl_result.returncode == 0 and curl_result.stdout.strip().startswith('2'):
-            print('[+] Webhook sent with screenshot.' if screenshot_path else '[+] Webhook JSON sent.')
-            return
-        print(f"[!] curl webhook send failed: {curl_result.stderr.strip() or curl_result.stdout.strip()}")
+        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip().startswith('2'):
+            return True
+        print(f"[!] curl webhook send failed: {result.stderr.strip() or result.stdout.strip()}")
     except Exception as e:
         print(f"[!] curl webhook send error: {e}")
+    return False
 
-    if screenshot_path and os.path.exists(screenshot_path):
-        try:
-            boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-            body = []
-            
-            body.append(f'--{boundary}'.encode('utf-8'))
-            body.append('Content-Disposition: form-data; name="payload_json"'.encode('utf-8'))
-            body.append('Content-Type: application/json'.encode('utf-8'))
-            body.append(''.encode('utf-8'))
-            body.append(json.dumps(payload).encode('utf-8'))
-
+def _post_webhook_urllib(webhook_url, payload, screenshot_path):
+    """Fallback transport: multipart when a screenshot exists, otherwise plain JSON."""
+    # Ignore malformed Android/Termux proxy environment variables.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        if screenshot_path:
+            boundary = '----ReiRejoinBoundary7MA4YWxkTrZu0gW'
             with open(screenshot_path, 'rb') as f:
                 img_data = f.read()
-
-            body.append(f'--{boundary}'.encode('utf-8'))
-            body.append('Content-Disposition: form-data; name="file"; filename="screenshot.png"'.encode('utf-8'))
-            body.append('Content-Type: image/png'.encode('utf-8'))
-            body.append(''.encode('utf-8'))
-            body.append(img_data)
-            body.append(f'--{boundary}--'.encode('utf-8'))
-            body.append(''.encode('utf-8'))
-
-            payload_bytes = b'\r\n'.join(body)
-
-            req = urllib.request.Request(
-                webhook_url,
-                data=payload_bytes,
-                headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
-                method='POST'
-            )
-            webhook_opener.open(req, timeout=20)
-            print("[+] Webhook sent with screenshot.")
-            return
-        except Exception as e:
-            print(f"[!] Webhook multipart send failed, falling back to JSON: {e}")
-
-    try:
-        data_bytes = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            webhook_url,
-            data=data_bytes,
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-        webhook_opener.open(req, timeout=15)
-        print("[+] Webhook JSON sent.")
+            body = b'\r\n'.join([
+                f'--{boundary}'.encode(),
+                b'Content-Disposition: form-data; name="payload_json"',
+                b'Content-Type: application/json',
+                b'',
+                json.dumps(payload).encode('utf-8'),
+                f'--{boundary}'.encode(),
+                b'Content-Disposition: form-data; name="files[0]"; filename="screenshot.png"',
+                b'Content-Type: image/png',
+                b'',
+                img_data,
+                f'--{boundary}--'.encode(),
+                b'',
+            ])
+            content_type = f'multipart/form-data; boundary={boundary}'
+        else:
+            body, content_type = json.dumps(payload).encode('utf-8'), 'application/json'
+        req = urllib.request.Request(webhook_url, data=body, headers={'Content-Type': content_type}, method='POST')
+        opener.open(req, timeout=20).close()
+        return True
     except Exception as e:
-        print(f"[!] Webhook JSON send error: {e}")
+        print(f"[!] Webhook send error: {e}")
+        return False
 
 class WebhookThread(threading.Thread):
     def __init__(self, webhook_url, interval, get_status_fn, start_time):
@@ -1134,26 +1000,18 @@ class TerminalRejoinLoop:
 
     def set_app_ram(self, pkg, ram_mb):
         with self.state_lock:
-            current = dict(self.status.get(pkg, {}))
-            current['ram_mb'] = ram_mb
-            current['ram_time'] = time.time()
-            self.status[pkg] = current
+            self.status.setdefault(pkg, {}).update(ram_mb=ram_mb, ram_time=time.time())
 
-    def _get_game_id(self, pkg, cfg):
-        return _resolve_package_game_id(pkg, cfg)
-
-    def _get_game_name(self, pkg, cfg):
-        return _resolve_package_game_name(pkg, cfg)
+    def recent_log_lines(self, count):
+        with self.state_lock:
+            return self.recent_logs[-count:]
 
     def start(self, cfg):
         if self.running or (self.thread and self.thread.is_alive()):
             print("[!] Auto rejoin is already running.")
             return False
 
-        packages = cfg.get('selected_packages', [])
-        if not packages:
-            packages = get_roblox_packages()
-
+        packages = get_target_packages(cfg)
         if not packages:
             self.log("No Roblox packages selected or detected! Please select packages in Option 2.")
             return False
@@ -1179,7 +1037,7 @@ class TerminalRejoinLoop:
             self.webhook_thread.start()
 
         for pkg in packages:
-            run_cmd(f"su -c 'am force-stop {pkg}'", timeout=5)
+            force_stop_app(pkg)
 
         self.thread = threading.Thread(
             target=self._loop,
@@ -1222,10 +1080,13 @@ class TerminalRejoinLoop:
         BLUE   = "\033[94m"
         BOLD   = "\033[1m"
         RESET  = "\033[0m"
+        STATUS_STYLES = {
+            'Ingame': (GREEN, 'Ingame'), 'Rejoining': (RED, 'Rejoining'), 'Rejoining Game': (RED, 'Rejoining'),
+            'Launching': (CYAN, 'Launching'), 'Retry Wait': (YELLOW, 'Wait'),
+            'Launch Failed': (RED, 'Failed'), 'Unknown': (YELLOW, 'Unknown'),
+        }
 
-        pkgs = cfg.get('selected_packages', [])
-        if not pkgs:
-            pkgs = get_roblox_packages()
+        pkgs = get_target_packages(cfg)  # resolved once; per-frame package scans spawn many shells
 
         def strip(s):
             return re.sub(r'\033\[[0-9;]*m', '', s)
@@ -1328,14 +1189,14 @@ class TerminalRejoinLoop:
 
             while self.running:
                 frame_started = time.monotonic()
-                clear_terminal_screen()
+                sys.stdout.write("\033[H\033[2J")  # cursor home + clear; no 'clear' fork per frame
 
                 target_w = detect_width(cfg.get('dashboard_width', 40))
                 COLS, TOTAL_W, cell, pipe_row, table_row, SEP, TABLE_SEP, cpu_w, ram_w = build_layout(target_w)
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
-                game_mode = 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
+                game_mode = game_mode_label(cfg)
 
                 cpu = get_cpu_usage()
                 used_ram, total_ram = get_ram_usage()
@@ -1367,33 +1228,17 @@ class TerminalRejoinLoop:
 
                 statuses = self.get_status()
                 for idx, p in enumerate(pkgs, 1):
-                    info_d    = statuses.get(p, {})
-                    st        = info_d.get('status', 'Launching')
-                    ram_mb    = info_d.get('ram_mb')
+                    info_d = statuses.get(p, {})
+                    st = info_d.get('status', 'Launching')
+                    ram_mb = info_d.get('ram_mb')
                     ram_short = f"{int(ram_mb)}M" if isinstance(ram_mb, (int, float)) and ram_mb > 0 else "N/A"
-                    uname_raw = get_package_username(p, cfg, idx)
-                    user_w    = COLS[1][1]
-                    uname     = uname_raw if len(uname_raw) <= user_w else uname_raw[:max(1, user_w - 1)] + '.'
-
-                    if   st == 'Ingame':                         st_c = f"{GREEN}Ingame{RESET}"
-                    elif st in ('Rejoining', 'Rejoining Game'):  st_c = f"{RED}Rejoining{RESET}"
-                    elif st == 'Launching':                      st_c = f"{CYAN}Launching{RESET}"
-                    elif st == 'Retry Wait':                     st_c = f"{YELLOW}Wait{RESET}"
-                    elif st == 'Launch Failed':                  st_c = f"{RED}Failed{RESET}"
-                    elif st == 'Unknown':                        st_c = f"{YELLOW}Unknown{RESET}"
-                    else:                                        st_c = f"{st[:9]}"
-
-                    pkg_w = COLS[2][1]
-                    pkg_t = p if len(p) <= pkg_w else p[:pkg_w - 1] + '.'
-                    game_w = COLS[5][1]
-                    pkg_gname = _resolve_package_game_name(p, cfg)
-                    gname_t = pkg_gname if len(pkg_gname) <= game_w else pkg_gname[:game_w - 2] + '..'
-
-                    out(table_row([idx, uname, pkg_t, st_c, ram_short, gname_t]))
+                    color, label = STATUS_STYLES.get(st, ('', st[:9]))
+                    out(table_row([idx, get_package_username(p, cfg, idx), p, f"{color}{label}{RESET}" if color else label,
+                                   ram_short, _resolve_package_game_name(p, cfg)]))
 
                 out(SEP)
                 out(f"{BOLD}[Recent Activity Log]{RESET}")
-                logs_to_show = self.recent_logs[-3:] if self.recent_logs else ["[i] Monitoring active packages..."]
+                logs_to_show = self.recent_log_lines(3) or ["[i] Monitoring active packages..."]
                 for l in logs_to_show:
                     out(f"  {l}")
                 out(SEP)
@@ -1418,8 +1263,10 @@ class TerminalRejoinLoop:
                     else:
                         time.sleep(wait_time)
 
-        except (KeyboardInterrupt, Exception):
+        except KeyboardInterrupt:
             pass
+        except Exception as e:
+            self.log(f"[!] Dashboard error: {e}")
         finally:
             if input_fd is not None and saved_terminal_mode is not None:
                 try:
@@ -1446,8 +1293,8 @@ class TerminalRejoinLoop:
         last_task_check = 0.0
         missing_task_checks = {pkg: 0 for pkg in packages}
 
-        def launch_package(pkg, _index, reason):
-            gid = self._get_game_id(pkg, cfg)
+        def launch_package(pkg, reason):
+            gid = _resolve_package_game_id(pkg, cfg)
             self.last_launch[pkg] = time.time()
             launched = launch_game(pkg, gid)
             retry_attempts[pkg] += 1
@@ -1462,18 +1309,19 @@ class TerminalRejoinLoop:
             self.log(f"[{pkg}] {reason}: {'accepted' if launched else 'failed'}")
             return launched
 
-        # Initial launch of all packages
+        # Initial launch of all packages (running set probed once, not per package)
+        already_running = get_running_packages(packages)
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
-                
+
             # If the package is already running upon startup, force close it first
-            if pkg in get_running_packages(packages):
+            if pkg in already_running:
                 self.log(f"[{pkg}] Initializing: Force closing running package")
                 force_stop_app(pkg)
                 time.sleep(1)
                 
-            launch_package(pkg, i, 'Initial launch')
+            launch_package(pkg, 'Initial launch')
             if sequential and i < len(packages) - 1 and stop_event.wait(delay_open_tab):
                 break
 
@@ -1504,7 +1352,7 @@ class TerminalRejoinLoop:
                             else:
                                 missing_task_checks[pkg] = 0
 
-                for i, pkg in enumerate(packages):
+                for pkg in packages:
                     if stop_event.is_set():
                         break
 
@@ -1539,7 +1387,7 @@ class TerminalRejoinLoop:
                             break
 
                         missing_task_checks[pkg] = 0
-                        launch_package(pkg, i, f"Rejoin attempt {retry_attempts[pkg] + 1}/{retry_limit}")
+                        launch_package(pkg, f"Rejoin attempt {retry_attempts[pkg] + 1}/{retry_limit}")
                         continue
 
                     # If process IS running
@@ -1561,7 +1409,7 @@ class TerminalRejoinLoop:
                                 force_stop_app(pkg)
                                 if stop_event.wait(2):
                                     break
-                                launch_package(pkg, i, 'Disconnected from server')
+                                launch_package(pkg, 'Disconnected from server')
                                 continue
                             
                         self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
@@ -1617,18 +1465,61 @@ def show_status():
     w, h = get_screen_size()
     print(f"Device: {device} | Screen Resolution: {w}x{h}")
     print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
-    print(f"Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
+    print(f"Game Mode: {game_mode_label(config)}")
 
     roblox_pkgs = get_roblox_packages()
     print(f"\nDetected Roblox & Executor Packages ({len(roblox_pkgs)}):")
     for pkg in roblox_pkgs:
-        running = is_app_running(pkg)
+        running = pkg in running_now
         status_str = "RUNNING" if running else "STOPPED"
         ram = format_process_ram(get_process_ram(pkg)) if running else 'N/A'
         selected = "*" if pkg in config.get('selected_packages', []) else " "
         pkg_gname = _resolve_package_game_name(pkg, config)
         print(f" [{selected}] {pkg:<30} [{status_str:<7}] Game: {pkg_gname:<18} RAM: {ram}")
     print("=" * 60)
+
+def pause():
+    prompt("\nPress Enter to return to menu...")
+
+def game_mode_label(cfg):
+    return 'CUSTOM PER PACKAGE' if cfg.get('game_method') == 'each' else 'SAME GAME FOR ALL'
+
+def set_selected_packages(packages):
+    config['selected_packages'] = list(dict.fromkeys(packages))
+    save_config()
+
+def ask_int(label, key):
+    """Prompt for an integer setting; blank or invalid input keeps the current value."""
+    value = prompt(f"{label} [{config.get(key, DEFAULT_CONFIG.get(key))}]: ").strip()
+    if value.isdigit():
+        config[key] = int(value)
+
+def ask_bool(label, key):
+    value = prompt(f"{label} (y/n) [{config.get(key, False)}]: ").strip().lower()
+    if value in ('y', 'n'):
+        config[key] = (value == 'y')
+
+def pick_game(header, allow_skip=False, id_width=15):
+    """Show preset games and read a choice. Returns (name, id), or None when skipped."""
+    print(header)
+    for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
+        print(f"  {idx}. {gname} (ID: {gid})")
+    print("  C. Custom Place ID or Private Server Link")
+    if allow_skip:
+        print("  S. Skip (keep current setting)")
+    while True:
+        choice = prompt("Choice: ").strip()
+        if allow_skip and (choice.upper() == 'S' or not choice):
+            return None
+        if choice.upper() == 'C':
+            gid = prompt("  Enter Place ID / Link: ").strip()
+            if not gid:
+                print("  [!] No Place ID / Link entered. Try again.")
+                continue
+            return (f"Game ({gid[:id_width]}...)" if len(gid) > id_width else f"Game ({gid})"), gid
+        if choice.isdigit() and 1 <= int(choice) <= len(PRESET_GAMES):
+            return PRESET_GAMES[int(choice) - 1]
+        print(f"  [!] Invalid choice '{choice}'. Enter 1-{len(PRESET_GAMES)}, C{', or S' if allow_skip else ''}.")
 
 def interactive_menu():
     load_config()
@@ -1652,7 +1543,7 @@ def interactive_menu():
 
         if choice == '1':
             show_status()
-            prompt("\nPress Enter to return to menu...")
+            pause()
         elif choice == '2':
             while True:
                 roblox_pkgs = get_roblox_packages()
@@ -1675,47 +1566,40 @@ def interactive_menu():
                 print("  - Press Enter to keep current selection")
                 indices = prompt("\nChoice: ").strip()
 
-                if indices.upper() == 'ALL':
-                    config['selected_packages'] = list(roblox_pkgs)
-                    save_config()
-                elif indices.upper() == 'CLEAR':
-                    config['selected_packages'] = []
-                    save_config()
-                elif indices.upper() == 'U':
-                    pkgs = config.get('selected_packages') or roblox_pkgs
+                cmd = indices.upper()
+                selected = config.get('selected_packages', [])
+                if cmd == 'ALL':
+                    set_selected_packages(roblox_pkgs)
+                elif cmd == 'CLEAR':
+                    set_selected_packages([])
+                elif cmd == 'U':
+                    pkgs = selected or roblox_pkgs
                     print("\n[+] Configure custom account name / username for package:")
                     for p_i, p_name in enumerate(pkgs, 1):
-                        curr_u = get_package_username(p_name, config, p_i)
-                        print(f"  {p_i}. {p_name:<32} -> Current Name: {curr_u}")
+                        print(f"  {p_i}. {p_name:<32} -> Current Name: {get_package_username(p_name, config, p_i)}")
                     uch = prompt("\nSelect Package Number: ").strip()
                     if uch.isdigit() and 1 <= int(uch) <= len(pkgs):
                         target_p = pkgs[int(uch) - 1]
                         new_u = prompt(f"Enter Account Username / Nickname for '{target_p}': ").strip()
                         if new_u:
-                            if 'package_account_names' not in config: config['package_account_names'] = {}
                             config['package_account_names'][target_p] = new_u
-                            _user_name_cache[target_p] = new_u
                             save_config()
                             print(f"[+] Account name for {target_p} set to '{new_u}'")
-                elif indices.upper() == 'M':
+                elif cmd == 'M':
                     custom_pkg = prompt("\nEnter exact Package Name (e.g. com.noka.client or free.nokaA): ").strip()
-                    if custom_pkg:
-                        sel_set = set(config.get('selected_packages', []))
-                        sel_set.add(custom_pkg)
-                        config['selected_packages'] = list(sel_set)
-                        save_config()
+                    if valid_pkg(custom_pkg):
+                        set_selected_packages(selected + [custom_pkg])
+                    elif custom_pkg:
+                        print("[!] Invalid package name.")
                 elif indices:
-                    sel_set = set(config.get('selected_packages', []))
+                    chosen = list(selected)
                     for item in indices.split(','):
                         item = item.strip()
-                        if '.' in item:
-                            sel_set.add(item)
-                        elif item.isdigit():
-                            i = int(item) - 1
-                            if 0 <= i < len(roblox_pkgs):
-                                sel_set.add(roblox_pkgs[i])
-                    config['selected_packages'] = list(sel_set)
-                    save_config()
+                        if '.' in item and valid_pkg(item):
+                            chosen.append(item)
+                        elif item.isdigit() and 0 <= int(item) - 1 < len(roblox_pkgs):
+                            chosen.append(roblox_pkgs[int(item) - 1])
+                    set_selected_packages(chosen)
 
                 print("\n--- [ CURRENT SELECTED PACKAGES ] ---")
                 if config.get('selected_packages'):
@@ -1727,12 +1611,12 @@ def interactive_menu():
                 again = prompt("\nAdd/change another package now? (y/n, default n): ").strip().lower()
                 if again != 'y':
                     break
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '3':
             while True:
                 print("\n--- [ CONFIGURE GAME SETUP ] ---")
-                print(f"Current Game Mode: {'CUSTOM PER PACKAGE' if config.get('game_method') == 'each' else 'SAME GAME FOR ALL'}")
+                print(f"Current Game Mode: {game_mode_label(config)}")
                 print(f"Global Game Setting: {config.get('game_name', 'None')} ({config.get('game_id', 'N/A')})")
                 print("\nSetup Options:")
                 print("  1. Apply Same Game to ALL Packages")
@@ -1741,80 +1625,32 @@ def interactive_menu():
 
                 if gmode == '2':
                     config['game_method'] = 'each'
-                    pkgs = config.get('selected_packages', [])
-                    if not pkgs:
-                        pkgs = get_roblox_packages()
+                    pkgs = get_target_packages(config)
                     if not pkgs:
                         print("  [!] No Roblox packages detected or selected. Please select packages in Option 2 first!")
                     else:
-                        if 'package_games' not in config: config['package_games'] = {}
-                        if 'package_game_names' not in config: config['package_game_names'] = {}
-
                         print(f"\n[+] Configuring individual games for {len(pkgs)} package(s):")
                         for p_idx, pkg in enumerate(pkgs, 1):
-                            curr_game = _resolve_package_game_name(pkg, config)
-                            print(f"\n--------------------------------------------------")
+                            print("\n" + "-" * 50)
                             print(f"[{p_idx}/{len(pkgs)}] Package: {pkg}")
-                            print(f"Current Game: {curr_game}")
-                            print("Select Game for this package:")
-                            for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
-                                print(f"  {idx}. {gname} (ID: {gid})")
-                            print("  C. Custom Place ID or Private Server Link")
-                            print("  S. Skip (keep current setting)")
-
-                            while True:
-                                gchoice = prompt(f"Choice for {pkg}: ").strip()
-                                if gchoice.upper() == 'C':
-                                    gid = prompt("  Enter Place ID / Link: ").strip()
-                                    if not gid:
-                                        print("  [!] No Place ID / Link entered. Try again.")
-                                        continue
-                                    config['package_games'][pkg] = gid
-                                    gname = f"Game ({gid[:12]}...)" if len(gid) > 12 else f"Game ({gid})"
-                                    config['package_game_names'][pkg] = gname
-                                    break
-                                elif gchoice.upper() == 'S' or not gchoice:
-                                    break
-                                elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
-                                    gname, gid = PRESET_GAMES[int(gchoice) - 1]
-                                    config['package_games'][pkg] = gid
-                                    config['package_game_names'][pkg] = gname
-                                    break
-                                else:
-                                    print(f"  [!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)}, C, or S.")
+                            print(f"Current Game: {_resolve_package_game_name(pkg, config)}")
+                            picked = pick_game("Select Game for this package:", allow_skip=True, id_width=12)
+                            if picked:
+                                config['package_game_names'][pkg], config['package_games'][pkg] = picked
                     save_config()
                     print("\n[+] Per-Package Game Configurations Saved:")
-                    for pkg in (config.get('selected_packages') or get_roblox_packages()):
+                    for pkg in get_target_packages(config):
                         print(f"  ✓ {pkg:<30} -> {_resolve_package_game_name(pkg, config)}")
-
                 else:
                     config['game_method'] = 'all'
-                    print("\nPreset Games (Applies to ALL packages):")
-                    for idx, (gname, gid) in enumerate(PRESET_GAMES, 1):
-                        print(f"  {idx}. {gname} (ID: {gid})")
-                    print("  C. Custom Place ID or Private Server Link")
-                    while True:
-                        gchoice = prompt("\nChoice: ").strip()
-                        if gchoice.upper() == 'C':
-                            gid = prompt("Enter Place ID / Link: ").strip()
-                            if not gid:
-                                print("[!] No Place ID / Link entered. Try again.")
-                                continue
-                            config['game_id'] = gid
-                            config['game_name'] = f"Game ({gid[:15]}...)" if len(gid) > 15 else f"Game ({gid})"
-                            break
-                        elif gchoice.isdigit() and 1 <= int(gchoice) <= len(PRESET_GAMES):
-                            config['game_name'], config['game_id'] = PRESET_GAMES[int(gchoice) - 1]
-                            break
-                        else:
-                            print(f"[!] Invalid choice '{gchoice}'. Enter 1-{len(PRESET_GAMES)} or C.")
+                    config['game_name'], config['game_id'] = pick_game("\nPreset Games (Applies to ALL packages):")
                     save_config()
                     print(f"\n[+] Active Game ID / Link Set for ALL packages: {config.get('game_name')} ({config.get('game_id')})")
 
                 again = prompt("\nConfigure another game/package now? (y/n, default n): ").strip().lower()
                 if again != 'y':
                     break
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '4':
             print(f"\nCurrent Webhook: {config.get('webhook_url', 'None')}")
@@ -1828,40 +1664,22 @@ def interactive_menu():
                 config['webhook_interval'] = int(wint)
             save_config()
             print(f"\n[+] Webhook Enabled: {config.get('webhook_enabled')} | Interval: {config.get('webhook_interval')}s")
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '5':
             print("\nTiming Settings:")
-            check_in = prompt(f"Check Interval seconds [{config.get('check_interval', 2)}]: ").strip()
-            if check_in.isdigit(): config['check_interval'] = int(check_in)
-
-            off_w = prompt(f"Offline Wait seconds [{config.get('offline_wait', 15)}]: ").strip()
-            if off_w.isdigit(): config['offline_wait'] = int(off_w)
-
-            ret_c = prompt(f"Max Retries [{config.get('retry_count', 3)}]: ").strip()
-            if ret_c.isdigit(): config['retry_count'] = int(ret_c)
-
-            seq = prompt(f"Sequential Join? (y/n) [{config.get('sequential_join', False)}]: ").strip().lower()
-            if seq in ['y', 'n']: config['sequential_join'] = (seq == 'y')
-
-            retry_d = prompt(f"Retry Batch Delay seconds [{config.get('retry_delay', 30)}]: ").strip()
-            if retry_d.isdigit(): config['retry_delay'] = int(retry_d)
-
-            cooldown = prompt(f"Minimum Rejoin Cooldown seconds [{config.get('rejoin_cooldown', 10)}]: ").strip()
-            if cooldown.isdigit(): config['rejoin_cooldown'] = int(cooldown)
-
-            ram_rate = prompt(f"Per-App RAM Refresh seconds [{config.get('app_ram_refresh_interval', 30)}]: ").strip()
-            if ram_rate.isdigit(): config['app_ram_refresh_interval'] = int(ram_rate)
-
-            clr = prompt(f"Clear ALL App Data on Rejoin (pm clear; may sign out accounts)? (y/n) [{config.get('clear_cache', False)}]: ").strip().lower()
-            if clr in ['y', 'n']: config['clear_cache'] = (clr == 'y')
-
-            grace = prompt(f"Launch Grace Period (hide Launching status after X seconds) [{config.get('launch_grace', 25)}]: ").strip()
-            if grace.isdigit(): config['launch_grace'] = int(grace)
-
+            ask_int("Check Interval seconds", 'check_interval')
+            ask_int("Offline Wait seconds", 'offline_wait')
+            ask_int("Max Retries", 'retry_count')
+            ask_bool("Sequential Join?", 'sequential_join')
+            ask_int("Retry Batch Delay seconds", 'retry_delay')
+            ask_int("Minimum Rejoin Cooldown seconds", 'rejoin_cooldown')
+            ask_int("Per-App RAM Refresh seconds", 'app_ram_refresh_interval')
+            ask_bool("Clear ALL App Data on Rejoin (pm clear; may sign out accounts)?", 'clear_cache')
+            ask_int("Launch Grace Period (hide Launching status after X seconds)", 'launch_grace')
             save_config()
             print("\n[+] Timing settings updated.")
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '6':
             print("\n--- [ DASHBOARD WIDTH ] ---")
@@ -1876,7 +1694,7 @@ def interactive_menu():
             elif wch:
                 print("[!] Ignored — enter a number of 30 or higher.")
             save_config()
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '7':
             path = config.get('autoexecute_path', '/sdcard/Delta/Autoexecute')
@@ -1897,7 +1715,7 @@ def interactive_menu():
                         break
                     lines.append(line)
                 add_autoexecute_script(path, fname, '\n'.join(lines))
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '8':
             rejoin_engine.start(config)
@@ -1916,12 +1734,10 @@ def interactive_menu():
         elif choice == '9':
             rejoin_engine.stop()
             print("\n[+] Auto Rejoin Engine stopped.")
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '10':
-            pkgs = config.get('selected_packages', [])
-            if not pkgs:
-                pkgs = get_roblox_packages()
+            pkgs = get_target_packages(config)
             if not pkgs:
                 print("[!] Please select packages first.")
             else:
@@ -1933,7 +1749,7 @@ def interactive_menu():
                         continue
                     print(f"Launching {p} into '{gname}' (ID: {gid})...")
                     launch_game(p, gid)
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '11':
             wurl = config.get('webhook_url')
@@ -1942,7 +1758,7 @@ def interactive_menu():
             else:
                 print("Sending test webhook...")
                 send_discord_webhook(wurl, rejoin_engine.get_status(), time.time())
-            prompt("\nPress Enter to return to menu...")
+            pause()
 
         elif choice == '0':
             if rejoin_engine.running:
