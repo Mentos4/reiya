@@ -7,7 +7,7 @@ Single standalone CLI script combining all core functions of REI REJOIN Roblox A
 - DIRECT MULTI-PACKAGE SELECTION (Typing 1,2 directly sets selected packages to #1 and #2)
 - Direct Game Launching via Place ID or Private Server Link
 - Exact Match REI REJOIN ASCII Dashboard UI (2-line REI REJOIN block logo + clean settings & live stats table)
-- Home Page Reset & Callback Rejoin (Force stops stuck Home Screen and retries launch intent until in-game)
+- Home Page Rejoin (re-sends the game link to the running app; never force-stops Roblox)
 - Direct ActivityProtocolLaunch Component Invocation (Bypasses Home screen to connect directly into game place)
 - Instant Home Page & App Exit Re-launch (Triggers immediate rejoin if app is closed or on Home Page)
 - Complete Terminal Screen Buffer Flush (os.system('clear') prevents duplicate terminal headers)
@@ -379,8 +379,15 @@ def _build_launch_urls(game_id):
                 f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}')
     return f'roblox://placeId={place_id}', f'https://www.roblox.com/games/{place_id}'
 
-def launch_game(package, game_id):
-    """Launch Roblox game directly into place ID for targeted clone package."""
+def launch_game(package, game_id, warm=False):
+    """Launch Roblox game directly into place ID for targeted clone package.
+
+    warm=True is for an app that is already running (e.g. sitting on the Roblox
+    home page). A running Roblox silently ignores the component intent
+    (ActivityProtocolLaunch: "intent has been delivered to currently running
+    top-most instance", yet rc=0), but joins from a plain VIEW intent addressed
+    by package, without restarting. A cold start works with either form.
+    """
     package = str(package).strip()
     if not valid_pkg(package):
         return False
@@ -389,17 +396,14 @@ def launch_game(package, game_id):
         return False
     url, web_url = urls
 
-    # Use FLAG_ACTIVITY_NEW_TASK only (0x10000000) — do NOT use CLEAR_TASK (0x14000000)
-    # CLEAR_TASK terminates the whole activity stack which restarts Roblox instead of navigating.
-    intents = [
-        f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d \"{web_url}\"'",
-        f"su -c 'am start -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'",
-        f"su -c 'am start -p {package} -a android.intent.action.VIEW -d \"{url}\"'",
-        f"am start -f 0x10000000 -p {package} -a android.intent.action.VIEW -d '{url}'",
-        f"am start -p {package} -a android.intent.action.VIEW -d '{url}'"
-    ]
+    # FLAG_ACTIVITY_NEW_TASK only (0x10000000) — never CLEAR_TASK (0x14000000), which
+    # terminates the whole activity stack and restarts Roblox instead of navigating.
+    view = "-f 0x10000000 -a android.intent.action.VIEW"
+    by_component = f"su -c 'am start -f 0x10000000 -n {package}/com.roblox.client.ActivityProtocolLaunch -a android.intent.action.VIEW -d \"{url}\"'"
+    by_package = f"su -c 'am start {view} -p {package} -d \"{url}\"'"
+    by_web = f"su -c 'am start {view} -p {package} -d \"{web_url}\"'"
+    no_root = f"am start {view} -p {package} -d '{url}'"
+    intents = ([by_package, by_component] if warm else [by_component, by_package]) + [by_web, no_root]
 
     for cmd in intents:
         res = run_cmd(cmd, timeout=6)
@@ -539,10 +543,6 @@ def get_package_username(package, cfg, idx):
         short_alias = 'Roblox'
     return short_alias if len(short_alias) >= 2 else f"Acc_{idx:02d}"
 
-
-def force_stop_app(package):
-    """Force stop an application using am force-stop."""
-    return valid_pkg(package) and run_cmd(f"su -c 'am force-stop {package}'", timeout=5).returncode != -1
 
 def clear_app_cache(package):
     """Clear all app data using Android `pm clear` (legacy function name)."""
@@ -1087,9 +1087,6 @@ class TerminalRejoinLoop:
             )
             self.webhook_thread.start()
 
-        for pkg in packages:
-            force_stop_app(pkg)
-
         self.thread = threading.Thread(
             target=self._loop,
             args=(list(packages), dict(cfg), self.stop_event),
@@ -1349,45 +1346,29 @@ class TerminalRejoinLoop:
         WINDOW_CHECK = 5    # seconds between activity dumps
         LOG_CHECK    = 8    # seconds between log scans while in a game
         FAST_CHECK   = 3    # ...and while not in a game, so a stuck home page is caught quickly
-        HOME_RELINKS = 2    # warm re-sends of the game link before falling back to a force-stop
         # attempts: launches since last healthy; next: earliest next rejoin;
         # missed: consecutive checks with no live window; log_at: last log scan;
-        # state: last Roblox log state; tries: warm re-links sent from the home page
-        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading', 'tries': 0} for pkg in packages}
+        # state: last Roblox log state
+        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading'} for pkg in packages}
         last_window_check = 0.0
 
-        def launch(pkg, reason):
+        def launch(pkg, reason, warm=False):
             st = state[pkg]
             now = time.time()
             self.last_launch[pkg] = now
-            ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg))
+            ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), warm=warm)
             st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, state='loading')
             self.set_status(pkg, 'Launching' if ok else 'Launch Failed',
                             attempts=st['attempts'], next_retry=st['next'], last_result=reason)
             self.log(f"[{pkg}] {reason}: {'accepted' if ok else 'failed'}")
 
-        def restart(pkg, reason, settle=1, clear=False):
-            """Force stop (optionally wiping data) then launch. False if stopped meanwhile."""
-            self.set_status(pkg, 'Rejoining', attempts=state[pkg]['attempts'] + 1)
-            state[pkg]['tries'] = 0
-            if clear:
-                clear_app_cache(pkg)
-            force_stop_app(pkg)
-            if stop_event.wait(settle):
-                return False
-            launch(pkg, reason)
-            return True
-
-        # Initial launch: close anything already running, then start each package.
+        # Initial launch. Nothing is ever force-stopped: a running Roblox is sent the game link
+        # (warm), because force-stopping a clone's window makes Android close other apps too.
         already_running = get_running_packages(packages) or set()
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
-            if pkg in already_running:
-                self.log(f"[{pkg}] Initializing: Force closing running package")
-                force_stop_app(pkg)
-                time.sleep(1)
-            launch(pkg, 'Initial launch')
+            launch(pkg, 'Initial launch', warm=pkg in already_running)
             if sequential and i < len(packages) - 1 and stop_event.wait(launch_wait):
                 break
 
@@ -1430,9 +1411,10 @@ class TerminalRejoinLoop:
                             self.set_status(pkg, 'Retry Wait', attempts=retry_limit, next_retry=st['next'],
                                             last_result='Retry batch exhausted')
                         else:
-                            self.log(f"[{pkg}] {reason}; force stopping before rejoin")
-                            if not restart(pkg, f"Rejoin attempt {st['attempts'] + 1}/{retry_limit}", clear=auto_clear):
-                                break
+                            self.set_status(pkg, 'Rejoining', attempts=st['attempts'] + 1)
+                            if auto_clear:  # user opted in: wipes app data, which also stops the app
+                                clear_app_cache(pkg)
+                            launch(pkg, f"Rejoin attempt {st['attempts'] + 1}/{retry_limit} ({reason})")
                         continue
 
                     # Process and window are alive.
@@ -1450,20 +1432,13 @@ class TerminalRejoinLoop:
                                 log_state = 'home'  # never joined and never settled: treat as stuck
                             if log_state is not None:  # unknown never changes anything
                                 st['state'] = log_state
-                                st['tries'] = 0 if log_state == 'ingame' else st['tries']
                             stuck_home = home_enabled and log_state == 'home'
-                            if stuck_home and st['tries'] < HOME_RELINKS:
-                                # Re-send the game link to the running app: it joins from the home page
-                                # without killing Roblox (a cold restart can land on home again).
-                                st['tries'] += 1
-                                self.log(f"[{pkg}] On Roblox home page; re-sending game link ({st['tries']}/{HOME_RELINKS})")
-                                launch(pkg, 'Home page: re-sending game link')
-                                continue
-                            if log_state == 'disconnected' or stuck_home:
+                            if stuck_home or log_state == 'disconnected':
+                                # Re-send the game link to the running app. It joins from the home page or
+                                # a disconnect screen without restarting or force-stopping anything.
                                 reason = 'Stuck on Home page' if stuck_home else 'Disconnected from server'
-                                self.log(f"[{pkg}] {reason} (per Roblox log); rejoining")
-                                if not restart(pkg, reason, settle=2):
-                                    break
+                                self.log(f"[{pkg}] {reason} (per Roblox log); re-sending game link")
+                                launch(pkg, reason, warm=True)
                                 continue
                         if st['state'] == 'home':
                             self.set_status(pkg, 'Home Page', attempts=0, last_result='On Roblox home page')
