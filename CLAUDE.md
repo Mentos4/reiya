@@ -48,3 +48,10 @@ rm -f ~/reiya_terminal.py && curl -sL "https://raw.githubusercontent.com/Mentos4
 ## 🔒 Preserved Preferences & Constraints
 - **Design & Branding:** Branding is `REI REJOIN`. Author credit: `seisen_`. Discord: `discord.gg/5G3cStpbcx`.
 - **Features:** Keep Webhook, Sort Tab, Home Rejoin, Clear Cache. Do NOT remove core tabs or options.
+
+### 5. Window Sorting (Sort Tab)
+- Noka clones draw their own floating window (128px title bar + game surface + 64px transparent edge strips), so `am task resize` does NOT work. `place_window()` raises the task with `am start -f 0x10020000 -n pkg/com.roblox.client.ActivityNativeMain` (no restart), then drags the title bar to move and the right/bottom strips to resize, via `su -c 'input swipe ...'`.
+- `sort_targets(count, w, h)` picks the rows x cols grid whose game surfaces are closest to 16:10 (6 -> 3x2, 8 -> 4x2). Frames come from `dumpsys window windows`; only windows with `isReadyForDisplay()=true` are trusted.
+- `get_screen_size()` MUST go through `su -c 'wm size'` first: plain `wm size` fails for the Termux user and the old fallback (1280x720) silently produced a wrong grid.
+- Menu 12 = sort now; config `auto_sort` (Option 5) sorts each package in a background thread ~6s after every (re)launch.
+- Test as the real Termux user (type into Termux over adb), not as root with a fake `su`: that hid the `wm size` bug.

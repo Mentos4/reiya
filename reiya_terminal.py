@@ -30,10 +30,10 @@ import shutil
 import shlex
 import urllib.request
 import urllib.parse
-import mimetypes
 import select
 import base64
 import copy
+import math
 
 # Script version & timestamp
 BUILD_VERSION = "v6.9.26-REI-REJOIN"
@@ -85,6 +85,7 @@ DEFAULT_CONFIG = {
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'home_rejoin_enabled': True,
+    'auto_sort': True,  # tile the Noka clone windows into a screen-filling grid after (re)launch
     # Grace period before a running package stuck on 'Unknown' is force-stopped and
     # relaunched. 0 = rejoin on the first Unknown reading (Home Rejoin turns it off).
     'unknown_stall_seconds': 0,
@@ -335,17 +336,15 @@ def get_active_package_tasks(packages):
     return active.intersection(packages)
 
 def get_screen_size():
-    """Get screen resolution width and height via wm size."""
-    try:
-        res = run_cmd('wm size', timeout=3)
+    """Screen (width, height), always landscape. `wm size` fails for the Termux user on
+    some devices, so ask through su first and only then fall back to a plain call."""
+    for cmd in ("su -c 'wm size'", 'wm size'):
         # `wm size` prints physical first and active override second. Cloud
         # phones commonly use an override, so the last size is the live one.
-        matches = re.findall(r'(\d+)x(\d+)', res.stdout or '')
+        matches = re.findall(r'(\d+)x(\d+)', run_cmd(cmd, timeout=3).stdout or '')
         if matches:
             w, h = (int(value) for value in matches[-1])
-            return (max(w, h), min(w, h))  # Always return landscape orientation (w > h)
-    except Exception:
-        pass
+            return max(w, h), min(w, h)
     return 1280, 720
 
 def _build_launch_urls(game_id):
@@ -378,6 +377,116 @@ def _build_launch_urls(game_id):
         return (f'roblox://placeId={place_id}&linkCode={link_code}',
                 f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}')
     return f'roblox://placeId={place_id}', f'https://www.roblox.com/games/{place_id}'
+
+# ------------------------------------------------------------------------------
+# Window sorting. Noka clones draw their own floating window inside a fullscreen
+# task, so Android's `am task resize` can't move them. Each window is a game surface
+# with a 128px title bar above it and 64px transparent resize strips just outside
+# its edges: dragging the title moves it, dragging the right/bottom strip resizes it.
+# ------------------------------------------------------------------------------
+NOKA_TITLE_H = 128
+NOKA_STRIP = 64
+STATUS_BAR_H = 48
+SORT_TOLERANCE = 12
+
+def sort_targets(count, width, height):
+    """Game-surface rects (x, y, w, h), one per window, tiling the screen in the
+    rows x cols grid whose surfaces come closest to 16:10 (6 -> 3x2, 8 -> 4x2)."""
+    usable = height - STATUS_BAR_H
+    best = None
+    for cols in range(1, count + 1):
+        rows = -(-count // cols)
+        surface_h = usable / rows - NOKA_TITLE_H
+        if surface_h < 100:
+            continue
+        cost = abs(math.log(width / cols / surface_h / 1.6)) + 0.15 * (cols * rows - count)
+        if best is None or cost < best[0]:
+            best = (cost, cols, rows)
+    cols, rows = (best[1], best[2]) if best else (count, 1)
+    cell_w, cell_h = width // cols, usable // rows
+    w = min(cell_w, width - NOKA_STRIP)  # the right strip must stay on screen to be dragged
+    return [((i % cols) * cell_w, STATUS_BAR_H + (i // cols) * cell_h + NOKA_TITLE_H, w, cell_h - NOKA_TITLE_H)
+            for i in range(count)]
+
+_WINDOW_BLOCK = r'(?:(?!\n  Window #).)*?'
+
+def get_noka_frames(packages):
+    """{package: (x, y, w, h)} of each clone's floating game surface that is on screen,
+    from one `dumpsys window`. A window hidden behind a fullscreen app or collapsed into
+    its bubble reports isReadyForDisplay()=false and is left out."""
+    out = run_cmd("su -c 'dumpsys window windows'", timeout=8).stdout or ''
+    frames = {}
+    for m in re.finditer(r'Window\{\w+ u\d+ ([\w.]+)/[\w.$]*ActivityNativeMain\}:' + _WINDOW_BLOCK +
+                         r'isReadyForDisplay\(\)=true' + _WINDOW_BLOCK +
+                         r'mFrame=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]', out, re.S):
+        if m.group(1) in packages:
+            x1, y1, x2, y2 = (int(m.group(i)) for i in range(2, 6))
+            frames[m.group(1)] = (x1, y1, x2 - x1, y2 - y1)
+    return frames
+
+def restore_collapsed_window(package):
+    """Tap the floating bubble a collapsed Noka window leaves behind. True if there was one."""
+    out = run_cmd("su -c 'dumpsys window windows'", timeout=8).stdout or ''
+    m = re.search(r'Window\{\w+ u\d+ ' + re.escape(package) + r'\}:' + _WINDOW_BLOCK + r'ty=APPLICATION_OVERLAY' +
+                  _WINDOW_BLOCK + r'mFrame=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]', out, re.S)
+    if not m:
+        return False
+    x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
+    run_cmd(f"su -c 'input tap {(x1 + x2) // 2} {(y1 + y2) // 2}'", timeout=5)
+    time.sleep(1.5)
+    return True
+
+def _drag(x1, y1, x2, y2):
+    run_cmd(f"su -c 'input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} 400'", timeout=6)
+    time.sleep(0.7)
+
+def place_window(package, target, width, height):
+    """Move/resize one clone window until its game surface matches `target`. True on success."""
+    if not valid_pkg(package):
+        return False
+    tx, ty, tw, th = target
+    raise_cmd = f"su -c 'am start -f 0x10020000 -n {package}/com.roblox.client.ActivityNativeMain'"  # task to front
+    run_cmd(raise_cmd, timeout=5)
+    time.sleep(1)
+    for _ in range(10):
+        frame = get_noka_frames([package]).get(package)
+        if frame is None and restore_collapsed_window(package):
+            run_cmd(raise_cmd, timeout=5)
+            time.sleep(1)
+            frame = get_noka_frames([package]).get(package)
+        if frame is None or (frame[2] >= width - 4 and frame[3] >= height - 80):
+            return False  # not on screen, or maximized (no title/strips to grab)
+        x, y, w, h = frame
+        dw, dh = tw - w, th - h
+        if max(abs(dw), abs(dh), abs(tx - x), abs(ty - y)) <= SORT_TOLERANCE:
+            return True
+        grab_x, grab_y = x + 100, y - NOKA_TITLE_H // 2  # on the title bar, clear of its buttons
+        edge = NOKA_STRIP // 2
+        if abs(dw) > SORT_TOLERANCE or abs(dh) > SORT_TOLERANCE:
+            horizontal = abs(dw) > SORT_TOLERANCE
+            sx, sy = (x + w + edge, y + h // 2) if horizontal else (x + w // 2, y + h + edge)
+            ex, ey = (sx + dw, sy) if horizontal else (sx, sy + dh)
+            if sx <= width - 2 and sy <= height - 2 and 4 <= ex <= width - 2 and STATUS_BAR_H <= ey <= height - 2:
+                _drag(sx, sy, ex, ey)
+                continue
+            # The strip (or where the drag would end) is off screen: move the window up/left first.
+            nx = max(0, min(x, width - 2 - edge - max(w, tw)))
+            ny = max(NOKA_TITLE_H, min(y, height - 2 - edge - max(h, th)))
+            if (nx, ny) == (x, y):
+                return False
+            tx_move, ty_move = nx - x, ny - y
+        else:
+            tx_move, ty_move = tx - x, ty - y
+        _drag(grab_x, grab_y, grab_x + tx_move, grab_y + ty_move)
+    return False
+
+def sort_windows(packages, only=None):
+    """Tile the clone windows of `packages` into the grid (slot = position in the list).
+    `only` limits which ones are touched. Returns {package: placed_ok}."""
+    width, height = get_screen_size()
+    return {pkg: place_window(pkg, target, width, height)
+            for pkg, target in zip(packages, sort_targets(len(packages), width, height))
+            if only is None or pkg in only}
 
 def launch_game(package, game_id, prefer='component'):
     """Launch Roblox game directly into place ID for targeted clone package.
@@ -1032,6 +1141,7 @@ class TerminalRejoinLoop:
         self.webhook_thread = None
         self.app_ram_thread = None
         self.recent_logs = []
+        self.sort_thread = None
         self.stop_event = None
         self.state_lock = threading.RLock()
 
@@ -1093,7 +1203,7 @@ class TerminalRejoinLoop:
             self.webhook_thread.start()
 
         self.thread = threading.Thread(
-            target=self._loop,
+            target=self._run_loop,
             args=(list(packages), dict(cfg), self.stop_event),
             daemon=True
         )
@@ -1327,6 +1437,13 @@ class TerminalRejoinLoop:
                 except Exception:
                     pass
 
+    def _run_loop(self, packages, cfg, stop_event):
+        """Thread entry: show a crash in the dashboard log instead of dying silently."""
+        try:
+            self._loop(packages, cfg, stop_event)
+        except Exception as e:
+            self.log(f"[!] Engine crashed: {e!r}")
+
     @staticmethod
     def _scan_logs_due(st, now, interval):
         """True at most once per interval per package (the log scan shells out as root)."""
@@ -1345,6 +1462,7 @@ class TerminalRejoinLoop:
         grace        = float(cfg.get('launch_grace', 25))   # seconds after a launch before status checks begin
         join_wait    = max(grace, float(cfg.get('join_wait', 60)))  # no login marker by now: treat 'loading' as stuck
         home_enabled = cfg.get('home_rejoin_enabled', True)
+        auto_sort    = cfg.get('auto_sort', True)
         poll         = min(float(cfg.get('check_interval', 2)), 5)
         sequential   = cfg.get('sequential_join', False)
         auto_clear   = cfg.get('clear_cache', False)
@@ -1356,6 +1474,31 @@ class TerminalRejoinLoop:
         # state: last Roblox log state; relinks: game links re-sent since the last healthy state
         state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading', 'relinks': 0} for pkg in packages}
         last_window_check = 0.0
+        sorted_for = {}   # pkg -> launch timestamp whose window is already sorted (or given up on)
+        sort_tries = {}
+        SORT_DELAY = 6    # seconds after a launch before its window exists to be dragged
+
+        def maybe_sort(now, running):
+            """Tile windows of freshly (re)launched packages, in a thread so rejoin checks keep running."""
+            if not auto_sort or (self.sort_thread and self.sort_thread.is_alive()):
+                return
+            pending = {pkg: self.last_launch.get(pkg, 0) for pkg in packages
+                       if pkg in running and now - self.last_launch.get(pkg, 0) >= SORT_DELAY
+                       and sorted_for.get(pkg) != self.last_launch.get(pkg)}
+            if not pending:
+                return
+
+            def work():
+                results = sort_windows(packages, only=set(pending))
+                for pkg, launched in pending.items():
+                    sort_tries[pkg] = sort_tries.get(pkg, 0) + 1
+                    if results.get(pkg) or sort_tries[pkg] >= 3:
+                        sorted_for[pkg], sort_tries[pkg] = launched, 0
+                if any(results.values()):
+                    self.log(f"Windows sorted: {sum(results.values())}/{len(results)} placed")
+
+            self.sort_thread = threading.Thread(target=work, daemon=True)
+            self.sort_thread.start()
 
         def launch(pkg, reason, prefer='component'):
             st = state[pkg]
@@ -1451,6 +1594,7 @@ class TerminalRejoinLoop:
                             self.set_status(pkg, 'Home Page', attempts=0, last_result='On Roblox home page')
                         else:
                             self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
+                maybe_sort(now, running)
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
@@ -1577,6 +1721,7 @@ def interactive_menu():
         print("9. STOP Auto Rejoin Loop")
         print("10. Test Launch Selected Package Now")
         print("11. Send Manual Discord Webhook Test")
+        print("12. Sort / Tile Roblox Windows Now")
         print("0. Exit CLI")
         choice = prompt("\nSelect option: ").strip()
 
@@ -1711,6 +1856,7 @@ def interactive_menu():
             ask_int("Offline Wait seconds", 'offline_wait')
             ask_int("Max Retries", 'retry_count')
             ask_bool("Sequential Join?", 'sequential_join')
+            ask_bool("Auto-sort Roblox windows into a grid after launch?", 'auto_sort')
             ask_int("Retry Batch Delay seconds", 'retry_delay')
             ask_int("Minimum Rejoin Cooldown seconds", 'rejoin_cooldown')
             ask_int("Per-App RAM Refresh seconds", 'app_ram_refresh_interval')
@@ -1797,6 +1943,16 @@ def interactive_menu():
             else:
                 print("Sending test webhook...")
                 send_discord_webhook(wurl, rejoin_engine.get_status(), time.time())
+            pause()
+
+        elif choice == '12':
+            pkgs = get_target_packages(config)
+            if not pkgs:
+                print("[!] Please select packages first.")
+            else:
+                print(f"Sorting {len(pkgs)} window(s) into a grid (needs the games to be open)...")
+                for pkg, ok in sort_windows(pkgs).items():
+                    print(f"  {'OK  ' if ok else 'FAIL'} {pkg}")
             pause()
 
         elif choice == '0':
