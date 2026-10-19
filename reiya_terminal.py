@@ -1467,7 +1467,8 @@ def show_status():
     print(f"CPU: {cpu}% | RAM: {used_ram:.2f} / {total_ram:.2f} GB")
     print(f"Game Mode: {game_mode_label(config)}")
 
-    roblox_pkgs = get_roblox_packages()
+    roblox_pkgs = get_roblox_packages(force=True)
+    running_now = get_running_packages(roblox_pkgs)
     print(f"\nDetected Roblox & Executor Packages ({len(roblox_pkgs)}):")
     for pkg in roblox_pkgs:
         running = pkg in running_now
