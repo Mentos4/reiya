@@ -85,7 +85,6 @@ DEFAULT_CONFIG = {
     'webhook_interval': 60,
     'autoexecute_path': '/sdcard/Delta/Autoexecute',
     'home_rejoin_enabled': True,
-    'home_confirmation_count': 2,
     # Grace period before a running package stuck on 'Unknown' is force-stopped and
     # relaunched. 0 = rejoin on the first Unknown reading (Home Rejoin turns it off).
     'unknown_stall_seconds': 0,
@@ -112,7 +111,6 @@ _CONFIG_RANGES = {
     'webhook_interval': (10.0, 86400.0),
     'dashboard_width': (30, 300),
     'retry_count': (1, 100),
-    'home_confirmation_count': (1, 10),
     'unknown_stall_seconds': (0.0, 3600.0),
 }
 
@@ -554,6 +552,12 @@ _DISCONNECT_RE = r'error code: ?(288|277)|disconnected from the experience|disco
 _JOIN_RE = r'game_join_loadtime|Connection accepted'
 _LEAVE_RE = r'NetworkClient\] Client:Disconnect|Disconnection Notification'
 _LOGIN_RE = r'SingleSurfaceApp\] userDidLogin'
+LOG_SETTLE_SECONDS = 3  # quiet time after the home surface reloads before we trust it
+
+def _log_seconds(raw):
+    """App-relative timestamp (seconds) of a grep'd or tailed Player log line."""
+    m = re.search(r'Z,(\d+(?:\.\d+)?),', raw or '')
+    return float(m.group(1)) if m else None
 
 def get_roblox_log_state(package):
     """Classify the current Roblox session from its newest Player log.
@@ -563,9 +567,11 @@ def get_roblox_log_state(package):
     ActivityNativeMain), but the log can:
       'disconnected' - Error 277/288 or a disconnect-from-experience notice
       'ingame'       - a join marker with no later leave marker
-      'home'         - logged in and not in a game (never joined, join torn down, or left)
-      'loading'      - not in a game and login not finished yet (a cold start can drop
-                       the game link before login completes), so too early to judge
+      'home'         - not in a game and the home surface (userDidLogin) reloaded after the
+                       last join attempt: a torn-down join or a left game ends there
+      'loading'      - not in a game, but the home surface hasn't reloaded yet. A failed join
+                       can sit connecting for ~25s before giving up, and a game link sent
+                       during that wait is swallowed when the app resets to home
       None           - unknown (no su / no log); callers must not act on it
     """
     if not valid_pkg(package):
@@ -573,20 +579,26 @@ def get_roblox_log_state(package):
     script = (
         f'F={_newest_logs_sh(package)}; [ -n "$F" ] || exit 3; '
         f"echo D=$(tail -n 800 \"$F\" | grep -a -c -i -E '{_DISCONNECT_RE}'); "
-        f"echo J=$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -d: -f1); "
-        f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -d: -f1); "
-        f"echo K=$(grep -a -c -E '{_LOGIN_RE}' \"$F\")"
+        f"echo J=$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
+        f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
+        f"echo T=$(tail -n 1 \"$F\" | cut -c1-70); "
+        f"echo K=$(grep -a -n -E '{_LOGIN_RE}' \"$F\" | tail -n 1 | cut -c1-90)"
     )
     res = run_cmd(f"su -c {shlex.quote(script)}", timeout=6)
-    found = dict(re.findall(r'^([DJLK])=(\d*)$', res.stdout or '', re.MULTILINE))
+    found = dict(re.findall(r'^([DJLTK])=(.*)$', res.stdout or '', re.MULTILINE))
     if res.returncode != 0 or 'D' not in found:
         return None
     if int(found['D'] or 0) > 0:
         return 'disconnected'
-    joined, left = int(found.get('J') or 0), int(found.get('L') or 0)
-    if joined and joined > left:
+    join_line, leave_line, login_line = (int((re.match(r'(\d+):', found.get(k, '')) or [0, 0])[1]) for k in 'JLK')
+    if join_line and join_line > leave_line:
         return 'ingame'
-    return 'home' if int(found.get('K') or 0) else 'loading'
+    if login_line <= join_line:  # home surface hasn't come back since the last join attempt
+        return 'loading'
+    last_event = max(filter(None, (_log_seconds(found.get(k)) for k in 'JLK')), default=None)
+    now_t = _log_seconds(found.get('T'))
+    settled = None not in (last_event, now_t) and now_t - last_event >= LOG_SETTLE_SECONDS
+    return 'home' if settled else 'loading'
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1331,17 +1343,17 @@ class TerminalRejoinLoop:
         grace        = float(cfg.get('launch_grace', 25))   # seconds after a launch before status checks begin
         join_wait    = max(grace, float(cfg.get('join_wait', 60)))  # no login marker by now: treat 'loading' as stuck
         home_enabled = cfg.get('home_rejoin_enabled', True)
-        home_confirm = int(cfg.get('home_confirmation_count', 2))
         poll         = min(float(cfg.get('check_interval', 2)), 5)
         sequential   = cfg.get('sequential_join', False)
         auto_clear   = cfg.get('clear_cache', False)
         WINDOW_CHECK = 5    # seconds between activity dumps
-        LOG_CHECK    = 8    # seconds between session-log scans per package
+        LOG_CHECK    = 8    # seconds between log scans while in a game
+        FAST_CHECK   = 3    # ...and while not in a game, so a stuck home page is caught quickly
         HOME_RELINKS = 2    # warm re-sends of the game link before falling back to a force-stop
         # attempts: launches since last healthy; next: earliest next rejoin;
         # missed: consecutive checks with no live window; log_at: last log scan;
-        # home: consecutive log scans on the Roblox home page; tries: warm re-links sent from home
-        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'home': 0, 'tries': 0} for pkg in packages}
+        # state: last Roblox log state; tries: warm re-links sent from the home page
+        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading', 'tries': 0} for pkg in packages}
         last_window_check = 0.0
 
         def launch(pkg, reason):
@@ -1349,7 +1361,7 @@ class TerminalRejoinLoop:
             now = time.time()
             self.last_launch[pkg] = now
             ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg))
-            st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, home=0)
+            st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, state='loading')
             self.set_status(pkg, 'Launching' if ok else 'Launch Failed',
                             attempts=st['attempts'], next_retry=st['next'], last_result=reason)
             self.log(f"[{pkg}] {reason}: {'accepted' if ok else 'failed'}")
@@ -1432,15 +1444,14 @@ class TerminalRejoinLoop:
                     elif st['missed']:
                         self.set_status(pkg, 'Unknown', attempts=0, last_result='Window missing; confirming')
                     else:
-                        if self._scan_logs_due(st, now, LOG_CHECK):
+                        if self._scan_logs_due(st, now, LOG_CHECK if st['state'] == 'ingame' else FAST_CHECK):
                             log_state = get_roblox_log_state(pkg)
-                            if log_state == 'ingame':
-                                st['tries'] = 0
                             if log_state == 'loading' and since_launch >= join_wait:
-                                log_state = 'home'
-                            if log_state is not None:  # unknown never changes the count
-                                st['home'] = st['home'] + 1 if log_state == 'home' and since_launch >= grace else 0
-                            stuck_home = home_enabled and st['home'] >= home_confirm
+                                log_state = 'home'  # never joined and never settled: treat as stuck
+                            if log_state is not None:  # unknown never changes anything
+                                st['state'] = log_state
+                                st['tries'] = 0 if log_state == 'ingame' else st['tries']
+                            stuck_home = home_enabled and log_state == 'home'
                             if stuck_home and st['tries'] < HOME_RELINKS:
                                 # Re-send the game link to the running app: it joins from the home page
                                 # without killing Roblox (a cold restart can land on home again).
@@ -1454,7 +1465,7 @@ class TerminalRejoinLoop:
                                 if not restart(pkg, reason, settle=2):
                                     break
                                 continue
-                        if st['home']:
+                        if st['state'] == 'home':
                             self.set_status(pkg, 'Home Page', attempts=0, last_result='On Roblox home page')
                         else:
                             self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
