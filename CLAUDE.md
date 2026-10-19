@@ -30,7 +30,7 @@ rm -f ~/reiya_terminal.py && curl -sL "https://raw.githubusercontent.com/Mentos4
 ### 2. Main Loop (`TerminalRejoinLoop._loop`) (~L790)
 - **`LAUNCH_GRACE = 20`**: 20-second grace period after launching before status checks begin. Prevents false "Home Page" triggers while Roblox is loading.
 - **`home_rejoin_enabled`**: Guard flag from cfg. If `False`, show `Home Page` status but do NOT re-send the game link.
-- **Home Screen Rejoin:** NEVER force-stop the clone. Force-stopping a freeform clone window makes Android close other apps too (Termux included). Home/disconnect state comes from `get_roblox_log_state()` (newest Player log). Recovery re-sends the game link to the running app via `launch_game(..., warm=True)`, which uses `am start -p {package}` (a running Roblox silently ignores the `ActivityProtocolLaunch` component intent).
+- **Home Screen Rejoin:** NEVER force-stop the clone. Force-stopping a freeform clone window makes Android close other apps too (Termux included). Home/disconnect state comes from `get_roblox_log_state()` (newest Player log). Recovery re-sends the game link to the running app via `launch_game(..., prefer=...)`, alternating between the `ActivityProtocolLaunch` component intent and `am start -p {package}` on successive attempts, because a running Roblox silently ignores one of the two (exit code 0 either way) depending on its state.
 
 ### 3. Launch Intents (`launch_game`) (~L320)
 - Uses `am start -f 0x10000000` (`FLAG_ACTIVITY_NEW_TASK`).

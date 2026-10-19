@@ -379,14 +379,16 @@ def _build_launch_urls(game_id):
                 f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}')
     return f'roblox://placeId={place_id}', f'https://www.roblox.com/games/{place_id}'
 
-def launch_game(package, game_id, warm=False):
+def launch_game(package, game_id, prefer='component'):
     """Launch Roblox game directly into place ID for targeted clone package.
 
-    warm=True is for an app that is already running (e.g. sitting on the Roblox
-    home page). A running Roblox silently ignores the component intent
-    (ActivityProtocolLaunch: "intent has been delivered to currently running
-    top-most instance", yet rc=0), but joins from a plain VIEW intent addressed
-    by package, without restarting. A cold start works with either form.
+    A running Roblox (e.g. stuck on its home page) ignores one of the two intent
+    forms, and which one depends on its state: the component intent
+    (ActivityProtocolLaunch) or the plain VIEW intent addressed by package. The
+    ignored one still exits 0 (sometimes with "Activity not started ... delivered
+    to currently running top-most instance", sometimes silently), so the caller
+    alternates `prefer` between attempts and checks the Roblox log for a join.
+    A cold start works with either form.
     """
     package = str(package).strip()
     if not valid_pkg(package):
@@ -403,11 +405,14 @@ def launch_game(package, game_id, warm=False):
     by_package = f"su -c 'am start {view} -p {package} -d \"{url}\"'"
     by_web = f"su -c 'am start {view} -p {package} -d \"{web_url}\"'"
     no_root = f"am start {view} -p {package} -d '{url}'"
-    intents = ([by_package, by_component] if warm else [by_component, by_package]) + [by_web, no_root]
+    intents = ([by_package, by_component] if prefer == 'package' else [by_component, by_package]) + [by_web, no_root]
 
     for cmd in intents:
         res = run_cmd(cmd, timeout=6)
-        if res.returncode == 0 and "Error" not in res.stdout:
+        # rc is 0 even when a running Roblox ignores the intent ("Warning: Activity not
+        # started, intent has been delivered to currently running top-most instance"),
+        # and which form it ignores depends on the app's state, so fall through to the next.
+        if res.returncode == 0 and "Error" not in res.stdout and "not started" not in res.stdout:
             return True
     return False
 
@@ -1348,27 +1353,26 @@ class TerminalRejoinLoop:
         FAST_CHECK   = 3    # ...and while not in a game, so a stuck home page is caught quickly
         # attempts: launches since last healthy; next: earliest next rejoin;
         # missed: consecutive checks with no live window; log_at: last log scan;
-        # state: last Roblox log state
-        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading'} for pkg in packages}
+        # state: last Roblox log state; relinks: game links re-sent since the last healthy state
+        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading', 'relinks': 0} for pkg in packages}
         last_window_check = 0.0
 
-        def launch(pkg, reason, warm=False):
+        def launch(pkg, reason, prefer='component'):
             st = state[pkg]
             now = time.time()
             self.last_launch[pkg] = now
-            ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), warm=warm)
+            ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), prefer=prefer)
             st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, state='loading')
             self.set_status(pkg, 'Launching' if ok else 'Launch Failed',
                             attempts=st['attempts'], next_retry=st['next'], last_result=reason)
             self.log(f"[{pkg}] {reason}: {'accepted' if ok else 'failed'}")
 
-        # Initial launch. Nothing is ever force-stopped: a running Roblox is sent the game link
-        # (warm), because force-stopping a clone's window makes Android close other apps too.
-        already_running = get_running_packages(packages) or set()
+        # Initial launch. Nothing is ever force-stopped: a running Roblox is simply sent the game
+        # link, because force-stopping a clone's window makes Android close other apps too.
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
-            launch(pkg, 'Initial launch', warm=pkg in already_running)
+            launch(pkg, 'Initial launch')
             if sequential and i < len(packages) - 1 and stop_event.wait(launch_wait):
                 break
 
@@ -1432,13 +1436,16 @@ class TerminalRejoinLoop:
                                 log_state = 'home'  # never joined and never settled: treat as stuck
                             if log_state is not None:  # unknown never changes anything
                                 st['state'] = log_state
+                                if log_state == 'ingame':
+                                    st['relinks'] = 0
                             stuck_home = home_enabled and log_state == 'home'
                             if stuck_home or log_state == 'disconnected':
                                 # Re-send the game link to the running app. It joins from the home page or
                                 # a disconnect screen without restarting or force-stopping anything.
                                 reason = 'Stuck on Home page' if stuck_home else 'Disconnected from server'
-                                self.log(f"[{pkg}] {reason} (per Roblox log); re-sending game link")
-                                launch(pkg, reason, warm=True)
+                                st['relinks'] += 1
+                                self.log(f"[{pkg}] {reason} (per Roblox log); re-sending game link (#{st['relinks']})")
+                                launch(pkg, reason, prefer='component' if st['relinks'] % 2 else 'package')
                                 continue
                         if st['state'] == 'home':
                             self.set_status(pkg, 'Home Page', attempts=0, last_result='On Roblox home page')
