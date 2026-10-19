@@ -553,6 +553,7 @@ def clear_app_cache(package):
 _DISCONNECT_RE = r'error code: ?(288|277)|disconnected from the experience|disconnectreason'
 _JOIN_RE = r'game_join_loadtime|Connection accepted'
 _LEAVE_RE = r'NetworkClient\] Client:Disconnect|Disconnection Notification'
+_LOGIN_RE = r'SingleSurfaceApp\] userDidLogin'
 
 def get_roblox_log_state(package):
     """Classify the current Roblox session from its newest Player log.
@@ -562,7 +563,9 @@ def get_roblox_log_state(package):
     ActivityNativeMain), but the log can:
       'disconnected' - Error 277/288 or a disconnect-from-experience notice
       'ingame'       - a join marker with no later leave marker
-      'home'         - session log exists but never joined a game (or left it)
+      'home'         - logged in and not in a game (never joined, join torn down, or left)
+      'loading'      - not in a game and login not finished yet (a cold start can drop
+                       the game link before login completes), so too early to judge
       None           - unknown (no su / no log); callers must not act on it
     """
     if not valid_pkg(package):
@@ -571,16 +574,19 @@ def get_roblox_log_state(package):
         f'F={_newest_logs_sh(package)}; [ -n "$F" ] || exit 3; '
         f"echo D=$(tail -n 800 \"$F\" | grep -a -c -i -E '{_DISCONNECT_RE}'); "
         f"echo J=$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -d: -f1); "
-        f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -d: -f1)"
+        f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -d: -f1); "
+        f"echo K=$(grep -a -c -E '{_LOGIN_RE}' \"$F\")"
     )
     res = run_cmd(f"su -c {shlex.quote(script)}", timeout=6)
-    found = dict(re.findall(r'^([DJL])=(\d*)$', res.stdout or '', re.MULTILINE))
+    found = dict(re.findall(r'^([DJLK])=(\d*)$', res.stdout or '', re.MULTILINE))
     if res.returncode != 0 or 'D' not in found:
         return None
     if int(found['D'] or 0) > 0:
         return 'disconnected'
     joined, left = int(found.get('J') or 0), int(found.get('L') or 0)
-    return 'ingame' if joined and joined > left else 'home'
+    if joined and joined > left:
+        return 'ingame'
+    return 'home' if int(found.get('K') or 0) else 'loading'
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1323,7 +1329,7 @@ class TerminalRejoinLoop:
         retry_limit  = int(cfg.get('retry_count', 3))
         retry_delay  = float(cfg.get('retry_delay', 30))
         grace        = float(cfg.get('launch_grace', 25))   # seconds after a launch before status checks begin
-        join_wait    = max(grace, float(cfg.get('join_wait', 40)))  # a launch should have joined a game by now
+        join_wait    = max(grace, float(cfg.get('join_wait', 60)))  # no login marker by now: treat 'loading' as stuck
         home_enabled = cfg.get('home_rejoin_enabled', True)
         home_confirm = int(cfg.get('home_confirmation_count', 2))
         poll         = min(float(cfg.get('check_interval', 2)), 5)
@@ -1430,10 +1436,10 @@ class TerminalRejoinLoop:
                             log_state = get_roblox_log_state(pkg)
                             if log_state == 'ingame':
                                 st['tries'] = 0
+                            if log_state == 'loading' and since_launch >= join_wait:
+                                log_state = 'home'
                             if log_state is not None:  # unknown never changes the count
-                                # after a re-link the app is already warm, so only the grace period applies
-                                wait = grace if st['tries'] else join_wait
-                                st['home'] = st['home'] + 1 if log_state == 'home' and since_launch >= wait else 0
+                                st['home'] = st['home'] + 1 if log_state == 'home' and since_launch >= grace else 0
                             stuck_home = home_enabled and st['home'] >= home_confirm
                             if stuck_home and st['tries'] < HOME_RELINKS:
                                 # Re-send the game link to the running app: it joins from the home page
