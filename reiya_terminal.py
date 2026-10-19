@@ -436,6 +436,27 @@ def restore_collapsed_window(package):
     time.sleep(1.5)
     return True
 
+def set_window_prefs(package, rect):
+    """Write the grid cell into the clone's App Cloner floating-window prefs (left/top/right/
+    bottom of the game surface). A window STARTED afterwards opens exactly there, so a fresh
+    launch needs no dragging at all. A running app keeps its in-memory position and ignores
+    the edit until its next start, which is why place_window() still exists for those."""
+    if not valid_pkg(package):
+        return False
+    path = f"/data/data/{package}/shared_prefs/{package}_preferences.xml"
+    xml = run_cmd(f"su -c 'cat {path}'", timeout=5).stdout or ''
+    if 'app_cloner_current_window_left' not in xml:
+        return False  # not an App Cloner floating clone (e.g. com.roblox.client)
+    x, y, w, h = rect
+    for side, value in (('left', x), ('top', y), ('right', x + w), ('bottom', y + h)):
+        xml = re.sub(rf'(app_cloner_current_window_{side}" value=")\d+', rf'\g<1>{value}', xml)
+    # Overwrite in place (cat >) so the file keeps the app's owner and permissions.
+    try:
+        subprocess.run(['su', '-c', f'cat > {path}'], input=xml, text=True, timeout=5, check=True)
+    except Exception:
+        return False
+    return True
+
 def _drag(x1, y1, x2, y2):
     run_cmd(f"su -c 'input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} 400'", timeout=6)
     time.sleep(0.7)
@@ -1500,10 +1521,13 @@ class TerminalRejoinLoop:
             self.sort_thread = threading.Thread(target=work, daemon=True)
             self.sort_thread.start()
 
-        def launch(pkg, reason, prefer='component'):
+        def launch(pkg, reason, prefer='component', cold=False):
             st = state[pkg]
             now = time.time()
             self.last_launch[pkg] = now
+            if auto_sort and cold:  # a process about to START reads its window position: pre-place it
+                width, height = get_screen_size()
+                set_window_prefs(pkg, sort_targets(len(packages), width, height)[packages.index(pkg)])
             ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), prefer=prefer)
             st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, state='loading')
             self.set_status(pkg, 'Launching' if ok else 'Launch Failed',
@@ -1512,10 +1536,11 @@ class TerminalRejoinLoop:
 
         # Initial launch. Nothing is ever force-stopped: a running Roblox is simply sent the game
         # link, because force-stopping a clone's window makes Android close other apps too.
+        already_running = get_running_packages(packages) or set()
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
-            launch(pkg, 'Initial launch')
+            launch(pkg, 'Initial launch', cold=pkg not in already_running)
             if sequential and i < len(packages) - 1 and stop_event.wait(launch_wait):
                 break
 
@@ -1561,7 +1586,7 @@ class TerminalRejoinLoop:
                             self.set_status(pkg, 'Rejoining', attempts=st['attempts'] + 1)
                             if auto_clear:  # user opted in: wipes app data, which also stops the app
                                 clear_app_cache(pkg)
-                            launch(pkg, f"Rejoin attempt {st['attempts'] + 1}/{retry_limit} ({reason})")
+                            launch(pkg, f"Rejoin attempt {st['attempts'] + 1}/{retry_limit} ({reason})", cold=pkg not in running)
                         continue
 
                     # Process and window are alive.
