@@ -1323,18 +1323,19 @@ class TerminalRejoinLoop:
         retry_limit  = int(cfg.get('retry_count', 3))
         retry_delay  = float(cfg.get('retry_delay', 30))
         grace        = float(cfg.get('launch_grace', 25))   # seconds after a launch before status checks begin
-        join_wait    = max(grace, float(cfg.get('join_wait', 60)))  # a launch should have joined a game by now
+        join_wait    = max(grace, float(cfg.get('join_wait', 40)))  # a launch should have joined a game by now
         home_enabled = cfg.get('home_rejoin_enabled', True)
         home_confirm = int(cfg.get('home_confirmation_count', 2))
         poll         = min(float(cfg.get('check_interval', 2)), 5)
         sequential   = cfg.get('sequential_join', False)
         auto_clear   = cfg.get('clear_cache', False)
         WINDOW_CHECK = 5    # seconds between activity dumps
-        LOG_CHECK    = 15   # seconds between disconnect-log scans per package
+        LOG_CHECK    = 8    # seconds between session-log scans per package
+        HOME_RELINKS = 2    # warm re-sends of the game link before falling back to a force-stop
         # attempts: launches since last healthy; next: earliest next rejoin;
         # missed: consecutive checks with no live window; log_at: last log scan;
-        # home: consecutive log scans that found the app on the Roblox home page
-        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'home': 0} for pkg in packages}
+        # home: consecutive log scans on the Roblox home page; tries: warm re-links sent from home
+        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'home': 0, 'tries': 0} for pkg in packages}
         last_window_check = 0.0
 
         def launch(pkg, reason):
@@ -1350,6 +1351,7 @@ class TerminalRejoinLoop:
         def restart(pkg, reason, settle=1, clear=False):
             """Force stop (optionally wiping data) then launch. False if stopped meanwhile."""
             self.set_status(pkg, 'Rejoining', attempts=state[pkg]['attempts'] + 1)
+            state[pkg]['tries'] = 0
             if clear:
                 clear_app_cache(pkg)
             force_stop_app(pkg)
@@ -1426,9 +1428,20 @@ class TerminalRejoinLoop:
                     else:
                         if self._scan_logs_due(st, now, LOG_CHECK):
                             log_state = get_roblox_log_state(pkg)
+                            if log_state == 'ingame':
+                                st['tries'] = 0
                             if log_state is not None:  # unknown never changes the count
-                                st['home'] = st['home'] + 1 if log_state == 'home' and since_launch >= join_wait else 0
+                                # after a re-link the app is already warm, so only the grace period applies
+                                wait = grace if st['tries'] else join_wait
+                                st['home'] = st['home'] + 1 if log_state == 'home' and since_launch >= wait else 0
                             stuck_home = home_enabled and st['home'] >= home_confirm
+                            if stuck_home and st['tries'] < HOME_RELINKS:
+                                # Re-send the game link to the running app: it joins from the home page
+                                # without killing Roblox (a cold restart can land on home again).
+                                st['tries'] += 1
+                                self.log(f"[{pkg}] On Roblox home page; re-sending game link ({st['tries']}/{HOME_RELINKS})")
+                                launch(pkg, 'Home page: re-sending game link')
+                                continue
                             if log_state == 'disconnected' or stuck_home:
                                 reason = 'Stuck on Home page' if stuck_home else 'Disconnected from server'
                                 self.log(f"[{pkg}] {reason} (per Roblox log); rejoining")
