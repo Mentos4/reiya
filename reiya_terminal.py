@@ -301,30 +301,39 @@ def get_target_packages(cfg):
     return list(cfg.get('selected_packages') or get_roblox_packages())
 
 def get_running_packages(packages):
-    """Return live packages using pidof inside a single su call for exact matching and speed."""
+    """Live packages via one su call, or None if the probe itself failed.
+
+    None (timeout / su error) must never be read as "nothing is running": on a
+    loaded phone that would relaunch every healthy game.
+    """
     packages = [p for p in packages if valid_pkg(p)]
     if not packages:
         return set()
     cmd = f"su -c 'for p in {' '.join(packages)}; do if pidof \"$p\" >/dev/null; then echo \"$p\"; fi; done'"
-    return set(run_cmd(cmd, timeout=3).stdout.split())
+    res = run_cmd(cmd, timeout=6)
+    return set(res.stdout.split()) if res.returncode == 0 else None
 
 def is_app_running(package):
     """True only if pidof reports a real process (error text is never parsed as a PID)."""
-    return package in get_running_packages([package])
+    return package in (get_running_packages([package]) or ())
 
 def get_active_package_tasks(packages):
-    """Return packages with a live Activity, or None when the task dump is unavailable.
+    """Return packages that still own a live Activity, or None when the dump is unavailable.
 
     A clone may keep a cached process after its window closes, so pidof alone
-    cannot prove that Option 8 still has a game window to monitor.
+    cannot prove there is still a game window to monitor. `dumpsys activity
+    top` is NOT used: it omits freeform/split-screen clone windows, which made
+    healthy games look closed. `dumpsys activity activities` lists every live
+    ActivityRecord ("Run #n: ActivityRecord{... pkg/Activity ...}") and drops
+    the record as soon as the window is closed.
     """
     if not packages:
         return set()
-    res = run_cmd("su -c 'dumpsys activity top'", timeout=8)
+    res = run_cmd("su -c 'dumpsys activity activities'", timeout=8)
     output = res.stdout or ''
-    if res.returncode != 0 or not re.search(r'^TASK\s', output, re.MULTILINE):
+    if res.returncode != 0 or 'ACTIVITY MANAGER ACTIVITIES' not in output:
         return None
-    active = set(re.findall(r'^\s+ACTIVITY\s+([A-Za-z0-9._]+)/\S+\s+\S+\s+pid=\d+', output, re.MULTILINE))
+    active = set(re.findall(r'Run #\d+: ActivityRecord\{\S+ u\d+ ([A-Za-z0-9._]+)/', output))
     return active.intersection(packages)
 
 def get_screen_size():
@@ -422,6 +431,16 @@ def _resolve_package_game_name(pkg, cfg):
 
 _roblox_username_cache = {}
 
+def _newest_logs_sh(package, count=1):
+    """Shell expression listing the `count` newest Roblox log files, as full paths.
+
+    Each directory needs its own glob: `ls -t dirA dirB/*` only globs the last
+    directory and prints bare names for the rest, which later commands can't open.
+    """
+    dirs = ' '.join((f"/data/data/{package}/files/appData/logs", f"/data/data/{package}/files/logs",
+                     f"/sdcard/Android/data/{package}/files/appData/logs", f"/sdcard/Android/data/{package}/files/logs"))
+    return f'$(ls -t $(for d in {dirs}; do ls -d $d/*.log 2>/dev/null; done) 2>/dev/null | head -n {count})'
+
 def _extract_roblox_identity(text):
     """Read a Roblox username or user ID from logs, preferences, or JSON data (from commit f55b982)."""
     if not text:
@@ -468,12 +487,11 @@ def get_roblox_username(package):
         if now - ts < ttl:
             return name
 
-    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs"
     prefs_dir = f"/data/data/{package}/shared_prefs"
 
     cmd = (
         f"su -c '"
-        f"LOGFILES=$(ls -t {log_dirs}/*.log {log_dirs}/*Player*.log 2>/dev/null | head -n 3); "
+        f"LOGFILES={_newest_logs_sh(package, 3)}; "
         f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
         f"if [ -d \"{prefs_dir}\" ]; then grep -h -E -i \"(user(name|_name)|user(id|_id))\" {prefs_dir}/*.xml 2>/dev/null | head -n 200; fi"
         f"'"
@@ -532,22 +550,37 @@ def clear_app_cache(package):
     """Clear all app data using Android `pm clear` (legacy function name)."""
     return valid_pkg(package) and run_cmd(f"su -c 'pm clear {package}'", timeout=10).returncode != -1
 
-_DISCONNECT_SIGNALS = ('error code: 288', 'error code 288', 'error code: 277', 'error code 277',
-                       'disconnected from the experience', 'disconnectreason')
+_DISCONNECT_RE = r'error code: ?(288|277)|disconnected from the experience|disconnectreason'
+_JOIN_RE = r'game_join_loadtime|Connection accepted'
+_LEAVE_RE = r'NetworkClient\] Client:Disconnect|Disconnection Notification'
 
-def check_roblox_log_state(package):
-    """Check Roblox logs for Error Code 288, 277, or general Disconnect signals."""
+def get_roblox_log_state(package):
+    """Classify the current Roblox session from its newest Player log.
+
+    Every launch writes a fresh Player log, so the newest file is the live
+    session. The activity name can't tell home from in-game (both are
+    ActivityNativeMain), but the log can:
+      'disconnected' - Error 277/288 or a disconnect-from-experience notice
+      'ingame'       - a join marker with no later leave marker
+      'home'         - session log exists but never joined a game (or left it)
+      None           - unknown (no su / no log); callers must not act on it
+    """
     if not valid_pkg(package):
-        return False
-    log_dirs = f"/data/data/{package}/files/appData/logs /data/data/{package}/files/logs /sdcard/Android/data/{package}/files/appData/logs /sdcard/Android/data/{package}/files/logs"
-    cmd = (
-        f"su -c '"
-        f"LOGFILES=$(ls -t {log_dirs}/* 2>/dev/null | grep -v \":$\" | head -n 2); "
-        f"if [ -n \"$LOGFILES\" ]; then tail -n 800 $LOGFILES 2>/dev/null; fi; "
-        f"'"
+        return None
+    script = (
+        f'F={_newest_logs_sh(package)}; [ -n "$F" ] || exit 3; '
+        f"echo D=$(tail -n 800 \"$F\" | grep -a -c -i -E '{_DISCONNECT_RE}'); "
+        f"echo J=$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -d: -f1); "
+        f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -d: -f1)"
     )
-    text = (run_cmd(cmd, timeout=4).stdout or '').lower()
-    return any(sig in text for sig in _DISCONNECT_SIGNALS)
+    res = run_cmd(f"su -c {shlex.quote(script)}", timeout=6)
+    found = dict(re.findall(r'^([DJL])=(\d*)$', res.stdout or '', re.MULTILINE))
+    if res.returncode != 0 or 'D' not in found:
+        return None
+    if int(found['D'] or 0) > 0:
+        return 'disconnected'
+    joined, left = int(found.get('J') or 0), int(found.get('L') or 0)
+    return 'ingame' if joined and joined > left else 'home'
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1083,7 +1116,7 @@ class TerminalRejoinLoop:
         STATUS_STYLES = {
             'Ingame': (GREEN, 'Ingame'), 'Rejoining': (RED, 'Rejoining'), 'Rejoining Game': (RED, 'Rejoining'),
             'Launching': (CYAN, 'Launching'), 'Retry Wait': (YELLOW, 'Wait'),
-            'Launch Failed': (RED, 'Failed'), 'Unknown': (YELLOW, 'Unknown'),
+            'Launch Failed': (RED, 'Failed'), 'Unknown': (YELLOW, 'Unknown'), 'Home Page': (YELLOW, 'Home'),
         }
 
         pkgs = get_target_packages(cfg)  # resolved once; per-frame package scans spawn many shells
@@ -1274,55 +1307,68 @@ class TerminalRejoinLoop:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _scan_logs_due(st, now, interval):
+        """True at most once per interval per package (the log scan shells out as root)."""
+        if now - st['log_at'] < interval:
+            return False
+        st['log_at'] = now
+        return True
+
     def _loop(self, packages, cfg, stop_event):
         self._su_broken = not check_su_works()
-        
-        check_interval      = float(cfg.get('check_interval', 2))
-        delay_open_tab      = float(cfg.get('launch_wait', 15))
-        offline_wait        = float(cfg.get('offline_wait', 15))
-        retry_limit         = int(cfg.get('retry_count', 3))
-        retry_delay         = float(cfg.get('retry_delay', 30))
-        rejoin_cooldown     = float(cfg.get('rejoin_cooldown', 10))
-        sequential          = cfg.get('sequential_join', False)
-        auto_clear          = cfg.get('clear_cache', False)
-        LAUNCH_GRACE        = float(cfg.get('launch_grace', 25))
 
-        retry_attempts = {pkg: 0 for pkg in packages}
-        next_retry = {pkg: 0.0 for pkg in packages}
-        last_log_check = {pkg: 0.0 for pkg in packages}
-        last_task_check = 0.0
-        missing_task_checks = {pkg: 0 for pkg in packages}
+        launch_wait  = float(cfg.get('launch_wait', 15))
+        cooldown     = max(float(cfg.get('offline_wait', 15)), float(cfg.get('rejoin_cooldown', 10)))
+        retry_limit  = int(cfg.get('retry_count', 3))
+        retry_delay  = float(cfg.get('retry_delay', 30))
+        grace        = float(cfg.get('launch_grace', 25))   # seconds after a launch before status checks begin
+        join_wait    = max(grace, float(cfg.get('join_wait', 60)))  # a launch should have joined a game by now
+        home_enabled = cfg.get('home_rejoin_enabled', True)
+        home_confirm = int(cfg.get('home_confirmation_count', 2))
+        poll         = min(float(cfg.get('check_interval', 2)), 5)
+        sequential   = cfg.get('sequential_join', False)
+        auto_clear   = cfg.get('clear_cache', False)
+        WINDOW_CHECK = 5    # seconds between activity dumps
+        LOG_CHECK    = 15   # seconds between disconnect-log scans per package
+        # attempts: launches since last healthy; next: earliest next rejoin;
+        # missed: consecutive checks with no live window; log_at: last log scan;
+        # home: consecutive log scans that found the app on the Roblox home page
+        state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'home': 0} for pkg in packages}
+        last_window_check = 0.0
 
-        def launch_package(pkg, reason):
-            gid = _resolve_package_game_id(pkg, cfg)
-            self.last_launch[pkg] = time.time()
-            launched = launch_game(pkg, gid)
-            retry_attempts[pkg] += 1
-            next_retry[pkg] = time.time() + max(offline_wait, rejoin_cooldown)
-            self.set_status(
-                pkg,
-                'Launching' if launched else 'Launch Failed',
-                attempts=retry_attempts[pkg],
-                next_retry=next_retry[pkg],
-                last_result=reason,
-            )
-            self.log(f"[{pkg}] {reason}: {'accepted' if launched else 'failed'}")
-            return launched
+        def launch(pkg, reason):
+            st = state[pkg]
+            now = time.time()
+            self.last_launch[pkg] = now
+            ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg))
+            st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, home=0)
+            self.set_status(pkg, 'Launching' if ok else 'Launch Failed',
+                            attempts=st['attempts'], next_retry=st['next'], last_result=reason)
+            self.log(f"[{pkg}] {reason}: {'accepted' if ok else 'failed'}")
 
-        # Initial launch of all packages (running set probed once, not per package)
-        already_running = get_running_packages(packages)
+        def restart(pkg, reason, settle=1, clear=False):
+            """Force stop (optionally wiping data) then launch. False if stopped meanwhile."""
+            self.set_status(pkg, 'Rejoining', attempts=state[pkg]['attempts'] + 1)
+            if clear:
+                clear_app_cache(pkg)
+            force_stop_app(pkg)
+            if stop_event.wait(settle):
+                return False
+            launch(pkg, reason)
+            return True
+
+        # Initial launch: close anything already running, then start each package.
+        already_running = get_running_packages(packages) or set()
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
-
-            # If the package is already running upon startup, force close it first
             if pkg in already_running:
                 self.log(f"[{pkg}] Initializing: Force closing running package")
                 force_stop_app(pkg)
                 time.sleep(1)
-                
-            launch_package(pkg, 'Initial launch')
-            if sequential and i < len(packages) - 1 and stop_event.wait(delay_open_tab):
+            launch(pkg, 'Initial launch')
+            if sequential and i < len(packages) - 1 and stop_event.wait(launch_wait):
                 break
 
         if stop_event.wait(8):
@@ -1332,91 +1378,71 @@ class TerminalRejoinLoop:
 
         while self.running and not stop_event.is_set():
             try:
-                running_packages = get_running_packages(packages)
                 now = time.time()
+                running = get_running_packages(packages)
+                if running is None:  # probe failed; keep current state and retry next cycle
+                    stop_event.wait(poll)
+                    continue
 
                 # A closed window can leave a cached PID. Confirm its absence
-                # twice before relaunching; never act on an unavailable dump.
-                if now - last_task_check >= 5:
-                    last_task_check = now
-                    task_packages = get_active_package_tasks(packages)
-                    if task_packages is None:
-                        missing_task_checks = {pkg: 0 for pkg in packages}
-                    else:
-                        for pkg in packages:
-                            if pkg in task_packages:
-                                missing_task_checks[pkg] = 0
-                            elif (pkg in running_packages
-                                  and now - self.last_launch.get(pkg, 0) >= LAUNCH_GRACE):
-                                missing_task_checks[pkg] += 1
-                            else:
-                                missing_task_checks[pkg] = 0
+                # twice before relaunching; an unavailable dump never counts.
+                if now - last_window_check >= WINDOW_CHECK:
+                    last_window_check = now
+                    windows = get_active_package_tasks(packages)
+                    for pkg, st in state.items():
+                        settled = now - self.last_launch.get(pkg, 0) >= grace
+                        gone = windows is not None and pkg in running and settled and pkg not in windows
+                        st['missed'] = st['missed'] + 1 if gone else 0
 
                 for pkg in packages:
                     if stop_event.is_set():
                         break
+                    st = state[pkg]
+                    window_closed = pkg in running and st['missed'] >= 2
 
-                    window_closed = pkg in running_packages and missing_task_checks[pkg] >= 2
-                    if pkg not in running_packages or window_closed:
-                        if now < next_retry[pkg]:
-                            self.set_status(
-                                pkg, 'Retry Wait', attempts=retry_attempts[pkg],
-                                next_retry=next_retry[pkg],
-                                last_result='Window closed' if window_closed else 'Process not running',
-                            )
-                            continue
-                        if retry_attempts[pkg] >= retry_limit:
-                            retry_attempts[pkg] = 0
-                            next_retry[pkg] = now + retry_delay
+                    if pkg not in running or window_closed:
+                        reason = 'Window closed' if window_closed else 'Process not running'
+                        if now < st['next']:
+                            self.set_status(pkg, 'Retry Wait', attempts=st['attempts'], next_retry=st['next'], last_result=reason)
+                        elif st['attempts'] >= retry_limit:
+                            st.update(attempts=0, next=now + retry_delay)
                             self.log(f"[{pkg}] Retry batch exhausted; waiting {int(retry_delay)}s")
-                            self.set_status(
-                                pkg, 'Retry Wait', attempts=retry_limit,
-                                next_retry=next_retry[pkg], last_result='Retry batch exhausted',
-                            )
-                            continue
-
-                        self.set_status(pkg, 'Rejoining', attempts=retry_attempts[pkg] + 1)
-                        if auto_clear:
-                            clear_app_cache(pkg)
-                            if stop_event.wait(1):
+                            self.set_status(pkg, 'Retry Wait', attempts=retry_limit, next_retry=st['next'],
+                                            last_result='Retry batch exhausted')
+                        else:
+                            self.log(f"[{pkg}] {reason}; force stopping before rejoin")
+                            if not restart(pkg, f"Rejoin attempt {st['attempts'] + 1}/{retry_limit}", clear=auto_clear):
                                 break
-
-                        self.log(f"[{pkg}] Force stopping before rejoin to prevent background stall")
-                        force_stop_app(pkg)
-                        if stop_event.wait(1):
-                            break
-
-                        missing_task_checks[pkg] = 0
-                        launch_package(pkg, f"Rejoin attempt {retry_attempts[pkg] + 1}/{retry_limit}")
                         continue
 
-                    # If process IS running
-                    retry_attempts[pkg] = 0
-                    next_retry[pkg] = 0.0
-                    time_since_launch = now - self.last_launch.get(pkg, 0)
-                    
-                    if time_since_launch < LAUNCH_GRACE:
-                        self.set_status(pkg, 'Launching', attempts=0, last_result=f"Waiting for load ({int(LAUNCH_GRACE - time_since_launch)}s)")
-                    elif missing_task_checks[pkg]:
+                    # Process and window are alive.
+                    st.update(attempts=0, next=0.0)
+                    since_launch = now - self.last_launch.get(pkg, 0)
+                    if since_launch < grace:
+                        self.set_status(pkg, 'Launching', attempts=0,
+                                        last_result=f"Waiting for load ({int(grace - since_launch)}s)")
+                    elif st['missed']:
                         self.set_status(pkg, 'Unknown', attempts=0, last_result='Window missing; confirming')
                     else:
-                        # Check if it's sitting on a Disconnect prompt (rate-limited to 15s to save shell resources)
-                        if now - last_log_check.get(pkg, 0) >= 15:
-                            last_log_check[pkg] = now
-                            if check_roblox_log_state(pkg):
-                                self.log(f"[{pkg}] Disconnect (Error 277/288) detected in logs; force stopping and rejoining")
-                                self.set_status(pkg, 'Rejoining')
-                                force_stop_app(pkg)
-                                if stop_event.wait(2):
+                        if self._scan_logs_due(st, now, LOG_CHECK):
+                            log_state = get_roblox_log_state(pkg)
+                            if log_state is not None:  # unknown never changes the count
+                                st['home'] = st['home'] + 1 if log_state == 'home' and since_launch >= join_wait else 0
+                            stuck_home = home_enabled and st['home'] >= home_confirm
+                            if log_state == 'disconnected' or stuck_home:
+                                reason = 'Stuck on Home page' if stuck_home else 'Disconnected from server'
+                                self.log(f"[{pkg}] {reason} (per Roblox log); rejoining")
+                                if not restart(pkg, reason, settle=2):
                                     break
-                                launch_package(pkg, 'Disconnected from server')
                                 continue
-                            
-                        self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
+                        if st['home']:
+                            self.set_status(pkg, 'Home Page', attempts=0, last_result='On Roblox home page')
+                        else:
+                            self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
 
-            stop_event.wait(min(check_interval, 5))
+            stop_event.wait(poll)
 
         for pkg in packages:
             self.set_status(pkg, 'Stopped')
@@ -1468,7 +1494,7 @@ def show_status():
     print(f"Game Mode: {game_mode_label(config)}")
 
     roblox_pkgs = get_roblox_packages(force=True)
-    running_now = get_running_packages(roblox_pkgs)
+    running_now = get_running_packages(roblox_pkgs) or set()
     print(f"\nDetected Roblox & Executor Packages ({len(roblox_pkgs)}):")
     for pkg in roblox_pkgs:
         running = pkg in running_now
