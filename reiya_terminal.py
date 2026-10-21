@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.29-REI-REJOIN"
-BUILD_TIME = "2026-10-21 20:05:40 UTC"
+BUILD_VERSION = "v6.9.30-REI-REJOIN"
+BUILD_TIME = "2026-10-21 21:53:49 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -71,7 +71,7 @@ DEFAULT_CONFIG = {
     'app_ram_refresh_interval': 30,
     'launch_wait': 15,
     'rejoin_cooldown': 10,
-    'sequential_join': False,
+    'sequential_join': True,
     'clear_cache': False,
     'webhook_enabled': False,
     'selected_packages': [],
@@ -146,6 +146,7 @@ def validate_config(values):
     # immediately instead, so drop the old default that got written to disk.
     if clean.get('unknown_stall_seconds') == 90:
         clean['unknown_stall_seconds'] = 0
+    clean['sequential_join'] = True  # one unconfirmed game launch at a time, including saved old configs
     clean.pop('rejoin_interval', None)  # retired legacy field
     clean.pop('ram_refresh_interval', None)  # retired 30-second system RAM cache
     clean.pop('system_ram_refresh_interval', None)  # live dumpsys sampling has no cache
@@ -394,33 +395,6 @@ SORT_TOLERANCE = 12
 _APP_CONTROL_LOCK = threading.RLock()
 
 
-def _window_has_focus(package):
-    res = run_cmd("su -c 'dumpsys window windows'", timeout=5)
-    return res.returncode == 0 and bool(re.search(
-        r'mCurrentFocus=Window\{[^\n}]* u\d+ ' + re.escape(package) + r'(?:/|\}|\s)',
-        res.stdout or ''))
-
-
-def _focus_existing_task(package):
-    """Focus an existing task only; never start a native Roblox activity."""
-    res = run_cmd("su -c 'dumpsys activity activities'", timeout=8)
-    if res.returncode != 0:
-        return False
-    match = re.search(r'ActivityRecord\{[^\n}]* u\d+ ' + re.escape(package) +
-                      r'/[^\n}]*\bt(\d+)\b', res.stdout or '')
-    if not match:
-        return False
-    res = run_cmd(f"su -c 'am task focus {int(match.group(1))}'", timeout=5)
-    return res.returncode == 0 and _window_has_focus(package)
-
-
-def _drag_window(package, frame, x1, y1, x2, y2):
-    # Recheck ownership and geometry immediately before each global input.
-    if not _window_has_focus(package) or get_noka_frames([package]).get(package) != frame:
-        return False
-    _drag(x1, y1, x2, y2)
-    return True
-
 def sort_targets(count, width, height):
     """Game-surface rects (x, y, w, h), one per window, tiling the screen in the
     rows x cols grid whose surfaces come closest to 16:10 (6 -> 3x2, 8 -> 4x2)."""
@@ -500,14 +474,19 @@ def place_window(package, target, width, height):
 
 
 def _place_window_locked(package, target, width, height):
-    """Move an existing, focused clone window without starting any activity."""
+    """Move/resize one clone window until its game surface matches `target`. True on success."""
     if not valid_pkg(package):
         return False
     tx, ty, tw, th = target
-    if not get_noka_frames([package]).get(package) or not _focus_existing_task(package):
-        return False
+    raise_cmd = f"su -c 'am start -f 0x10020000 -n {package}/com.roblox.client.ActivityNativeMain'"  # task to front
+    run_cmd(raise_cmd, timeout=5)
+    time.sleep(1)
     for _ in range(10):
         frame = get_noka_frames([package]).get(package)
+        if frame is None and restore_collapsed_window(package):
+            run_cmd(raise_cmd, timeout=5)
+            time.sleep(1)
+            frame = get_noka_frames([package]).get(package)
         if frame is None or (frame[2] >= width - 4 and frame[3] >= height - 80):
             return False  # not on screen, or maximized (no title/strips to grab)
         x, y, w, h = frame
@@ -521,8 +500,7 @@ def _place_window_locked(package, target, width, height):
             sx, sy = (x + w + edge, y + h // 2) if horizontal else (x + w // 2, y + h + edge)
             ex, ey = (sx + dw, sy) if horizontal else (sx, sy + dh)
             if sx <= width - 2 and sy <= height - 2 and 4 <= ex <= width - 2 and STATUS_BAR_H <= ey <= height - 2:
-                if not _drag_window(package, frame, sx, sy, ex, ey):
-                    return False
+                _drag(sx, sy, ex, ey)
                 continue
             # The strip (or where the drag would end) is off screen: move the window up/left first.
             nx = max(0, min(x, width - 2 - edge - max(w, tw)))
@@ -532,8 +510,7 @@ def _place_window_locked(package, target, width, height):
             tx_move, ty_move = nx - x, ny - y
         else:
             tx_move, ty_move = tx - x, ty - y
-        if not _drag_window(package, frame, grab_x, grab_y, grab_x + tx_move, grab_y + ty_move):
-            return False
+        _drag(grab_x, grab_y, grab_x + tx_move, grab_y + ty_move)
     return False
 
 def sort_windows(packages, only=None):
@@ -779,6 +756,66 @@ def get_roblox_log_state(package):
     now_t = _log_seconds(found.get('T'))
     settled = None not in (last_event, now_t) and now_t - last_event >= LOG_SETTLE_SECONDS
     return 'home' if settled else 'loading'
+
+def get_roblox_join_marker(package):
+    """(newest log file, latest numbered join line), or None when the probe fails."""
+    if not valid_pkg(package):
+        return None
+    script = (
+        f'F={_newest_logs_sh(package)}; printf "F=%s\\n" "$F"; '
+        f'if [ -n "$F" ]; then '
+        f"printf 'J=%s\\n' \"$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -c1-160)\"; "
+        'else echo J=; fi'
+    )
+    res = run_cmd(f"su -c {shlex.quote(script)}", timeout=6)
+    found = dict(re.findall(r'^([FJ])=(.*)$', res.stdout or '', re.MULTILINE))
+    if res.returncode != 0 or 'F' not in found or 'J' not in found:
+        return None
+    return found['F'], found['J']
+
+
+def fresh_game_join(before, after):
+    """An accepted intent or a stale join line is not proof that this launch joined."""
+    return (before is not None and after is not None and bool(after[0])
+            and bool(re.match(r'\d+:', after[1])) and after != before)
+
+
+def launch_packages_in_order(packages, cfg, stop_event=None):
+    """Manual launch queue: never advance on a timer, failed launch or unknown log."""
+    stop_event = stop_event or threading.Event()
+    for pkg in packages:
+        if stop_event.is_set():
+            return False
+        gid = _resolve_package_game_id(pkg, cfg)
+        if not gid or not _build_launch_urls(gid):
+            print(f"[{pkg}] Invalid game setting; remaining launch queue paused.")
+            return False
+        running = get_running_packages([pkg])
+        windows = get_active_package_tasks([pkg])
+        already_ingame = (running is not None and pkg in running and windows is not None
+                          and pkg in windows and get_roblox_log_state(pkg) == 'ingame')
+        before = None
+        if not already_ingame:
+            before = get_roblox_join_marker(pkg)
+            print(f"Launching {pkg}; waiting for a new Ingame confirmation before the next app...")
+            outcome = launch_game(pkg, gid)
+            if outcome is False:
+                print(f"[{pkg}] Launch failed; remaining launch queue paused.")
+                return False
+        while not already_ingame:
+            if stop_event.wait(3):
+                return False
+            running = get_running_packages([pkg])
+            windows = get_active_package_tasks([pkg])
+            if (running is not None and pkg in running and windows is not None and pkg in windows
+                    and get_roblox_log_state(pkg) == 'ingame'
+                    and fresh_game_join(before, get_roblox_join_marker(pkg))):
+                break
+        print(f"[{pkg}] Ingame confirmed.")
+        if cfg.get('auto_sort', True):
+            sort_windows(packages, only={pkg})
+    return True
+
 
 # ==============================================================================
 # 2. DEVICE & SYSTEM STATISTICS
@@ -1311,7 +1348,7 @@ class TerminalRejoinLoop:
         RESET  = "\033[0m"
         STATUS_STYLES = {
             'Ingame': (GREEN, 'Ingame'), 'Rejoining': (RED, 'Rejoining'), 'Rejoining Game': (RED, 'Rejoining'),
-            'Launching': (CYAN, 'Launching'), 'Retry Wait': (YELLOW, 'Wait'),
+            'Queued': (YELLOW, 'Queued'), 'Launching': (CYAN, 'Launching'), 'Retry Wait': (YELLOW, 'Wait'),
             'Launch Failed': (RED, 'Failed'), 'Unknown': (YELLOW, 'Unknown'), 'Home Page': (YELLOW, 'Home'),
         }
 
@@ -1543,7 +1580,6 @@ class TerminalRejoinLoop:
     def _loop(self, packages, cfg, stop_event):
         self._su_broken = not check_su_works()
 
-        launch_wait  = float(cfg.get('launch_wait', 15))
         cooldown     = max(float(cfg.get('offline_wait', 15)), float(cfg.get('rejoin_cooldown', 10)))
         retry_limit  = int(cfg.get('retry_count', 3))
         retry_delay  = float(cfg.get('retry_delay', 30))
@@ -1552,7 +1588,6 @@ class TerminalRejoinLoop:
         home_enabled = cfg.get('home_rejoin_enabled', True)
         auto_sort    = cfg.get('auto_sort', True)
         poll         = min(float(cfg.get('check_interval', 2)), 5)
-        sequential   = cfg.get('sequential_join', False)
         auto_clear   = cfg.get('clear_cache', False)
         WINDOW_CHECK = 5    # seconds between activity dumps
         LOG_CHECK    = 8    # seconds between log scans while in a game
@@ -1562,6 +1597,8 @@ class TerminalRejoinLoop:
         # state: last Roblox log state; relinks: game links re-sent since the last healthy state
         state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading', 'relinks': 0} for pkg in packages}
         last_window_check = 0.0
+        in_flight = None  # package holding the gate until a NEW successful game join is confirmed
+        sort_requested = {}
         sorted_for = {}   # pkg -> launch timestamp whose window is already sorted (or given up on)
         sort_tries = {}
         SORT_DELAY = 6    # seconds after a launch before its window exists to be dragged
@@ -1570,10 +1607,13 @@ class TerminalRejoinLoop:
             """Tile windows of freshly (re)launched packages, in a thread so rejoin checks keep running."""
             if not auto_sort or (self.sort_thread and self.sort_thread.is_alive()):
                 return
-            pending = {pkg: self.last_launch.get(pkg, 0) for pkg in packages
-                       if pkg in running and pkg in self.last_launch and state[pkg]['state'] == 'ingame'
-                       and now - self.last_launch[pkg] >= SORT_DELAY
-                       and sorted_for.get(pkg) != self.last_launch.get(pkg)}
+            for pkg in packages:
+                if pkg in running:
+                    sort_requested.setdefault(pkg, now)
+            pending = {pkg: sort_requested[pkg] for pkg in packages
+                       if pkg in running and now - sort_requested[pkg] >= SORT_DELAY
+                       and (in_flight is None or pkg == in_flight)
+                       and sorted_for.get(pkg) != sort_requested[pkg]}
             if not pending:
                 return
 
@@ -1583,10 +1623,12 @@ class TerminalRejoinLoop:
                     with _APP_CONTROL_LOCK:
                         if stop_event.is_set():
                             return
-                        if self.last_launch.get(pkg) != launched or state[pkg]['state'] != 'ingame':
+                        if sort_requested.get(pkg) != launched or (in_flight is not None and pkg != in_flight):
                             continue
                         results.update(sort_windows(packages, only={pkg}))
                 for pkg, launched in pending.items():
+                    if pkg not in results:
+                        continue  # a launch-gate deferral is not a failed sorting attempt
                     sort_tries[pkg] = sort_tries.get(pkg, 0) + 1
                     if results.get(pkg) or sort_tries[pkg] >= 3:
                         sorted_for[pkg], sort_tries[pkg] = launched, 0
@@ -1597,10 +1639,19 @@ class TerminalRejoinLoop:
             self.sort_thread.start()
 
         def launch(pkg, reason, prefer='component', cold=False):
+            nonlocal in_flight
             with _APP_CONTROL_LOCK:
                 if stop_event.is_set():
                     return
+                if in_flight is not None and in_flight != pkg:
+                    self.set_status(pkg, 'Queued', last_result=f"Waiting for {in_flight} to join a game")
+                    return False
+                if self.sort_thread and self.sort_thread.is_alive():
+                    self.set_status(pkg, 'Queued', last_result='Waiting for window sorting')
+                    return False
+                in_flight = pkg
                 st = state[pkg]
+                st['join_before'] = get_roblox_join_marker(pkg)
                 self.last_launch[pkg] = time.time()
                 st['state'] = 'loading'
                 if auto_sort and cold:  # pre-place a process about to START, without gestures
@@ -1610,13 +1661,21 @@ class TerminalRejoinLoop:
                 # Cooldown/grace start after dispatch finishes, not before slow su calls.
                 completed = time.time()
                 self.last_launch[pkg] = completed
+                sort_requested[pkg] = completed
                 st.update(attempts=st['attempts'] + 1, next=completed + cooldown, missed=0, state='loading')
                 result = 'accepted' if ok else ('dispatch unknown; checking state before retry' if ok is None else 'failed')
                 self.set_status(pkg, 'Launching' if ok is not False else 'Launch Failed',
                                 attempts=st['attempts'], next_retry=st['next'], last_result=f"{reason}: {result}")
-                self.log(f"[{pkg}] {reason}: {result}")
+                self.log(f"[{pkg}] {reason}: {result}; launch queue waits for Ingame confirmation")
+                return True
 
         def retry_ready(pkg, now, reason):
+            if in_flight is not None and in_flight != pkg:
+                self.set_status(pkg, 'Queued', last_result=f"Waiting for {in_flight} to join a game")
+                return False
+            if self.sort_thread and self.sort_thread.is_alive():
+                self.set_status(pkg, 'Queued', last_result='Waiting for window sorting')
+                return False
             st = state[pkg]
             if now < st['next']:
                 self.set_status(pkg, 'Retry Wait', attempts=st['attempts'], next_retry=st['next'], last_result=reason)
@@ -1642,8 +1701,6 @@ class TerminalRejoinLoop:
                                 else 'Process probe unavailable; launch deferred')
                 continue
             launch(pkg, 'Initial launch', cold=True)
-            if sequential and i < len(packages) - 1 and stop_event.wait(launch_wait):
-                break
 
         if stop_event.wait(8):
             for pkg in packages:
@@ -1693,6 +1750,12 @@ class TerminalRejoinLoop:
                     else:
                         if self._scan_logs_due(st, now, LOG_CHECK if st['state'] == 'ingame' else FAST_CHECK):
                             log_state = get_roblox_log_state(pkg)
+                            if log_state == 'ingame' and in_flight == pkg:
+                                if not fresh_game_join(st.get('join_before'), get_roblox_join_marker(pkg)):
+                                    log_state = 'loading'  # a previous game's log must not release the queue
+                                else:
+                                    self.log(f"[{pkg}] New Ingame join confirmed; next app may launch")
+                                    in_flight = None
                             if log_state == 'loading' and pkg in self.last_launch and since_launch >= join_wait:
                                 log_state = 'home'  # never joined and never settled: treat as stuck
                             if log_state is not None:  # unknown never changes anything
@@ -1977,7 +2040,7 @@ def interactive_menu():
             ask_int("Check Interval seconds", 'check_interval')
             ask_int("Offline Wait seconds", 'offline_wait')
             ask_int("Max Retries", 'retry_count')
-            ask_bool("Sequential Join?", 'sequential_join')
+            print("Sequential Join: always ON; next app waits for the current app to be Ingame.")
             ask_bool("Auto-sort Roblox windows into a grid after launch?", 'auto_sort')
             ask_int("Retry Batch Delay seconds", 'retry_delay')
             ask_int("Minimum Rejoin Cooldown seconds", 'rejoin_cooldown')
@@ -2048,17 +2111,10 @@ def interactive_menu():
             if not pkgs:
                 print("[!] Please select packages first.")
             else:
-                for p in pkgs:
-                    gid = _resolve_package_game_id(p, config)
-                    gname = _resolve_package_game_name(p, config)
-                    if not gid:
-                        print(f"[!] No Game ID configured for {p}. Skipping.")
-                        continue
-                    print(f"Launching {p} into '{gname}' (ID: {gid})...")
-                    outcome = launch_game(p, gid)
-                    print("  Launch accepted." if outcome else (
-                        "  Dispatch outcome unknown; no fallback sent. Check the app before retrying."
-                        if outcome is None else "  Launch failed."))
+                try:
+                    launch_packages_in_order(pkgs, config)
+                except KeyboardInterrupt:
+                    print("\nLaunch queue stopped; no remaining apps launched.")
             pause()
 
         elif choice == '11':
