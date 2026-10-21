@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.28-REI-REJOIN"
-BUILD_TIME = "2026-10-21 13:15:13 UTC"
+BUILD_VERSION = "v6.9.29-REI-REJOIN"
+BUILD_TIME = "2026-10-21 20:05:40 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -211,8 +211,10 @@ def run_cmd(cmd, timeout=5):
             capture_output=True, text=True, timeout=timeout,
         )
         return res
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, -1, '', '')
+    except subprocess.TimeoutExpired as exc:
+        def text_output(value):
+            return value.decode(errors='replace') if isinstance(value, bytes) else (value or '')
+        return subprocess.CompletedProcess(cmd, -1, text_output(exc.stdout), text_output(exc.stderr))
     except Exception:
         return subprocess.CompletedProcess(cmd, -1, '', '')
 
@@ -296,8 +298,8 @@ def get_roblox_packages(force=False):
     return list(_roblox_pkg_cache[1])
 
 def get_target_packages(cfg):
-    """Selected packages, or every detected Roblox package when none are selected."""
-    return list(cfg.get('selected_packages') or get_roblox_packages())
+    """Only explicitly selected packages may be launched or monitored."""
+    return list(dict.fromkeys(p for p in cfg.get('selected_packages', []) if valid_pkg(p)))
 
 def get_running_packages(packages):
     """Live packages via one su call, or None if the probe itself failed.
@@ -388,6 +390,36 @@ NOKA_TITLE_H = 128
 NOKA_STRIP = 64
 STATUS_BAR_H = 48
 SORT_TOLERANCE = 12
+# Launch dispatches and screen-global sorting gestures must never overlap.
+_APP_CONTROL_LOCK = threading.RLock()
+
+
+def _window_has_focus(package):
+    res = run_cmd("su -c 'dumpsys window windows'", timeout=5)
+    return res.returncode == 0 and bool(re.search(
+        r'mCurrentFocus=Window\{[^\n}]* u\d+ ' + re.escape(package) + r'(?:/|\}|\s)',
+        res.stdout or ''))
+
+
+def _focus_existing_task(package):
+    """Focus an existing task only; never start a native Roblox activity."""
+    res = run_cmd("su -c 'dumpsys activity activities'", timeout=8)
+    if res.returncode != 0:
+        return False
+    match = re.search(r'ActivityRecord\{[^\n}]* u\d+ ' + re.escape(package) +
+                      r'/[^\n}]*\bt(\d+)\b', res.stdout or '')
+    if not match:
+        return False
+    res = run_cmd(f"su -c 'am task focus {int(match.group(1))}'", timeout=5)
+    return res.returncode == 0 and _window_has_focus(package)
+
+
+def _drag_window(package, frame, x1, y1, x2, y2):
+    # Recheck ownership and geometry immediately before each global input.
+    if not _window_has_focus(package) or get_noka_frames([package]).get(package) != frame:
+        return False
+    _drag(x1, y1, x2, y2)
+    return True
 
 def sort_targets(count, width, height):
     """Game-surface rects (x, y, w, h), one per window, tiling the screen in the
@@ -462,19 +494,20 @@ def _drag(x1, y1, x2, y2):
     time.sleep(0.7)
 
 def place_window(package, target, width, height):
-    """Move/resize one clone window until its game surface matches `target`. True on success."""
+    """Serialize sorting with launches and other sort requests."""
+    with _APP_CONTROL_LOCK:
+        return _place_window_locked(package, target, width, height)
+
+
+def _place_window_locked(package, target, width, height):
+    """Move an existing, focused clone window without starting any activity."""
     if not valid_pkg(package):
         return False
     tx, ty, tw, th = target
-    raise_cmd = f"su -c 'am start -f 0x10020000 -n {package}/com.roblox.client.ActivityNativeMain'"  # task to front
-    run_cmd(raise_cmd, timeout=5)
-    time.sleep(1)
+    if not get_noka_frames([package]).get(package) or not _focus_existing_task(package):
+        return False
     for _ in range(10):
         frame = get_noka_frames([package]).get(package)
-        if frame is None and restore_collapsed_window(package):
-            run_cmd(raise_cmd, timeout=5)
-            time.sleep(1)
-            frame = get_noka_frames([package]).get(package)
         if frame is None or (frame[2] >= width - 4 and frame[3] >= height - 80):
             return False  # not on screen, or maximized (no title/strips to grab)
         x, y, w, h = frame
@@ -488,7 +521,8 @@ def place_window(package, target, width, height):
             sx, sy = (x + w + edge, y + h // 2) if horizontal else (x + w // 2, y + h + edge)
             ex, ey = (sx + dw, sy) if horizontal else (sx, sy + dh)
             if sx <= width - 2 and sy <= height - 2 and 4 <= ex <= width - 2 and STATUS_BAR_H <= ey <= height - 2:
-                _drag(sx, sy, ex, ey)
+                if not _drag_window(package, frame, sx, sy, ex, ey):
+                    return False
                 continue
             # The strip (or where the drag would end) is off screen: move the window up/left first.
             nx = max(0, min(x, width - 2 - edge - max(w, tw)))
@@ -498,7 +532,8 @@ def place_window(package, target, width, height):
             tx_move, ty_move = nx - x, ny - y
         else:
             tx_move, ty_move = tx - x, ty - y
-        _drag(grab_x, grab_y, grab_x + tx_move, grab_y + ty_move)
+        if not _drag_window(package, frame, grab_x, grab_y, grab_x + tx_move, grab_y + ty_move):
+            return False
     return False
 
 def sort_windows(packages, only=None):
@@ -510,6 +545,12 @@ def sort_windows(packages, only=None):
             if only is None or pkg in only}
 
 def launch_game(package, game_id, prefer='component'):
+    """True: accepted; False: failed; None: dispatch outcome unknown (do not retry now)."""
+    with _APP_CONTROL_LOCK:
+        return _launch_game_locked(package, game_id, prefer)
+
+
+def _launch_game_locked(package, game_id, prefer='component'):
     """Launch Roblox game directly into place ID for targeted clone package.
 
     Android may deliver an intent to an existing activity rather than start a
@@ -537,6 +578,10 @@ def launch_game(package, game_id, prefer='component'):
 
     for cmd in intents:
         res = run_cmd(cmd, timeout=6)
+        if res.returncode == -1:
+            # A timed-out shell may already have delivered the intent. Defer
+            # to the monitor's state probe and cooldown, not another fallback.
+            return None
         # A delivered-to-existing-activity warning already dispatched the link.
         # Do not send it again here; the monitor handles a genuinely ignored link.
         output = (res.stdout or '') + '\n' + (res.stderr or '')
@@ -696,8 +741,8 @@ def _log_seconds(raw):
 def get_roblox_log_state(package):
     """Classify the current Roblox session from its newest Player log.
 
-    Every launch writes a fresh Player log, so the newest file is the live
-    session. The activity name can't tell home from in-game (both are
+    Read the newest Player log, comparing event order because relinks may
+    reuse it. The activity name can't tell home from in-game (both are
     ActivityNativeMain), but the log can:
       'disconnected' - Error 277/288 or a disconnect-from-experience notice
       'ingame'       - a join marker with no later leave marker
@@ -712,7 +757,7 @@ def get_roblox_log_state(package):
         return None
     script = (
         f'F={_newest_logs_sh(package)}; [ -n "$F" ] || exit 3; '
-        f"echo D=$(tail -n 800 \"$F\" | grep -a -c -i -E '{_DISCONNECT_RE}'); "
+        f"echo D=$(grep -a -n -i -E '{_DISCONNECT_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
         f"echo J=$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
         f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
         f"echo T=$(tail -n 1 \"$F\" | cut -c1-70); "
@@ -722,9 +767,10 @@ def get_roblox_log_state(package):
     found = dict(re.findall(r'^([DJLTK])=(.*)$', res.stdout or '', re.MULTILINE))
     if res.returncode != 0 or 'D' not in found:
         return None
-    if int(found['D'] or 0) > 0:
+    disconnect_line, join_line, leave_line, login_line = (
+        int((re.match(r'(\d+):', found.get(k, '')) or [0, 0])[1]) for k in 'DJLK')
+    if disconnect_line and disconnect_line >= join_line:
         return 'disconnected'
-    join_line, leave_line, login_line = (int((re.match(r'(\d+):', found.get(k, '')) or [0, 0])[1]) for k in 'JLK')
     if join_line and join_line > leave_line:
         return 'ingame'
     if login_line <= join_line:  # home surface hasn't come back since the last join attempt
@@ -1525,13 +1571,21 @@ class TerminalRejoinLoop:
             if not auto_sort or (self.sort_thread and self.sort_thread.is_alive()):
                 return
             pending = {pkg: self.last_launch.get(pkg, 0) for pkg in packages
-                       if pkg in running and now - self.last_launch.get(pkg, 0) >= SORT_DELAY
+                       if pkg in running and pkg in self.last_launch and state[pkg]['state'] == 'ingame'
+                       and now - self.last_launch[pkg] >= SORT_DELAY
                        and sorted_for.get(pkg) != self.last_launch.get(pkg)}
             if not pending:
                 return
 
             def work():
-                results = sort_windows(packages, only=set(pending))
+                results = {}
+                for pkg, launched in pending.items():
+                    with _APP_CONTROL_LOCK:
+                        if stop_event.is_set():
+                            return
+                        if self.last_launch.get(pkg) != launched or state[pkg]['state'] != 'ingame':
+                            continue
+                        results.update(sort_windows(packages, only={pkg}))
                 for pkg, launched in pending.items():
                     sort_tries[pkg] = sort_tries.get(pkg, 0) + 1
                     if results.get(pkg) or sort_tries[pkg] >= 3:
@@ -1543,25 +1597,51 @@ class TerminalRejoinLoop:
             self.sort_thread.start()
 
         def launch(pkg, reason, prefer='component', cold=False):
-            st = state[pkg]
-            now = time.time()
-            self.last_launch[pkg] = now
-            if auto_sort and cold:  # a process about to START reads its window position: pre-place it
-                width, height = get_screen_size()
-                set_window_prefs(pkg, sort_targets(len(packages), width, height)[packages.index(pkg)])
-            ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), prefer=prefer)
-            st.update(attempts=st['attempts'] + 1, next=now + cooldown, missed=0, state='loading')
-            self.set_status(pkg, 'Launching' if ok else 'Launch Failed',
-                            attempts=st['attempts'], next_retry=st['next'], last_result=reason)
-            self.log(f"[{pkg}] {reason}: {'accepted' if ok else 'failed'}")
+            with _APP_CONTROL_LOCK:
+                if stop_event.is_set():
+                    return
+                st = state[pkg]
+                self.last_launch[pkg] = time.time()
+                st['state'] = 'loading'
+                if auto_sort and cold:  # pre-place a process about to START, without gestures
+                    width, height = get_screen_size()
+                    set_window_prefs(pkg, sort_targets(len(packages), width, height)[packages.index(pkg)])
+                ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), prefer=prefer)
+                # Cooldown/grace start after dispatch finishes, not before slow su calls.
+                completed = time.time()
+                self.last_launch[pkg] = completed
+                st.update(attempts=st['attempts'] + 1, next=completed + cooldown, missed=0, state='loading')
+                result = 'accepted' if ok else ('dispatch unknown; checking state before retry' if ok is None else 'failed')
+                self.set_status(pkg, 'Launching' if ok is not False else 'Launch Failed',
+                                attempts=st['attempts'], next_retry=st['next'], last_result=f"{reason}: {result}")
+                self.log(f"[{pkg}] {reason}: {result}")
 
-        # Initial launch. Nothing is ever force-stopped: a running Roblox is simply sent the game
-        # link, because force-stopping a clone's window makes Android close other apps too.
-        already_running = get_running_packages(packages) or set()
+        def retry_ready(pkg, now, reason):
+            st = state[pkg]
+            if now < st['next']:
+                self.set_status(pkg, 'Retry Wait', attempts=st['attempts'], next_retry=st['next'], last_result=reason)
+                return False
+            if st['attempts'] >= retry_limit:
+                st.update(attempts=0, next=now + retry_delay)
+                self.log(f"[{pkg}] Retry batch exhausted; waiting {int(retry_delay)}s")
+                self.set_status(pkg, 'Retry Wait', attempts=retry_limit, next_retry=st['next'],
+                                last_result='Retry batch exhausted')
+                return False
+            return True
+
+        # Monitor existing sessions without sending another game link. A failed
+        # process probe is unknown, never proof that every selected app is closed.
+        already_running = get_running_packages(packages)
         for i, pkg in enumerate(packages):
             if stop_event.is_set():
                 break
-            launch(pkg, 'Initial launch', cold=pkg not in already_running)
+            self.last_launch.pop(pkg, None)
+            if already_running is None or pkg in already_running:
+                state[pkg]['observed_at'] = time.time()
+                self.set_status(pkg, 'Unknown', last_result='Monitoring existing session' if already_running is not None
+                                else 'Process probe unavailable; launch deferred')
+                continue
+            launch(pkg, 'Initial launch', cold=True)
             if sequential and i < len(packages) - 1 and stop_event.wait(launch_wait):
                 break
 
@@ -1596,14 +1676,7 @@ class TerminalRejoinLoop:
 
                     if pkg not in running or window_closed:
                         reason = 'Window closed' if window_closed else 'Process not running'
-                        if now < st['next']:
-                            self.set_status(pkg, 'Retry Wait', attempts=st['attempts'], next_retry=st['next'], last_result=reason)
-                        elif st['attempts'] >= retry_limit:
-                            st.update(attempts=0, next=now + retry_delay)
-                            self.log(f"[{pkg}] Retry batch exhausted; waiting {int(retry_delay)}s")
-                            self.set_status(pkg, 'Retry Wait', attempts=retry_limit, next_retry=st['next'],
-                                            last_result='Retry batch exhausted')
-                        else:
+                        if retry_ready(pkg, now, reason):
                             self.set_status(pkg, 'Rejoining', attempts=st['attempts'] + 1)
                             if auto_clear:  # user opted in: wipes app data, which also stops the app
                                 clear_app_cache(pkg)
@@ -1611,8 +1684,7 @@ class TerminalRejoinLoop:
                         continue
 
                     # Process and window are alive.
-                    st.update(attempts=0, next=0.0)
-                    since_launch = now - self.last_launch.get(pkg, 0)
+                    since_launch = now - self.last_launch.get(pkg, st.get('observed_at', now))
                     if since_launch < grace:
                         self.set_status(pkg, 'Launching', attempts=0,
                                         last_result=f"Waiting for load ({int(grace - since_launch)}s)")
@@ -1621,25 +1693,29 @@ class TerminalRejoinLoop:
                     else:
                         if self._scan_logs_due(st, now, LOG_CHECK if st['state'] == 'ingame' else FAST_CHECK):
                             log_state = get_roblox_log_state(pkg)
-                            if log_state == 'loading' and since_launch >= join_wait:
+                            if log_state == 'loading' and pkg in self.last_launch and since_launch >= join_wait:
                                 log_state = 'home'  # never joined and never settled: treat as stuck
                             if log_state is not None:  # unknown never changes anything
                                 st['state'] = log_state
                                 if log_state == 'ingame':
-                                    st['relinks'] = 0
+                                    st.update(relinks=0, attempts=0, next=0.0)
                             stuck_home = home_enabled and log_state == 'home'
                             if stuck_home or log_state == 'disconnected':
                                 # Re-send the game link to the running app. It joins from the home page or
                                 # a disconnect screen without restarting or force-stopping anything.
                                 reason = 'Stuck on Home page' if stuck_home else 'Disconnected from server'
+                                if not retry_ready(pkg, now, reason):
+                                    continue
                                 st['relinks'] += 1
                                 self.log(f"[{pkg}] {reason} (per Roblox log); re-sending game link (#{st['relinks']})")
                                 launch(pkg, reason, prefer='component' if st['relinks'] % 2 else 'package')
                                 continue
                         if st['state'] == 'home':
                             self.set_status(pkg, 'Home Page', attempts=0, last_result='On Roblox home page')
+                        elif st['state'] == 'ingame':
+                            self.set_status(pkg, 'Ingame', attempts=0, last_result='Game join confirmed by log')
                         else:
-                            self.set_status(pkg, 'Ingame', attempts=0, last_result='Process running')
+                            self.set_status(pkg, 'Unknown', attempts=st['attempts'], last_result='Waiting for game state')
                 maybe_sort(now, running)
             except Exception as e:
                 self.log(f"[!] Rejoin cycle error (continuing): {e}")
@@ -1979,7 +2055,10 @@ def interactive_menu():
                         print(f"[!] No Game ID configured for {p}. Skipping.")
                         continue
                     print(f"Launching {p} into '{gname}' (ID: {gid})...")
-                    launch_game(p, gid)
+                    outcome = launch_game(p, gid)
+                    print("  Launch accepted." if outcome else (
+                        "  Dispatch outcome unknown; no fallback sent. Check the app before retrying."
+                        if outcome is None else "  Launch failed."))
             pause()
 
         elif choice == '11':
