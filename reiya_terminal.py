@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.27-REI-REJOIN"
-BUILD_TIME = "2026-10-19 22:55 UTC"
+BUILD_VERSION = "v6.9.28-REI-REJOIN"
+BUILD_TIME = "2026-10-21 13:15:13 UTC"
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -512,12 +512,10 @@ def sort_windows(packages, only=None):
 def launch_game(package, game_id, prefer='component'):
     """Launch Roblox game directly into place ID for targeted clone package.
 
-    A running Roblox (e.g. stuck on its home page) ignores one of the two intent
-    forms, and which one depends on its state: the component intent
-    (ActivityProtocolLaunch) or the plain VIEW intent addressed by package. The
-    ignored one still exits 0 (sometimes with "Activity not started ... delivered
-    to currently running top-most instance", sometimes silently), so the caller
-    alternates `prefer` between attempts and checks the Roblox log for a join.
+    Android may deliver an intent to an existing activity rather than start a
+    new one. That is an accepted dispatch, not a reason to send another intent
+    immediately. Roblox can still ignore a delivered link; the caller checks
+    its log and alternates `prefer` on later rejoin attempts if needed.
     A cold start works with either form.
     """
     package = str(package).strip()
@@ -539,10 +537,11 @@ def launch_game(package, game_id, prefer='component'):
 
     for cmd in intents:
         res = run_cmd(cmd, timeout=6)
-        # rc is 0 even when a running Roblox ignores the intent ("Warning: Activity not
-        # started, intent has been delivered to currently running top-most instance"),
-        # and which form it ignores depends on the app's state, so fall through to the next.
-        if res.returncode == 0 and "Error" not in res.stdout and "not started" not in res.stdout:
+        # A delivered-to-existing-activity warning already dispatched the link.
+        # Do not send it again here; the monitor handles a genuinely ignored link.
+        output = (res.stdout or '') + '\n' + (res.stderr or '')
+        delivered = "intent has been delivered to currently running top-most instance" in output
+        if res.returncode == 0 and "Error" not in output and ("not started" not in output or delivered):
             return True
     return False
 
