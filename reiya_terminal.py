@@ -36,8 +36,9 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.30-REI-REJOIN"
-BUILD_TIME = "2026-10-21 21:53:49 UTC"
+BUILD_VERSION = "v6.9.31-REI-REJOIN"
+BUILD_TIME = "2026-10-22 07:22:17 UTC"
+CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -73,6 +74,7 @@ DEFAULT_CONFIG = {
     'rejoin_cooldown': 10,
     'sequential_join': True,
     'clear_cache': False,
+    'auto_cache_clear_enabled': False,  # cache only, every five hours while Auto Rejoin runs
     'webhook_enabled': False,
     'selected_packages': [],
     'game_method': 'all',
@@ -146,6 +148,7 @@ def validate_config(values):
     # immediately instead, so drop the old default that got written to disk.
     if clean.get('unknown_stall_seconds') == 90:
         clean['unknown_stall_seconds'] = 0
+    clean['auto_cache_clear_enabled'] = clean.get('auto_cache_clear_enabled') is True
     clean['sequential_join'] = True  # one unconfirmed game launch at a time, including saved old configs
     clean.pop('rejoin_interval', None)  # retired legacy field
     clean.pop('ram_refresh_interval', None)  # retired 30-second system RAM cache
@@ -704,6 +707,22 @@ def clear_app_cache(package):
     """Clear all app data using Android `pm clear` (legacy function name)."""
     return valid_pkg(package) and run_cmd(f"su -c 'pm clear {package}'", timeout=10).returncode != -1
 
+def supports_cache_only_clear():
+    """Older Android builds may lack this flag; never substitute a data wipe."""
+    res = run_cmd("su -c '/system/bin/pm help'", timeout=5)
+    return res.returncode == 0 and bool(re.search(r'clear[^\n]*--cache-only', res.stdout or ''))
+
+
+def clear_app_cache_only(package):
+    """Clear only the selected primary-user app cache, without stopping/relaunching it."""
+    if not valid_pkg(package):
+        return False, 'invalid package name'
+    res = run_cmd(f"su -c '/system/bin/pm clear --cache-only --user 0 {package}'", timeout=15)
+    ok = res.returncode == 0 and any(line.strip() == 'Success' for line in (res.stdout or '').splitlines())
+    detail = ((res.stdout or '') + ' ' + (res.stderr or '')).strip().replace('\n', ' ')[:180]
+    return ok, ('cache cleared' if ok else f'cache-only cleanup failed (exit {res.returncode}): {detail}')
+
+
 _DISCONNECT_RE = r'error code: ?(288|277)|disconnected from the experience|disconnectreason'
 _JOIN_RE = r'game_join_loadtime|Connection accepted'
 _LEAVE_RE = r'NetworkClient\] Client:Disconnect|Disconnection Notification'
@@ -1230,6 +1249,51 @@ class AppRamThread(threading.Thread):
     def stop(self):
         self.stop_event.set()
 
+class CacheClearThread(threading.Thread):
+    """Optional cache-only maintenance, five hours after start and each completed sweep."""
+    def __init__(self, packages, stop_event, log_fn):
+        super().__init__(daemon=True)
+        self.packages = list(dict.fromkeys(p for p in packages if valid_pkg(p)))
+        self.stop_event = stop_event
+        self.log_fn = log_fn
+
+    def run(self):
+        deadline = time.monotonic() + CACHE_CLEAR_INTERVAL_SECONDS
+        while not self.stop_event.wait(max(0.0, deadline - time.monotonic())):
+            self.clear_once()
+            # Schedule from completion so slow operations never create catch-up bursts.
+            deadline = time.monotonic() + CACHE_CLEAR_INTERVAL_SECONDS
+
+    def clear_once(self):
+        if self.stop_event.is_set():
+            return
+        try:
+            if not supports_cache_only_clear():
+                self.log_fn('Cache-only cleanup skipped: pm --cache-only support/root probe unavailable; app data untouched')
+                return
+        except Exception as exc:
+            self.log_fn(f'Cache-only support probe failed: {exc}; app data untouched')
+            return
+        for package in self.packages:
+            # Wait interruptibly; never overlap launches or screen-global sorting input.
+            while not self.stop_event.is_set():
+                if _APP_CONTROL_LOCK.acquire(timeout=0.5):
+                    break
+            else:
+                return
+            try:
+                if self.stop_event.is_set():
+                    return
+                ok, detail = clear_app_cache_only(package)
+                self.log_fn(f'[{package}] Cache-only 5h cleanup: {detail}')
+            except Exception as exc:
+                self.log_fn(f'[{package}] Cache-only cleanup error: {exc}')
+            finally:
+                _APP_CONTROL_LOCK.release()
+            if self.stop_event.wait(0.1):
+                return
+
+
 # ==============================================================================
 # 4. AUTO REJOIN MONITORING LOOP & LIVE DASHBOARD
 # ==============================================================================
@@ -1243,6 +1307,7 @@ class TerminalRejoinLoop:
         self.start_time = None
         self.webhook_thread = None
         self.app_ram_thread = None
+        self.cache_clear_thread = None
         self.recent_logs = []
         self.sort_thread = None
         self.stop_event = None
@@ -1276,7 +1341,8 @@ class TerminalRejoinLoop:
             return self.recent_logs[-count:]
 
     def start(self, cfg):
-        if self.running or (self.thread and self.thread.is_alive()):
+        if (self.running or (self.thread and self.thread.is_alive())
+                or (self.cache_clear_thread and self.cache_clear_thread.is_alive())):
             print("[!] Auto rejoin is already running.")
             return False
 
@@ -1311,12 +1377,21 @@ class TerminalRejoinLoop:
             daemon=True
         )
         self.thread.start()
+        if cfg.get('auto_cache_clear_enabled', False):
+            self.cache_clear_thread = CacheClearThread(packages, self.stop_event, self.log)
+            self.cache_clear_thread.start()
+            self.log('Cache-only cleanup enabled: selected apps every 5 hours; no app data wipe')
         return True
 
     def stop(self):
         self.running = False
         if self.stop_event:
             self.stop_event.set()
+        if self.cache_clear_thread:
+            if self.cache_clear_thread is not threading.current_thread():
+                self.cache_clear_thread.join(timeout=16)
+            if not self.cache_clear_thread.is_alive():
+                self.cache_clear_thread = None
         if self.webhook_thread:
             self.webhook_thread.stop()
             if self.webhook_thread is not threading.current_thread():
@@ -1482,6 +1557,7 @@ class TerminalRejoinLoop:
 
                 w_st = f"{GREEN}Enable{RESET}"  if cfg.get('webhook_enabled')       else f"{RED}Disable{RESET}"
                 c_st = f"{GREEN}Enable{RESET}"  if cfg.get('clear_cache')           else f"{RED}Disable{RESET}"
+                cache_st = f"{GREEN}Enable{RESET}" if cfg.get('auto_cache_clear_enabled') else f"{RED}Disable{RESET}"
                 game_mode = game_mode_label(cfg)
 
                 cpu = get_cpu_usage()
@@ -1496,7 +1572,8 @@ class TerminalRejoinLoop:
                 out(f"{BLUE}By seisen_{RESET}")
                 out(f"{CYAN}GAME MODE: {game_mode}{RESET}")
                 out(f"WEBHOOK: {w_st}")
-                out(f"CLEAR CACHE: {c_st}")
+                out(f"DATA ON REJOIN: {c_st}")
+                out(f"CACHE ONLY (5H): {cache_st}")
                 out(f"UPTIME: {uptime}")
                 out(SEP)
 
@@ -2045,6 +2122,7 @@ def interactive_menu():
             ask_int("Retry Batch Delay seconds", 'retry_delay')
             ask_int("Minimum Rejoin Cooldown seconds", 'rejoin_cooldown')
             ask_int("Per-App RAM Refresh seconds", 'app_ram_refresh_interval')
+            ask_bool("Auto-clear CACHE ONLY every 5 hours while Auto Rejoin runs?", 'auto_cache_clear_enabled')
             ask_bool("Clear ALL App Data on Rejoin (pm clear; may sign out accounts)?", 'clear_cache')
             ask_int("Launch Grace Period (hide Launching status after X seconds)", 'launch_grace')
             save_config()
