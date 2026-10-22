@@ -36,9 +36,10 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.31-REI-REJOIN"
-BUILD_TIME = "2026-10-22 07:22:17 UTC"
+BUILD_VERSION = "v6.9.32-REI-REJOIN"
+BUILD_TIME = "2026-10-22 08:38:21 UTC"
 CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
+CLONE_LAUNCH_DELAY_SECONDS = 5
 
 # ==============================================================================
 # DEFAULT PRESETS & CONFIGURATION
@@ -70,7 +71,7 @@ DEFAULT_CONFIG = {
     'activity_check_interval': 30,
     'dashboard_refresh_interval': 2,
     'app_ram_refresh_interval': 30,
-    'launch_wait': 15,
+    'launch_wait': CLONE_LAUNCH_DELAY_SECONDS,
     'rejoin_cooldown': 10,
     'sequential_join': True,
     'clear_cache': False,
@@ -149,7 +150,8 @@ def validate_config(values):
     if clean.get('unknown_stall_seconds') == 90:
         clean['unknown_stall_seconds'] = 0
     clean['auto_cache_clear_enabled'] = clean.get('auto_cache_clear_enabled') is True
-    clean['sequential_join'] = True  # one unconfirmed game launch at a time, including saved old configs
+    clean['sequential_join'] = True  # stagger dispatches; game status does not gate the next app
+    clean['launch_wait'] = CLONE_LAUNCH_DELAY_SECONDS  # migrate the retired timed/ingame-gated settings
     clean.pop('rejoin_interval', None)  # retired legacy field
     clean.pop('ram_refresh_interval', None)  # retired 30-second system RAM cache
     clean.pop('system_ram_refresh_interval', None)  # live dumpsys sampling has no cache
@@ -776,64 +778,37 @@ def get_roblox_log_state(package):
     settled = None not in (last_event, now_t) and now_t - last_event >= LOG_SETTLE_SECONDS
     return 'home' if settled else 'loading'
 
-def get_roblox_join_marker(package):
-    """(newest log file, latest numbered join line), or None when the probe fails."""
-    if not valid_pkg(package):
-        return None
-    script = (
-        f'F={_newest_logs_sh(package)}; printf "F=%s\\n" "$F"; '
-        f'if [ -n "$F" ]; then '
-        f"printf 'J=%s\\n' \"$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -c1-160)\"; "
-        'else echo J=; fi'
-    )
-    res = run_cmd(f"su -c {shlex.quote(script)}", timeout=6)
-    found = dict(re.findall(r'^([FJ])=(.*)$', res.stdout or '', re.MULTILINE))
-    if res.returncode != 0 or 'F' not in found or 'J' not in found:
-        return None
-    return found['F'], found['J']
-
-
-def fresh_game_join(before, after):
-    """An accepted intent or a stale join line is not proof that this launch joined."""
-    return (before is not None and after is not None and bool(after[0])
-            and bool(re.match(r'\d+:', after[1])) and after != before)
-
-
 def launch_packages_in_order(packages, cfg, stop_event=None):
-    """Manual launch queue: never advance on a timer, failed launch or unknown log."""
+    """Manual launch queue: wait five seconds between dispatches, not for Ingame."""
     stop_event = stop_event or threading.Event()
+    next_launch_at = 0.0
+    attempted = set()
+    all_ok = True
     for pkg in packages:
         if stop_event.is_set():
             return False
         gid = _resolve_package_game_id(pkg, cfg)
         if not gid or not _build_launch_urls(gid):
-            print(f"[{pkg}] Invalid game setting; remaining launch queue paused.")
+            print(f"[{pkg}] Invalid game setting; skipping this app.")
+            all_ok = False
+            continue
+        delay = max(0.0, next_launch_at - time.monotonic())
+        if delay and stop_event.wait(delay):
             return False
-        running = get_running_packages([pkg])
-        windows = get_active_package_tasks([pkg])
-        already_ingame = (running is not None and pkg in running and windows is not None
-                          and pkg in windows and get_roblox_log_state(pkg) == 'ingame')
-        before = None
-        if not already_ingame:
-            before = get_roblox_join_marker(pkg)
-            print(f"Launching {pkg}; waiting for a new Ingame confirmation before the next app...")
-            outcome = launch_game(pkg, gid)
-            if outcome is False:
-                print(f"[{pkg}] Launch failed; remaining launch queue paused.")
-                return False
-        while not already_ingame:
-            if stop_event.wait(3):
-                return False
-            running = get_running_packages([pkg])
-            windows = get_active_package_tasks([pkg])
-            if (running is not None and pkg in running and windows is not None and pkg in windows
-                    and get_roblox_log_state(pkg) == 'ingame'
-                    and fresh_game_join(before, get_roblox_join_marker(pkg))):
-                break
-        print(f"[{pkg}] Ingame confirmed.")
-        if cfg.get('auto_sort', True):
-            sort_windows(packages, only={pkg})
-    return True
+        print(f"Launching {pkg}; next app waits {CLONE_LAUNCH_DELAY_SECONDS} seconds, not for Ingame...")
+        outcome = launch_game(pkg, gid)
+        next_launch_at = time.monotonic() + CLONE_LAUNCH_DELAY_SECONDS
+        attempted.add(pkg)
+        if outcome is not True:
+            all_ok = False
+            print(f"[{pkg}] " + ('Dispatch outcome unknown; no immediate fallback.' if outcome is None
+                                  else 'Launch failed; continuing with the next app after the delay.'))
+    if attempted and cfg.get('auto_sort', True):
+        # Let the final app create its window, then sort without gating launches.
+        if stop_event.wait(6):
+            return False
+        sort_windows(packages, only=attempted)
+    return all_ok
 
 
 # ==============================================================================
@@ -1674,7 +1649,7 @@ class TerminalRejoinLoop:
         # state: last Roblox log state; relinks: game links re-sent since the last healthy state
         state = {pkg: {'attempts': 0, 'next': 0.0, 'missed': 0, 'log_at': 0.0, 'state': 'loading', 'relinks': 0} for pkg in packages}
         last_window_check = 0.0
-        in_flight = None  # package holding the gate until a NEW successful game join is confirmed
+        next_launch_at = 0.0  # monotonic deadline shared by all initial/rejoin dispatches
         sort_requested = {}
         sorted_for = {}   # pkg -> launch timestamp whose window is already sorted (or given up on)
         sort_tries = {}
@@ -1689,7 +1664,6 @@ class TerminalRejoinLoop:
                     sort_requested.setdefault(pkg, now)
             pending = {pkg: sort_requested[pkg] for pkg in packages
                        if pkg in running and now - sort_requested[pkg] >= SORT_DELAY
-                       and (in_flight is None or pkg == in_flight)
                        and sorted_for.get(pkg) != sort_requested[pkg]}
             if not pending:
                 return
@@ -1700,7 +1674,7 @@ class TerminalRejoinLoop:
                     with _APP_CONTROL_LOCK:
                         if stop_event.is_set():
                             return
-                        if sort_requested.get(pkg) != launched or (in_flight is not None and pkg != in_flight):
+                        if sort_requested.get(pkg) != launched:
                             continue
                         results.update(sort_windows(packages, only={pkg}))
                 for pkg, launched in pending.items():
@@ -1716,19 +1690,18 @@ class TerminalRejoinLoop:
             self.sort_thread.start()
 
         def launch(pkg, reason, prefer='component', cold=False):
-            nonlocal in_flight
+            nonlocal next_launch_at
             with _APP_CONTROL_LOCK:
                 if stop_event.is_set():
                     return
-                if in_flight is not None and in_flight != pkg:
-                    self.set_status(pkg, 'Queued', last_result=f"Waiting for {in_flight} to join a game")
+                delay = next_launch_at - time.monotonic()
+                if delay > 0:
+                    self.set_status(pkg, 'Queued', last_result=f"Next launch in {delay:.1f}s (5-second spacing)")
                     return False
                 if self.sort_thread and self.sort_thread.is_alive():
                     self.set_status(pkg, 'Queued', last_result='Waiting for window sorting')
                     return False
-                in_flight = pkg
                 st = state[pkg]
-                st['join_before'] = get_roblox_join_marker(pkg)
                 self.last_launch[pkg] = time.time()
                 st['state'] = 'loading'
                 if auto_sort and cold:  # pre-place a process about to START, without gestures
@@ -1737,18 +1710,20 @@ class TerminalRejoinLoop:
                 ok = launch_game(pkg, _resolve_package_game_id(pkg, cfg), prefer=prefer)
                 # Cooldown/grace start after dispatch finishes, not before slow su calls.
                 completed = time.time()
+                next_launch_at = time.monotonic() + CLONE_LAUNCH_DELAY_SECONDS
                 self.last_launch[pkg] = completed
                 sort_requested[pkg] = completed
                 st.update(attempts=st['attempts'] + 1, next=completed + cooldown, missed=0, state='loading')
                 result = 'accepted' if ok else ('dispatch unknown; checking state before retry' if ok is None else 'failed')
                 self.set_status(pkg, 'Launching' if ok is not False else 'Launch Failed',
                                 attempts=st['attempts'], next_retry=st['next'], last_result=f"{reason}: {result}")
-                self.log(f"[{pkg}] {reason}: {result}; launch queue waits for Ingame confirmation")
+                self.log(f"[{pkg}] {reason}: {result}; next launch after {CLONE_LAUNCH_DELAY_SECONDS}s")
                 return True
 
         def retry_ready(pkg, now, reason):
-            if in_flight is not None and in_flight != pkg:
-                self.set_status(pkg, 'Queued', last_result=f"Waiting for {in_flight} to join a game")
+            delay = next_launch_at - time.monotonic()
+            if delay > 0:
+                self.set_status(pkg, 'Queued', last_result=f"Next launch in {delay:.1f}s (5-second spacing)")
                 return False
             if self.sort_thread and self.sort_thread.is_alive():
                 self.set_status(pkg, 'Queued', last_result='Waiting for window sorting')
@@ -1777,7 +1752,11 @@ class TerminalRejoinLoop:
                 self.set_status(pkg, 'Unknown', last_result='Monitoring existing session' if already_running is not None
                                 else 'Process probe unavailable; launch deferred')
                 continue
-            launch(pkg, 'Initial launch', cold=True)
+            dispatched = launch(pkg, 'Initial launch', cold=True)
+            remaining = packages[i + 1:]
+            if dispatched and any(p not in already_running for p in remaining):
+                if stop_event.wait(max(0.0, next_launch_at - time.monotonic())):
+                    break
 
         if stop_event.wait(8):
             for pkg in packages:
@@ -1827,12 +1806,6 @@ class TerminalRejoinLoop:
                     else:
                         if self._scan_logs_due(st, now, LOG_CHECK if st['state'] == 'ingame' else FAST_CHECK):
                             log_state = get_roblox_log_state(pkg)
-                            if log_state == 'ingame' and in_flight == pkg:
-                                if not fresh_game_join(st.get('join_before'), get_roblox_join_marker(pkg)):
-                                    log_state = 'loading'  # a previous game's log must not release the queue
-                                else:
-                                    self.log(f"[{pkg}] New Ingame join confirmed; next app may launch")
-                                    in_flight = None
                             if log_state == 'loading' and pkg in self.last_launch and since_launch >= join_wait:
                                 log_state = 'home'  # never joined and never settled: treat as stuck
                             if log_state is not None:  # unknown never changes anything
@@ -2117,7 +2090,7 @@ def interactive_menu():
             ask_int("Check Interval seconds", 'check_interval')
             ask_int("Offline Wait seconds", 'offline_wait')
             ask_int("Max Retries", 'retry_count')
-            print("Sequential Join: always ON; next app waits for the current app to be Ingame.")
+            print("Sequential Launch: 5 seconds between apps; no Ingame wait.")
             ask_bool("Auto-sort Roblox windows into a grid after launch?", 'auto_sort')
             ask_int("Retry Batch Delay seconds", 'retry_delay')
             ask_int("Minimum Rejoin Cooldown seconds", 'rejoin_cooldown')
