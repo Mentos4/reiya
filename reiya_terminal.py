@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.32-REI-REJOIN"
-BUILD_TIME = "2026-10-22 08:38:21 UTC"
+BUILD_VERSION = "v6.9.33-REI-REJOIN"
+BUILD_TIME = "2026-10-22 08:59:45 UTC"
 CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
 CLONE_LAUNCH_DELAY_SECONDS = 5
 
@@ -726,10 +726,15 @@ def clear_app_cache_only(package):
 
 
 _DISCONNECT_RE = r'error code: ?(288|277)|disconnected from the experience|disconnectreason'
-_JOIN_RE = r'game_join_loadtime|Connection accepted'
-_LEAVE_RE = r'NetworkClient\] Client:Disconnect|Disconnection Notification'
-_LOGIN_RE = r'SingleSurfaceApp\] userDidLogin'
+_JOIN_RE = r'Connection accepted'
+_LEAVE_RE = (r'NetworkClient\] Client:Disconnect|Disconnection Notification|'
+             r'SingleSurfaceApp\] leaveUGCGame|JNIAppBridge\] nativeAppBridgeV2LeaveGame:')
+_LOGIN_RE = (r'SingleSurfaceApp\] (userDidLogin|setStage: \(stage:LuaApp\)|'
+             r'returnToLuaApp: \(stage:LuaApp\))')
+_JOIN_START_RE = r'SingleSurfaceApp\] setStage: \(stage:UGCGame\)'
+_STAGE_RE = r'SingleSurfaceApp\] setStage:'
 LOG_SETTLE_SECONDS = 3  # quiet time after the home surface reloads before we trust it
+_roblox_home_observations = {}  # package -> (file/event signature, monotonic first seen)
 
 def _log_seconds(raw):
     """App-relative timestamp (seconds) of a grep'd or tailed Player log line."""
@@ -739,44 +744,51 @@ def _log_seconds(raw):
 def get_roblox_log_state(package):
     """Classify the current Roblox session from its newest Player log.
 
-    Read the newest Player log, comparing event order because relinks may
-    reuse it. The activity name can't tell home from in-game (both are
-    ActivityNativeMain), but the log can:
-      'disconnected' - Error 277/288 or a disconnect-from-experience notice
-      'ingame'       - a join marker with no later leave marker
-      'home'         - not in a game and the home surface (userDidLogin) reloaded after the
-                       last join attempt: a torn-down join or a left game ends there
-      'loading'      - not in a game, but the home surface hasn't reloaded yet. A failed join
-                       can sit connecting for ~25s before giving up, and a game link sent
-                       during that wait is swallowed when the app resets to home
-      None           - unknown (no su / no log); callers must not act on it
+    Compare line order in one file: a later LuaApp return overrides an old
+    connection/disconnect, and a later UGCGame start invalidates old Home.
+    Join telemetry alone is not proof of a server connection. Home requires
+    an explicit home-surface signal, stable for three seconds; repeated
+    observations also settle quiet logs without relying on the device clock.
+    Missing/unreadable/incomplete probes return None, never Home.
     """
     if not valid_pkg(package):
         return None
     script = (
-        f'F={_newest_logs_sh(package)}; [ -n "$F" ] || exit 3; '
+        f'F={_newest_logs_sh(package)}; [ -n "$F" ] && [ -r "$F" ] || exit 3; '
+        'printf "F=%s\\n" "$F"; '
         f"echo D=$(grep -a -n -i -E '{_DISCONNECT_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
         f"echo J=$(grep -a -n -E '{_JOIN_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
         f"echo L=$(grep -a -n -E '{_LEAVE_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
         f"echo T=$(tail -n 1 \"$F\" | cut -c1-70); "
-        f"echo K=$(grep -a -n -E '{_LOGIN_RE}' \"$F\" | tail -n 1 | cut -c1-90)"
+        f"echo K=$(grep -a -n -E '{_LOGIN_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
+        f"echo A=$(grep -a -n -E '{_JOIN_START_RE}' \"$F\" | tail -n 1 | cut -c1-90); "
+        f"echo S=$(grep -a -n -E '{_STAGE_RE}' \"$F\" | tail -n 1 | cut -c1-90)"
     )
     res = run_cmd(f"su -c {shlex.quote(script)}", timeout=6)
-    found = dict(re.findall(r'^([DJLTK])=(.*)$', res.stdout or '', re.MULTILINE))
-    if res.returncode != 0 or 'D' not in found:
+    found = dict(re.findall(r'^([FDJLTKAS])=([^\r\n]*)', res.stdout or '', re.MULTILINE))
+    if res.returncode != 0 or not all(k in found for k in 'FDJLTKAS') or not found['F']:
+        _roblox_home_observations.pop(package, None)
         return None
-    disconnect_line, join_line, leave_line, login_line = (
-        int((re.match(r'(\d+):', found.get(k, '')) or [0, 0])[1]) for k in 'DJLK')
-    if disconnect_line and disconnect_line >= join_line:
+    disconnect_line, join_line, leave_line, home_line, attempt_line, stage_line = (
+        int((re.match(r'(\d+):', found.get(k, '')) or [0, 0])[1]) for k in 'DJLKAS')
+    # Old network teardown may log Client:Disconnect AFTER LuaApp is already
+    # visible. It invalidates an old connection, not an explicit return Home.
+    if home_line and home_line >= max(join_line, disconnect_line, attempt_line, stage_line):
+        signature = (found['F'], found['K'], found['L'])
+        now = time.monotonic()
+        previous = _roblox_home_observations.get(package)
+        first_seen = previous[1] if previous and previous[0] == signature else now
+        _roblox_home_observations[package] = (signature, first_seen)
+        event_t = _log_seconds(found['L'] if leave_line > home_line else found['K'])
+        tail_t = _log_seconds(found['T'])
+        log_settled = event_t is not None and tail_t is not None and tail_t - event_t >= LOG_SETTLE_SECONDS
+        return 'home' if log_settled or now - first_seen >= LOG_SETTLE_SECONDS else 'loading'
+    _roblox_home_observations.pop(package, None)
+    if disconnect_line and disconnect_line >= max(join_line, home_line, attempt_line, stage_line):
         return 'disconnected'
-    if join_line and join_line > leave_line:
+    if join_line and join_line > max(leave_line, home_line, attempt_line, stage_line):
         return 'ingame'
-    if login_line <= join_line:  # home surface hasn't come back since the last join attempt
-        return 'loading'
-    last_event = max(filter(None, (_log_seconds(found.get(k)) for k in 'JLK')), default=None)
-    now_t = _log_seconds(found.get('T'))
-    settled = None not in (last_event, now_t) and now_t - last_event >= LOG_SETTLE_SECONDS
-    return 'home' if settled else 'loading'
+    return 'loading'
 
 def launch_packages_in_order(packages, cfg, stop_event=None):
     """Manual launch queue: wait five seconds between dispatches, not for Ingame."""
@@ -1636,7 +1648,6 @@ class TerminalRejoinLoop:
         retry_limit  = int(cfg.get('retry_count', 3))
         retry_delay  = float(cfg.get('retry_delay', 30))
         grace        = float(cfg.get('launch_grace', 25))   # seconds after a launch before status checks begin
-        join_wait    = max(grace, float(cfg.get('join_wait', 60)))  # no login marker by now: treat 'loading' as stuck
         home_enabled = cfg.get('home_rejoin_enabled', True)
         auto_sort    = cfg.get('auto_sort', True)
         poll         = min(float(cfg.get('check_interval', 2)), 5)
@@ -1806,8 +1817,6 @@ class TerminalRejoinLoop:
                     else:
                         if self._scan_logs_due(st, now, LOG_CHECK if st['state'] == 'ingame' else FAST_CHECK):
                             log_state = get_roblox_log_state(pkg)
-                            if log_state == 'loading' and pkg in self.last_launch and since_launch >= join_wait:
-                                log_state = 'home'  # never joined and never settled: treat as stuck
                             if log_state is not None:  # unknown never changes anything
                                 st['state'] = log_state
                                 if log_state == 'ingame':
