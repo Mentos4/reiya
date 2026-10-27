@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.33-REI-REJOIN"
-BUILD_TIME = "2026-10-22 08:59:45 UTC"
+BUILD_VERSION = "v6.9.34-REI-REJOIN"
+BUILD_TIME = "2026-10-27 14:27:22 UTC"
 CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
 CLONE_LAUNCH_DELAY_SECONDS = 5
 
@@ -332,7 +332,8 @@ def get_active_package_tasks(packages):
     top` is NOT used: it omits freeform/split-screen clone windows, which made
     healthy games look closed. `dumpsys activity activities` lists every live
     ActivityRecord ("Run #n: ActivityRecord{... pkg/Activity ...}") and drops
-    the record as soon as the window is closed.
+    the record as soon as the window is closed. Missing records are cross-checked
+    against WindowManager; failed secondary probes return unknown, not closed.
     """
     if not packages:
         return set()
@@ -341,7 +342,20 @@ def get_active_package_tasks(packages):
     if res.returncode != 0 or 'ACTIVITY MANAGER ACTIVITIES' not in output:
         return None
     active = set(re.findall(r'Run #\d+: ActivityRecord\{\S+ u\d+ ([A-Za-z0-9._]+)/', output))
-    return active.intersection(packages)
+    active.intersection_update(packages)
+    if active.issuperset(packages):
+        return active
+    # A missing ActivityRecord is not proof that a clone closed. Android builds
+    # expose freeform/background activities differently, and dumps can be partial.
+    # Cross-check actual Window records before counting a missing-window sample.
+    # Do not use mCurrentFocus: only one of several healthy clones owns focus.
+    window_res = run_cmd("su -c 'dumpsys window windows'", timeout=8)
+    window_output = window_res.stdout or ''
+    if window_res.returncode != 0 or 'WINDOW MANAGER WINDOWS' not in window_output:
+        return None
+    window_packages = set(re.findall(
+        r'(?m)^\s*Window #\d+ Window\{\S+ u\d+ ([A-Za-z0-9._]+)/', window_output))
+    return active.union(window_packages.intersection(packages))
 
 def get_screen_size():
     """Screen (width, height), always landscape. `wm size` fails for the Termux user on
