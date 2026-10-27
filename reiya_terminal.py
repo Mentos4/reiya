@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.34-REI-REJOIN"
-BUILD_TIME = "2026-10-27 14:27:22 UTC"
+BUILD_VERSION = "v6.9.35-REI-REJOIN"
+BUILD_TIME = "2026-10-27 15:05:53 UTC"
 CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
 CLONE_LAUNCH_DELAY_SECONDS = 5
 
@@ -376,8 +376,21 @@ def _build_launch_urls(game_id):
     if game_id.startswith('http'):
         parsed = urllib.parse.urlparse(game_id)
         host = (parsed.hostname or '').lower()
+        if parsed.scheme not in ('http', 'https') or not (host == 'roblox.com' or host.endswith('.roblox.com')):
+            return None
+        if parsed.path.rstrip('/') in ('/share', '/share-links'):
+            # A share code is NOT a place ID or a legacy privateServerLinkCode.
+            # Keep it intact; Roblox resolves it to the private server in-app.
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            codes, types = query.get('code', []), query.get('type', [])
+            if (len(codes) != 1 or types != ['Server']
+                    or not re.fullmatch(r'[A-Za-z0-9_-]+', codes[0])):
+                return None
+            share_query = urllib.parse.urlencode({'code': codes[0], 'type': 'Server'})
+            return (f'roblox://navigation/share_links?{share_query}',
+                    f'https://www.roblox.com/share?{share_query}')
         match = re.search(r'/games/(\d+)', parsed.path)
-        if parsed.scheme not in ('http', 'https') or not (host == 'roblox.com' or host.endswith('.roblox.com')) or not match:
+        if not match:
             return None
         place_id = match.group(1)
         ps_match = re.search(r'privateServerLinkCode=([^&]+)', game_id)
@@ -1956,6 +1969,9 @@ def pick_game(header, allow_skip=False, id_width=15):
             gid = prompt("  Enter Place ID / Link: ").strip()
             if not gid:
                 print("  [!] No Place ID / Link entered. Try again.")
+                continue
+            if not _build_launch_urls(gid):
+                print("  [!] Invalid game setting. Enter a Place ID, Roblox game link, or private Server share link.")
                 continue
             return (f"Game ({gid[:id_width]}...)" if len(gid) > id_width else f"Game ({gid})"), gid
         if choice.isdigit() and 1 <= int(choice) <= len(PRESET_GAMES):
