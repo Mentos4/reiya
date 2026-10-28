@@ -29,6 +29,7 @@ import threading
 import shutil
 import shlex
 import urllib.request
+import urllib.error
 import urllib.parse
 import select
 import base64
@@ -36,8 +37,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.36-REI-REJOIN"
-BUILD_TIME = "2026-10-28 13:22:41 UTC"
+BUILD_VERSION = "v6.9.37-REI-REJOIN"
+BUILD_TIME = "2026-10-28 15:20:30 UTC"
 CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
 CLONE_LAUNCH_DELAY_SECONDS = 5
 
@@ -211,6 +212,10 @@ def run_cmd(cmd, timeout=5):
     what reliably worked before any of that, so that's what this stays as —
     do not reintroduce process-group/session tricks here without testing
     directly against a real su binary first."""
+    # This cloud-phone build exposes root as vu; Termux's su wrapper has no
+    # backing su binary. Preserve the same shell payload on that native root API.
+    if cmd.startswith('su -c ') and os.access('/system/bin/vu', os.X_OK):
+        cmd = '/system/bin/vu -c ' + cmd[len('su -c '):]
     try:
         res = subprocess.run(
             cmd, shell=True,
@@ -553,6 +558,72 @@ def sort_windows(packages, only=None):
             for pkg, target in zip(packages, sort_targets(len(packages), width, height))
             if only is None or pkg in only}
 
+_private_share_urls = {}  # (package, share code) -> (monotonic expiry, resolved URLs)
+
+
+def _resolve_private_share_urls(package, navigation_url):
+    """Resolve a Server share using that clone's existing session, never a public fallback.
+
+    The cookie stays in process memory and is sent only to Roblox's HTTPS API.
+    No password prompt, saved cookie copy, cross-clone session, or cookie logging.
+    Missing root/session/network support retains the original private UDL route.
+    """
+    if not valid_pkg(package) or not navigation_url.startswith('roblox://navigation/share_links?'):
+        return None
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(navigation_url).query)
+    codes = query.get('code', [])
+    if len(codes) != 1 or query.get('type') != ['Server']:
+        return None
+    key = (package, codes[0])
+    cached = _private_share_urls.get(key)
+    if cached and time.monotonic() < cached[0]:
+        return cached[1]
+    # Use the same Python interpreter under root to read the clone's cookie DB
+    # read-only. The small helper emits only to this private subprocess pipe.
+    reader = (
+        'import sqlite3,sys; '
+        'p="/data/data/"+sys.argv[1]+"/app_webview/Default/Cookies"; '
+        'c=sqlite3.connect("file:"+p+"?mode=ro",uri=True); '
+        'r=c.execute("SELECT value FROM cookies WHERE name=? AND host_key IN (?,?) LIMIT 1", '
+        '(".ROBLOSECURITY",".roblox.com","www.roblox.com")).fetchone(); '
+        'c.close(); sys.stdout.write(r[0] if r else "")'
+    )
+    command = ' '.join(shlex.quote(v) for v in (sys.executable, '-c', reader, package))
+    result = run_cmd('su -c ' + shlex.quote(command), timeout=5)
+    cookie = (result.stdout or '').strip()
+    if result.returncode != 0 or not cookie.startswith('_|WARNING:') or len(cookie) > 16384 or '\n' in cookie or '\r' in cookie:
+        return None
+    headers = {'Content-Type': 'application/json', 'Cookie': '.ROBLOSECURITY=' + cookie,
+               'Origin': 'https://www.roblox.com', 'Referer': 'https://www.roblox.com/'}
+    body = json.dumps({'linkId': codes[0], 'linkType': 'Server'}).encode('utf-8')
+    try:
+        for attempt in range(2):
+            request = urllib.request.Request('https://apis.roblox.com/sharelinks/v1/resolve-link',
+                                             data=body, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    payload = json.load(response)
+                break
+            except urllib.error.HTTPError as exc:
+                csrf = exc.headers.get('x-csrf-token') if exc.headers else None
+                if exc.code != 403 or not csrf or attempt:
+                    return None
+                headers['x-csrf-token'] = csrf
+        if not isinstance(payload, dict):
+            return None
+        invite = payload.get('privateServerInviteData', payload)
+        if not isinstance(invite, dict) or invite.get('status') != 'Valid':
+            return None
+        place_id, link_code = str(invite.get('placeId', '')), str(invite.get('linkCode', ''))
+        if not place_id.isdigit() or int(place_id) <= 0 or not re.fullmatch(r'[A-Za-z0-9_-]+', link_code):
+            return None
+        urls = _build_launch_urls(f'https://www.roblox.com/games/{place_id}?privateServerLinkCode={link_code}')
+        _private_share_urls[key] = (time.monotonic() + 900, urls)
+        return urls
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def launch_game(package, game_id, prefer='component'):
     """True: accepted; False: failed; None: dispatch outcome unknown (do not retry now)."""
     with _APP_CONTROL_LOCK:
@@ -576,6 +647,9 @@ def _launch_game_locked(package, game_id, prefer='component'):
     if not urls:
         return False
     url, web_url = urls
+    resolved = _resolve_private_share_urls(package, url)
+    if resolved:
+        url, web_url = resolved
     share_link = url.startswith('roblox://navigation/share_links?')
     if share_link:
         # Android cold starts need UDL metadata. A bare navigation URI may open
