@@ -36,8 +36,8 @@ import copy
 import math
 
 # Script version & timestamp
-BUILD_VERSION = "v6.9.35-REI-REJOIN"
-BUILD_TIME = "2026-10-27 15:05:53 UTC"
+BUILD_VERSION = "v6.9.36-REI-REJOIN"
+BUILD_TIME = "2026-10-28 13:22:41 UTC"
 CACHE_CLEAR_INTERVAL_SECONDS = 5 * 60 * 60
 CLONE_LAUNCH_DELAY_SECONDS = 5
 
@@ -566,7 +566,8 @@ def _launch_game_locked(package, game_id, prefer='component'):
     new one. That is an accepted dispatch, not a reason to send another intent
     immediately. Roblox can still ignore a delivered link; the caller checks
     its log and alternates `prefer` on later rejoin attempts if needed.
-    A cold start works with either form.
+    Share links use Android Unified Deep Linking and package routing, not the
+    bare navigation URI; an accepted dispatch still needs log confirmation.
     """
     package = str(package).strip()
     if not valid_pkg(package):
@@ -575,6 +576,19 @@ def _launch_game_locked(package, game_id, prefer='component'):
     if not urls:
         return False
     url, web_url = urls
+    share_link = url.startswith('roblox://navigation/share_links?')
+    if share_link:
+        # Android cold starts need UDL metadata. A bare navigation URI may open
+        # Home while am start still reports success. Let the selected package
+        # route the official AppsFlyer link instead of forcing its place handler.
+        navigation_url = url
+        udl_query = urllib.parse.urlencode({
+            'pid': 'Server', 'is_retargeting': 'false',
+            'af_dp': navigation_url, 'af_web_dp': web_url,
+            'deep_link_value': navigation_url,
+        })
+        url = f'https://ro.blox.com/Ebh5?{udl_query}'
+        web_url += '&' + urllib.parse.urlencode({'deep_link_value': navigation_url})
 
     # FLAG_ACTIVITY_NEW_TASK only (0x10000000) — never CLEAR_TASK (0x14000000), which
     # terminates the whole activity stack and restarts Roblox instead of navigating.
@@ -583,7 +597,12 @@ def _launch_game_locked(package, game_id, prefer='component'):
     by_package = f"su -c 'am start {view} -p {package} -d \"{url}\"'"
     by_web = f"su -c 'am start {view} -p {package} -d \"{web_url}\"'"
     no_root = f"am start {view} -p {package} -d '{url}'"
-    intents = ([by_package, by_component] if prefer == 'package' else [by_component, by_package]) + [by_web, no_root]
+    if share_link:
+        # Alternate two Android UDL routes only after the monitor confirms Home
+        # or a disconnect. Never fall back to a public Place ID or another clone.
+        intents = ([by_web, by_package] if prefer == 'package' else [by_package, by_web]) + [by_component, no_root]
+    else:
+        intents = ([by_package, by_component] if prefer == 'package' else [by_component, by_package]) + [by_web, no_root]
 
     for cmd in intents:
         res = run_cmd(cmd, timeout=6)
